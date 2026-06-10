@@ -1,0 +1,6 @@
+base_url_env: QMT_GATEWAY_BASE_URL
+api_key_env: QMT_GATEWAY_API_KEY
+hmac_secret_env: QMT_GATEWAY_HMAC_SECRET
+timeout_seconds: 10
+max_retries: 2
+idempotency_required: true

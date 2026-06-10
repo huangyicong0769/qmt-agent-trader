@@ -1,0 +1,6 @@
+lake_root: data/lake
+duckdb_path: data/qmt_agent_trader.duckdb
+raw_layer: raw
+bronze_layer: bronze
+silver_layer: silver
+gold_layer: gold

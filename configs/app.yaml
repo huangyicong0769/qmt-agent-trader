@@ -1,0 +1,5 @@
+app_name: qmt-agent-trader
+timezone: Asia/Shanghai
+data_dir: data
+log_dir: logs
+audit_dir: logs/audit

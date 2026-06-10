@@ -1,0 +1,7 @@
+max_single_position_pct: 0.10
+max_turnover_daily_pct: 0.30
+max_order_value: 100000
+allow_st: false
+allow_suspended: false
+allow_limit_up_buy: false
+allow_limit_down_sell: false

@@ -1,0 +1,11 @@
+frequency: 1d
+signal_timing: close_t
+execution_timing: next_open
+initial_cash: 1000000
+commission_rate: 0.0003
+stamp_tax_rate: 0.0005
+transfer_fee_rate: 0.00001
+min_stock_lot: 100
+max_volume_participation: 0.10
+new_listing_filter_days: 60
+allow_same_close_execution: false
