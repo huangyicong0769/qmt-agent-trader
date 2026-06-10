@@ -11,7 +11,10 @@ import pandas as pd
 from qmt_agent_trader.agent.llm_client import DeepSeekClient, DeepSeekToolLoopResult
 from qmt_agent_trader.agent.permissions import ToolCapability
 from qmt_agent_trader.agent.tool_registry import ToolDefinition, ToolRegistry
-from qmt_agent_trader.agent.tools.backtest_tools import plan_sensitivity_analysis
+from qmt_agent_trader.agent.tools.backtest_tools import (
+    plan_sensitivity_analysis,
+    run_factor_rank_sensitivity,
+)
 from qmt_agent_trader.agent.tools.research_context import get_research_context
 from qmt_agent_trader.backtest.service import (
     compare_backtest_reports,
@@ -252,6 +255,62 @@ def build_default_tool_registry(runtime: AgentRuntime) -> ToolRegistry:
                 }
             ),
             fn=plan_sensitivity_analysis,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="run_factor_rank_sensitivity",
+            capability=ToolCapability.RUN_BACKTEST,
+            description=(
+                "Run a data-lake factor-rank robustness simulation across cost, slippage, "
+                "execution-delay, top_n, and max-position scenarios. This is research-only "
+                "and never creates approvals or order plans."
+            ),
+            parameters=_object_schema(
+                {
+                    "factor_name": {
+                        "type": "string",
+                        "description": "Built-in factor name such as momentum_20d.",
+                    },
+                    "cost_multipliers": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                    "slippage_bps": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                    "execution_delay_days": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                    "top_n": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                    "max_single_position_pct": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                    "initial_cash": {
+                        "type": "number",
+                        "description": "Initial simulation cash.",
+                    },
+                },
+                required=["factor_name"],
+            ),
+            fn=lambda factor_name, cost_multipliers=None, slippage_bps=None,
+            execution_delay_days=None, top_n=None, max_single_position_pct=None,
+            initial_cash=1_000_000.0: run_factor_rank_sensitivity(
+                runtime.lake,
+                factor_name=factor_name,
+                cost_multipliers=cost_multipliers,
+                slippage_bps=slippage_bps,
+                execution_delay_days=execution_delay_days,
+                top_n=top_n,
+                max_single_position_pct=max_single_position_pct,
+                initial_cash=initial_cash,
+            ),
         )
     )
     registry.register(

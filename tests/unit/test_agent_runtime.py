@@ -115,6 +115,57 @@ def test_default_runtime_plans_sensitivity_analysis(tmp_path) -> None:
     ]
 
 
+def test_default_runtime_runs_factor_rank_sensitivity(tmp_path) -> None:
+    runtime = build_default_runtime(
+        Settings(
+            project_root=tmp_path,
+            qmt_gateway_api_key=None,
+            qmt_gateway_hmac_secret=None,
+            deepseek_api_key=None,
+        )
+    )
+    start = date(2024, 1, 1)
+    rows = []
+    for offset in range(24):
+        trade_date = f"{start + timedelta(days=offset):%Y%m%d}"
+        rows.append(
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": trade_date,
+                "open": 10.0 + offset,
+                "high": 11.0 + offset,
+                "low": 9.0 + offset,
+                "close": 10.0 + offset,
+            }
+        )
+        rows.append(
+            {
+                "ts_code": "000002.SZ",
+                "trade_date": trade_date,
+                "open": 20.0 + offset * 0.1,
+                "high": 21.0 + offset * 0.1,
+                "low": 19.0 + offset * 0.1,
+                "close": 20.0 + offset * 0.1,
+            }
+        )
+    runtime.lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily_fixture")
+
+    result = runtime.call_tool(
+        "run_factor_rank_sensitivity",
+        factor_name="momentum_20d",
+        cost_multipliers=[1.0, 2.0],
+        slippage_bps=[0.0],
+        execution_delay_days=[1],
+        top_n=[1],
+        max_single_position_pct=[0.5],
+        initial_cash=100000,
+    )
+
+    assert result["status"] == "completed"
+    assert result["summary"]["scenario_count"] == 2
+    assert result["summary"]["pass_ratio"] == 1.0
+
+
 def test_registry_deepseek_tools_keep_permission_guard() -> None:
     registry = ToolRegistry()
     registry.register(
