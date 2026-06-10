@@ -85,6 +85,36 @@ def test_default_runtime_can_compute_factor_tool(tmp_path) -> None:
     assert result["non_null"] == 1
 
 
+def test_default_runtime_plans_sensitivity_analysis(tmp_path) -> None:
+    runtime = build_default_runtime(
+        Settings(
+            project_root=tmp_path,
+            qmt_gateway_api_key=None,
+            qmt_gateway_hmac_secret=None,
+            deepseek_api_key=None,
+        )
+    )
+
+    result = runtime.call_tool(
+        "plan_sensitivity_analysis",
+        cost_multipliers=[1.0, 2.0],
+        slippage_bps=[0.0],
+        execution_delay_days=[1, 2],
+        top_n=[10],
+        max_single_position_pct=[0.1],
+    )
+
+    assert result["status"] == "planned"
+    assert result["scenario_count"] == 4
+    assert result["runner_contract"]["required_metrics"] == [
+        "total_return",
+        "sharpe",
+        "max_drawdown",
+        "turnover",
+        "diagnostic_pass",
+    ]
+
+
 def test_registry_deepseek_tools_keep_permission_guard() -> None:
     registry = ToolRegistry()
     registry.register(

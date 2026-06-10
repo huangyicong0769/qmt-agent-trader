@@ -11,6 +11,7 @@ import pandas as pd
 from qmt_agent_trader.agent.llm_client import DeepSeekClient, DeepSeekToolLoopResult
 from qmt_agent_trader.agent.permissions import ToolCapability
 from qmt_agent_trader.agent.tool_registry import ToolDefinition, ToolRegistry
+from qmt_agent_trader.agent.tools.backtest_tools import plan_sensitivity_analysis
 from qmt_agent_trader.agent.tools.research_context import get_research_context
 from qmt_agent_trader.backtest.service import (
     compare_backtest_reports,
@@ -210,6 +211,47 @@ def build_default_tool_registry(runtime: AgentRuntime) -> ToolRegistry:
                 {"limit": {"type": "integer", "description": "Maximum number of runs."}}
             ),
             fn=lambda limit=10: compare_backtest_reports(runtime.reports_dir, limit=limit),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="plan_sensitivity_analysis",
+            capability=ToolCapability.RUN_BACKTEST,
+            description=(
+                "Build a robustness scenario matrix for cost, slippage, delay, top_n, "
+                "and position-cap sensitivity. This plans scenarios but does not approve "
+                "or execute live trading."
+            ),
+            parameters=_object_schema(
+                {
+                    "cost_multipliers": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "Optional cost multipliers, e.g. [1, 2, 3].",
+                    },
+                    "slippage_bps": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "Optional slippage assumptions in basis points.",
+                    },
+                    "execution_delay_days": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional execution delay values in trading days.",
+                    },
+                    "top_n": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional Top-N strategy parameter values.",
+                    },
+                    "max_single_position_pct": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "Optional max single position caps.",
+                    },
+                }
+            ),
+            fn=plan_sensitivity_analysis,
         )
     )
     registry.register(
