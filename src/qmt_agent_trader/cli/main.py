@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 from rich import print
 
+from qmt_agent_trader.agent.runtime import build_default_runtime
 from qmt_agent_trader.agent.workflows.factor_discovery import run_factor_discovery
 from qmt_agent_trader.agent.workflows.strategy_discovery import run_strategy_discovery
 from qmt_agent_trader.backtest.service import compare_backtest_reports, run_backtest_report
@@ -212,6 +213,49 @@ def discover_strategies(universe: Annotated[str, typer.Option("--universe")]) ->
     print_json(run_strategy_discovery(universe, settings=_settings()))
 
 
+@agent_app.command("tools")
+def agent_tools() -> None:
+    runtime = build_default_runtime(_settings())
+    print_json({"tools": runtime.registry().list_tools()})
+
+
+@agent_app.command("call-tool")
+def agent_call_tool(
+    name: Annotated[str, typer.Option("--name")],
+    params: Annotated[str, typer.Option("--params")] = "{}",
+) -> None:
+    runtime = build_default_runtime(_settings())
+    payload = _parse_json_params(params)
+    if not isinstance(payload, dict):
+        raise typer.BadParameter("--params must be a JSON object")
+    print_json({"tool": name, "result": runtime.call_tool(name, **payload)})
+
+
+@agent_app.command("ask")
+def agent_ask(
+    prompt: Annotated[str, typer.Option("--prompt")],
+    max_rounds: Annotated[int, typer.Option("--max-rounds")] = 4,
+) -> None:
+    runtime = build_default_runtime(_settings())
+    try:
+        result = runtime.ask(prompt, max_rounds=max_rounds)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print_json(
+        {
+            "content": result.content,
+            "tool_calls": [
+                {
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "result": call.result,
+                }
+                for call in result.tool_calls
+            ],
+        }
+    )
+
+
 @strategy_app.command("list")
 def strategy_list() -> None:
     approval_dir = Path("approvals")
@@ -342,3 +386,10 @@ def _parse_latest_limit(value: str) -> int:
     if value.startswith("latest-"):
         return int(value.removeprefix("latest-"))
     return int(value)
+
+
+def _parse_json_params(value: str) -> object:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"invalid JSON params: {exc}") from exc
