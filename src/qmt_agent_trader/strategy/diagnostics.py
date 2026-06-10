@@ -123,7 +123,12 @@ class StrategyDiagnosticsEvaluator:
         evidence: dict[str, Any],
         config: StrategyDiagnosticConfig,
     ) -> DiagnosticCheck:
-        observed = _float_metric(evidence, "trade_blotter", "count")
+        trade_blotter = _dig(evidence, "trade_blotter", default={})
+        observed = (
+            float(len(trade_blotter))
+            if isinstance(trade_blotter, list)
+            else _float_metric(evidence, "trade_blotter", "count")
+        )
         status = (
             DiagnosticStatus.PASS
             if observed >= config.min_trade_count

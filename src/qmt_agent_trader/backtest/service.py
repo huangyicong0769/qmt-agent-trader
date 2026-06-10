@@ -13,6 +13,7 @@ from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import Side
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 
 
 @dataclass(frozen=True)
@@ -126,7 +127,7 @@ def _choose_signal_date(symbol_bars: pd.DataFrame, signal_date: str | None) -> s
 
 
 def _build_report(summary: BacktestRunSummary, *, config_path: str) -> dict[str, object]:
-    return {
+    report: dict[str, object] = {
         "run_id": summary.run_id,
         "created_at": shanghai_now_iso(),
         "config_snapshot": {"config_path": config_path, "mode": "daily_t_plus_1"},
@@ -147,3 +148,5 @@ def _build_report(summary: BacktestRunSummary, *, config_path: str) -> dict[str,
             for execution_date in summary.execution_dates
         ],
     }
+    report["diagnostic_report"] = StrategyDiagnosticsEvaluator().evaluate(report).as_dict()
+    return report

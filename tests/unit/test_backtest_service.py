@@ -85,3 +85,7 @@ def test_run_backtest_report_persists_report(tmp_path) -> None:
     assert summary.report_path is not None
     assert compared["status"] == "compared"
     assert len(compared["runs"]) == 1
+    report = compared["runs"][0]
+    assert report["diagnostic_report"]["status"] == "WARN"
+    check_names = {check["name"] for check in report["diagnostic_report"]["checks"]}
+    assert {"leakage_valid", "min_observations", "min_trade_count"} <= check_names
