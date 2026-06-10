@@ -1,0 +1,89 @@
+from datetime import date, timedelta
+
+import pandas as pd
+
+from qmt_agent_trader.backtest.research_runner import (
+    FactorRankResearchConfig,
+    FactorRankResearchRunner,
+)
+from qmt_agent_trader.backtest.sensitivity import SensitivityAnalyzer, SensitivityGrid
+
+
+def _bars() -> pd.DataFrame:
+    start = date(2024, 1, 1)
+    rows = []
+    for offset in range(24):
+        trade_date = start + timedelta(days=offset)
+        rows.append(
+            {
+                "symbol": "000001.SZ",
+                "trade_date": trade_date,
+                "open": 10.0 + offset,
+                "high": 10.5 + offset,
+                "low": 9.5 + offset,
+                "close": 10.0 + offset,
+                "volume": 100000,
+                "amount": 1000000,
+            }
+        )
+        rows.append(
+            {
+                "symbol": "000002.SZ",
+                "trade_date": trade_date,
+                "open": 20.0 + offset * 0.1,
+                "high": 20.5 + offset * 0.1,
+                "low": 19.5 + offset * 0.1,
+                "close": 20.0 + offset * 0.1,
+                "volume": 100000,
+                "amount": 1000000,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_factor_rank_research_runner_executes_scenario() -> None:
+    runner = FactorRankResearchRunner(
+        _bars(),
+        FactorRankResearchConfig(
+            factor_name="momentum_20d",
+            top_n=1,
+            max_single_position_pct=0.5,
+            initial_cash=100000,
+        ),
+    )
+
+    result = runner.run(SensitivityGrid().scenarios()[0])
+
+    assert result.trades
+    assert result.metrics.total_return > 0
+    assert result.metrics.turnover > 0
+    assert result.rejected_orders == 0
+
+
+def test_sensitivity_analyzer_can_use_factor_rank_runner() -> None:
+    runner = FactorRankResearchRunner(
+        _bars(),
+        FactorRankResearchConfig(
+            factor_name="momentum_20d",
+            top_n=1,
+            max_single_position_pct=0.5,
+            initial_cash=100000,
+        ),
+    )
+    grid = SensitivityGrid(
+        cost_multipliers=(1.0, 2.0),
+        slippage_bps=(0.0, 10.0),
+        execution_delay_days=(1,),
+        top_n=(1,),
+        max_single_position_pct=(0.5,),
+    )
+
+    report = SensitivityAnalyzer().run(
+        grid.scenarios(),
+        lambda scenario: runner.run(scenario).metrics,
+    )
+
+    assert report.summary.scenario_count == 4
+    assert report.summary.return_degradation >= 0
+    assert report.summary.pass_ratio == 1.0
+
