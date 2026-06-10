@@ -14,6 +14,7 @@ from qmt_agent_trader.agent.tool_registry import ToolDefinition, ToolRegistry
 from qmt_agent_trader.agent.tools.backtest_tools import (
     plan_sensitivity_analysis,
     run_factor_rank_sensitivity,
+    run_factor_rank_sensitivity_report,
 )
 from qmt_agent_trader.agent.tools.research_context import get_research_context
 from qmt_agent_trader.backtest.service import (
@@ -28,6 +29,7 @@ from qmt_agent_trader.factors.service import (
     compute_factor_to_lake,
     validate_factor,
 )
+from qmt_agent_trader.services.research_report_service import compare_research_reports
 from qmt_agent_trader.strategy.approval import read_approval_file
 
 
@@ -36,6 +38,7 @@ class AgentRuntime:
     settings: Settings
     lake: DataLake
     reports_dir: Path
+    research_reports_dir: Path
     approvals_dir: Path
     broker_client: RemoteQMTBrokerClient | None = None
 
@@ -85,6 +88,7 @@ def build_default_runtime(
         settings=resolved,
         lake=lake,
         reports_dir=resolved.project_root / "reports" / "backtests",
+        research_reports_dir=resolved.project_root / "reports" / "research",
         approvals_dir=resolved.project_root / "approvals",
         broker_client=broker_client or _optional_broker_client(resolved),
     )
@@ -310,6 +314,90 @@ def build_default_tool_registry(runtime: AgentRuntime) -> ToolRegistry:
                 top_n=top_n,
                 max_single_position_pct=max_single_position_pct,
                 initial_cash=initial_cash,
+            ),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="run_factor_rank_sensitivity_report",
+            capability=ToolCapability.WRITE_RESEARCH,
+            description=(
+                "Run factor-rank robustness analysis and persist an immutable research "
+                "evidence package under reports/research. The artifact is research-only, "
+                "not an approval and not an order plan."
+            ),
+            parameters=_object_schema(
+                {
+                    "factor_name": {
+                        "type": "string",
+                        "description": "Built-in factor name such as momentum_20d.",
+                    },
+                    "cost_multipliers": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                    "slippage_bps": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                    "execution_delay_days": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                    "top_n": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                    "max_single_position_pct": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                    "initial_cash": {
+                        "type": "number",
+                        "description": "Initial simulation cash.",
+                    },
+                    "agent_notes": {
+                        "type": "string",
+                        "description": "Optional concise agent interpretation of the result.",
+                    },
+                    "infrastructure_requests": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional missing validation infrastructure requested by the agent."
+                        ),
+                    },
+                },
+                required=["factor_name"],
+            ),
+            fn=lambda factor_name, cost_multipliers=None, slippage_bps=None,
+            execution_delay_days=None, top_n=None, max_single_position_pct=None,
+            initial_cash=1_000_000.0, agent_notes=None,
+            infrastructure_requests=None: run_factor_rank_sensitivity_report(
+                runtime.lake,
+                runtime.research_reports_dir,
+                factor_name=factor_name,
+                cost_multipliers=cost_multipliers,
+                slippage_bps=slippage_bps,
+                execution_delay_days=execution_delay_days,
+                top_n=top_n,
+                max_single_position_pct=max_single_position_pct,
+                initial_cash=initial_cash,
+                agent_notes=agent_notes,
+                infrastructure_requests=infrastructure_requests,
+            ),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="compare_research_reports",
+            capability=ToolCapability.READ_DATA,
+            description="Compare recent persisted research evidence packages.",
+            parameters=_object_schema(
+                {"limit": {"type": "integer", "description": "Maximum number of reports."}}
+            ),
+            fn=lambda limit=10: compare_research_reports(
+                runtime.research_reports_dir, limit=limit
             ),
         )
     )
