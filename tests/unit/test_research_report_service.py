@@ -2,6 +2,7 @@ import json
 
 from qmt_agent_trader.services.research_report_service import (
     compare_research_reports,
+    evaluate_research_gate,
     save_research_report,
 )
 
@@ -32,6 +33,7 @@ def test_save_research_report_marks_artifact_as_research_only(tmp_path) -> None:
     assert record["live_trading_allowed"] is False
     assert record["decision_boundary"]["can_approve_strategy"] is False
     assert record["summary"]["scenario_count"] == 2
+    assert record["review_gate"]["status"] == "INSUFFICIENT_EVIDENCE"
 
 
 def test_compare_research_reports_returns_compact_summaries(tmp_path) -> None:
@@ -49,4 +51,55 @@ def test_compare_research_reports_returns_compact_summaries(tmp_path) -> None:
     assert compared["status"] == "compared"
     assert len(compared["runs"]) == 1
     assert compared["runs"][0]["approval_status"] == "NOT_REQUESTED"
+    assert compared["runs"][0]["review_gate"]["status"] == "FAILED"
     assert compared["infrastructure_requests"] == ["add borrow/liquidity diagnostics"]
+
+
+def test_evaluate_research_gate_passes_complete_sensitivity_evidence() -> None:
+    gate = evaluate_research_gate(
+        "factor_rank_sensitivity",
+        {
+            "summary": {"scenario_count": 4, "pass_ratio": 1.0},
+            "runs": [
+                {
+                    "scenario": {
+                        "cost_multiplier": 1.0,
+                        "slippage_bps": 0.0,
+                        "execution_delay_days": 1,
+                        "top_n": 1,
+                        "max_single_position_pct": 0.5,
+                    }
+                },
+                {
+                    "scenario": {
+                        "cost_multiplier": 2.0,
+                        "slippage_bps": 0.0,
+                        "execution_delay_days": 1,
+                        "top_n": 1,
+                        "max_single_position_pct": 0.5,
+                    }
+                },
+                {
+                    "scenario": {
+                        "cost_multiplier": 1.0,
+                        "slippage_bps": 5.0,
+                        "execution_delay_days": 2,
+                        "top_n": 2,
+                        "max_single_position_pct": 0.5,
+                    }
+                },
+                {
+                    "scenario": {
+                        "cost_multiplier": 2.0,
+                        "slippage_bps": 5.0,
+                        "execution_delay_days": 2,
+                        "top_n": 2,
+                        "max_single_position_pct": 0.5,
+                    }
+                },
+            ],
+        },
+    )
+
+    assert gate["status"] == "PASSED"
+    assert gate["required_before_review"] == []
