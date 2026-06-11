@@ -28,6 +28,7 @@ from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.service import (
     compute_factor_to_lake,
     validate_factor,
+    walk_forward_factor_validation,
 )
 from qmt_agent_trader.services.research_report_service import compare_research_reports
 from qmt_agent_trader.strategy.approval import read_approval_file
@@ -186,6 +187,47 @@ def build_default_tool_registry(runtime: AgentRuntime) -> ToolRegistry:
             fn=lambda name, start, end: validate_factor(
                 runtime.lake, name=name, start=start, end=end
             ).as_dict(),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="walk_forward_factor_validation",
+            capability=ToolCapability.RUN_BACKTEST,
+            description=(
+                "Validate a built-in factor across rolling walk-forward windows using "
+                "daily IC and long-short spread. Research-only."
+            ),
+            parameters=_object_schema(
+                {
+                    "name": {"type": "string", "description": "Factor name."},
+                    "start": {"type": "string", "description": "Start date."},
+                    "end": {"type": "string", "description": "End date."},
+                    "window_days": {
+                        "type": "integer",
+                        "description": "Trading-day window length.",
+                    },
+                    "step_days": {
+                        "type": "integer",
+                        "description": "Trading-day step between windows.",
+                    },
+                    "quantile": {
+                        "type": "number",
+                        "description": "Top/bottom quantile for long-short spread.",
+                    },
+                },
+                required=["name", "start", "end"],
+            ),
+            fn=lambda name, start, end, window_days=63, step_days=63, quantile=0.20: (
+                walk_forward_factor_validation(
+                    runtime.lake,
+                    name=name,
+                    start=start,
+                    end=end,
+                    window_days=window_days,
+                    step_days=step_days,
+                    quantile=quantile,
+                ).as_dict()
+            ),
         )
     )
     registry.register(
