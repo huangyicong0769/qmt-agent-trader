@@ -1,8 +1,8 @@
 """Chat page — Codex-style sidebar session list + chat area.
 
-Left panel: session list with highlighted active row, + button.
-Right panel: active session's transcript + input row.
-Sessions use pre-allocated containers (max 20) for NiceGUI compatibility.
+Left panel: session list with highlighted active row.
+Right panel: active session's transcript + input.
+Session containers use simple visibility toggle.
 """
 
 from __future__ import annotations
@@ -25,14 +25,12 @@ SUGGESTED_PROMPTS = [
     "解释一下上一个回测为什么收益高但回撤也大。",
 ]
 
-MAX_SESSIONS = 20
 
-
-# ── Session store (reactive, page-level) ──
+# ── Session model ──
 
 
 class _ChatSession:
-    """One conversation session."""
+    """One conversation session with its own transcript and orchestrator."""
     __slots__ = ("container", "name", "orchestrator", "preview", "sid", "transcript")
     _counter = 0
 
@@ -132,9 +130,7 @@ async def _send(
 
             elif et == "token":
                 if assistant_card is None or need_new_card:
-                    assistant_card = ui.card().classes(
-                        "w-full bg-blue-50 border p-3"
-                    )
+                    assistant_card = ui.card().classes("w-full bg-blue-50 border p-3")
                     with assistant_card:
                         ui.markdown("**🤖 Assistant**").classes(
                             "text-sm font-semibold text-blue-800"
@@ -193,9 +189,7 @@ async def _send(
             elif et == "error":
                 progress_card.visible = False
                 plan_card.visible = False
-                c2 = ui.card().classes(
-                    "w-full bg-red-50 border border-red-300 p-3"
-                )
+                c2 = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
                 with c2:
                     ui.icon("error", color="red").classes("inline")
                     ui.markdown(f"**❌ Error**  \n{em}")
@@ -218,45 +212,37 @@ def register() -> None:
     def chat_page() -> None:
         shell("Chat")
 
-        # ── Session state
-        _refresh_ref: list[Any] = [lambda: None]  # set after sidebar_list
         sessions: dict[str, _ChatSession] = {}
         active_sid: str = ""
-        slot_containers: list[ui.column] = []  # pre-allocated
-
-        # ═══ Create a session ═══
-        def create_session(name: str = "", focus: bool = True) -> _ChatSession:
-            if len(sessions) >= MAX_SESSIONS:
-                ui.notify(f"Max {MAX_SESSIONS} sessions.", type="warning")
-                raise RuntimeError("too many sessions")
-            s = _ChatSession(name=name)
-            sessions[s.sid] = s
-            # Move transcript into its container
-            s.transcript.move(s.container)
-            # Assign a pre-allocated slot
-            if slot_containers:
-                slot = slot_containers.pop(0)
-                s.container.move(slot)
-            else:
-                # Shouldn't happen with pre-allocation
-                s.container.move(chat_stack)
-            _refresh_ref[0]()
-            if focus:
-                activate_session(s.sid)
-            return s
+        _refresh_fn: list[Any] = [lambda: None]
 
         def activate_session(sid: str) -> None:
             nonlocal active_sid
             if active_sid == sid:
                 return
-            # Hide current
+            # Hide old
             if active_sid and active_sid in sessions:
-                sessions[active_sid].container.set_visibility(False)
+                sessions[active_sid].container.visible = False
             # Show new
             if sid in sessions:
-                sessions[sid].container.set_visibility(True)
+                sessions[sid].container.visible = True
                 active_sid = sid
-            _refresh_ref[0]()
+            # Clear shared plan/progress
+            plan_card.visible = False
+            progress_card.visible = False
+            _refresh_fn[0]()
+
+        def create_session(name: str = "", focus: bool = True) -> _ChatSession:
+            s = _ChatSession(name=name)
+            sessions[s.sid] = s
+            # Move transcript into its container, container into chat_stack
+            s.transcript.move(s.container)
+            s.container.move(chat_stack)
+            s.container.visible = False
+            _refresh_fn[0]()
+            if focus:
+                activate_session(s.sid)
+            return s
 
         def close_session(sid: str) -> None:
             nonlocal active_sid
@@ -266,18 +252,27 @@ def register() -> None:
             s = sessions.pop(sid, None)
             if s is not None:
                 s.container.clear()
-                s.container.set_visibility(False)
-                slot_containers.append(s.container)
-            if active_sid == sid and sessions:
-                activate_session(next(iter(sessions)))
+                s.container.delete()
+            if active_sid == sid:
+                # Activate first remaining session
+                first = next(iter(sessions))
+                _refresh_fn[0]()
+                activate_session(first)
+            else:
+                _refresh_fn[0]()
 
         async def send_handler() -> None:
             nonlocal active_sid
             if not active_sid or active_sid not in sessions:
                 ui.notify("No active session.", type="warning")
                 return
-            s = sessions[active_sid]
-            await _send(s, message, plan_card, progress_card, _refresh_ref[0])
+            await _send(
+                sessions[active_sid],
+                message,
+                plan_card,
+                progress_card,
+                _refresh_fn[0],
+            )
 
         # ═══ Layout ═══
         with ui.row().classes("w-full gap-0 flex-1").style("min-height: 0"):
@@ -295,12 +290,14 @@ def register() -> None:
                         icon="add", on_click=lambda: create_session(),
                     ).props("flat round size=sm dense")
 
-                # Refreshable session list
                 @ui.refreshable
                 def sidebar_list() -> None:
                     for sid, s in sessions.items():
                         is_active = sid == active_sid
-                        bg = "bg-blue-50 border-l-[3px] border-l-blue-500" if is_active else ""
+                        bg = (
+                            "bg-blue-50 border-l-[3px] border-l-blue-500"
+                            if is_active else ""
+                        )
                         row = ui.row().classes(
                             f"w-full items-center gap-2 px-3 py-2.5 cursor-pointer "
                             f"hover:bg-gray-100 transition-colors {bg}"
@@ -310,13 +307,16 @@ def register() -> None:
                                 "text-blue-500" if is_active else "text-gray-400"
                             )
                             with ui.column().classes("gap-0 flex-1 min-w-0"):
+                                name_cls = (
+                                    "font-semibold text-blue-700"
+                                    if is_active else ""
+                                )
                                 ui.label(s.name).classes(
-                                    f"text-xs truncate "
-                                    f"{'font-semibold text-blue-700' if is_active else ''}"
+                                    f"text-xs truncate {name_cls}"
                                 )
-                                ui.label(s.preview or "还没有对话").classes(
-                                    "text-[11px] text-gray-400 truncate"
-                                )
+                                ui.label(
+                                    s.preview or "还没有对话"
+                                ).classes("text-[11px] text-gray-400 truncate")
                             if len(sessions) > 1:
                                 ui.button(
                                     icon="close",
@@ -327,10 +327,12 @@ def register() -> None:
                         row.on("click", lambda sid=sid: activate_session(sid))
 
                 sidebar_list()
-                _refresh_ref[0] = sidebar_list.refresh
+                _refresh_fn[0] = sidebar_list.refresh
 
                 # Footer
-                with ui.row().classes("items-center gap-1 p-3 text-[11px] text-gray-400"):
+                with ui.row().classes(
+                    "items-center gap-1 p-3 text-[11px] text-gray-400"
+                ):
                     st = get_settings()
                     if st.deepseek_api_key:
                         ui.icon("check_circle", size="xs", color="green")
@@ -340,17 +342,15 @@ def register() -> None:
                         ui.label("No LLM")
 
             # ── RIGHT: chat area ──
-            with ui.column().classes("flex-1 flex flex-col gap-0").style("min-width: 0"):
-                # Stack of pre-allocated session containers
-                chat_stack = ui.column().classes("w-full flex-1 overflow-auto relative")
-                # Pre-allocate slots
-                for _ in range(MAX_SESSIONS):
-                    slot = ui.column().classes("w-full h-full absolute inset-0")
-                    slot.set_visibility(False)
-                    slot.move(chat_stack)
-                    slot_containers.append(slot)
+            with ui.column().classes("flex-1 flex flex-col gap-0").style(
+                "min-width: 0"
+            ):
+                # Stack of session containers
+                chat_stack = ui.column().classes(
+                    "w-full flex-1 overflow-auto relative"
+                )
 
-                # Plan + progress (shared)
+                # Shared plan + progress
                 plan_card = ui.card().classes("w-full bg-blue-50 p-3 mx-4 mt-2")
                 plan_card.visible = False
 
@@ -378,8 +378,12 @@ def register() -> None:
                             value="auto", label="Universe",
                         ).classes("w-40")
                         with ui.row().classes("gap-2"):
-                            ui.input("Start", value="").classes("w-32").props("placeholder=auto")
-                            ui.input("End", value="").classes("w-32").props("placeholder=auto")
+                            ui.input("Start", value="").classes("w-32").props(
+                                "placeholder=auto"
+                            )
+                            ui.input("End", value="").classes("w-32").props(
+                                "placeholder=auto"
+                            )
                         ui.select(
                             ["balanced", "fast", "thorough"],
                             value="balanced", label="Budget",
@@ -390,7 +394,10 @@ def register() -> None:
                 ).classes("w-full px-4"):
                     with ui.row().classes("flex-wrap gap-2"):
                         for p in SUGGESTED_PROMPTS:
-                            ui.chip(p, on_click=lambda _, text=p: _fill_prompt(message, text))
+                            ui.chip(
+                                p,
+                                on_click=lambda _, text=p: _fill_prompt(message, text),
+                            )
 
         # ── Initial session ──
         create_session(focus=True)
