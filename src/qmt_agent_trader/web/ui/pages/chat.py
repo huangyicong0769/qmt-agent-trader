@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import json
-
 from nicegui import ui
 
+from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
+from qmt_agent_trader.agent.router import agent_router
+from qmt_agent_trader.core.config import get_settings
+from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.web.ui.layout import shell
 
 SUGGESTED_PROMPTS = [
@@ -15,6 +17,15 @@ SUGGESTED_PROMPTS = [
     "看看最近失败的实验，判断是不是缺少某个工具。",
     "解释一下上一个回测为什么收益高但回撤也大。",
 ]
+
+_orchestrator: AgentOrchestrator | None = None
+
+
+def _get_orchestrator() -> AgentOrchestrator:
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = AgentOrchestrator(settings=get_settings())
+    return _orchestrator
 
 
 def register() -> None:
@@ -28,20 +39,16 @@ def register() -> None:
         ).classes("text-sm text-gray-500 mb-4")
 
         with ui.column().classes("w-full gap-4"):
-            # ── Transcript (markdown area for agent output) ──
             transcript = ui.markdown(
                 "**🤖 Assistant:** Ready for research. Type your question and press Send."
             ).classes("min-h-[300px] p-4 border rounded-lg bg-gray-50")
 
-            # ── Agent Plan card ──
             plan_card = ui.card().classes("w-full bg-blue-50 p-4")
             plan_card.visible = False
 
-            # ── Live tool-call progress card ──
             progress_card = ui.card().classes("w-full bg-green-50 p-4")
             progress_card.visible = False
 
-            # ── Composer ──
             with ui.row().classes("w-full items-end gap-2"):
                 message = (
                     ui.textarea("Type your research question...")
@@ -54,7 +61,6 @@ def register() -> None:
                         on_click=lambda: _send(transcript, message, plan_card, progress_card),
                     ).props("color=primary")
 
-            # ── Advanced settings ──
             with ui.expansion("Advanced", icon="tune").classes("w-full"):
                 with ui.row().classes("gap-4"):
                     ui.select(
@@ -71,10 +77,19 @@ def register() -> None:
                         label="Budget",
                     ).classes("w-36")
 
-        # ── Suggested prompts ──
         with ui.expansion("Suggested prompts", icon="lightbulb").classes("w-full mt-4"):
             for p in SUGGESTED_PROMPTS:
                 ui.chip(p, on_click=lambda _, text=p: _fill_prompt(message, text))
+
+        # ── LLM status bar ──
+        with ui.row().classes("items-center gap-2 mt-2 text-xs text-gray-400"):
+            orch = _get_orchestrator()
+            if orch.settings.deepseek_api_key:
+                ui.icon("check_circle", size="xs", color="green")
+                ui.label(f"DeepSeek connected ({orch.settings.deepseek_model})")
+            else:
+                ui.icon("warning", size="xs", color="orange")
+                ui.label("DeepSeek not configured — stub mode only")
 
 
 def _fill_prompt(message_input: ui.textarea, text: str) -> None:
@@ -92,33 +107,45 @@ async def _send(
         ui.notify("Enter a message first.", type="warning")
         return
 
-    # Clear previous state
+    # Clear state
     message_input.value = ""
-    transcript_lines = [f"**🧑 You:** {content}", ""]
+    lines: list[str] = [f"**🧑 You:** {content}", ""]
     plan_card.visible = False
     progress_card.visible = False
 
-    # ── Step 1: Get routing ──
-    try:
-        import httpx
+    # ── Step 1: Route intent ──
+    decision = agent_router.route(content)
+    intent = decision.intent.value
+    confidence = decision.confidence
 
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                "http://127.0.0.1:7860/api/chat/sessions",
-                json={"title": content[:60]},
-                timeout=5,
-            )
-            r.raise_for_status()
-            session = r.json()
-            sid = session["session_id"]
-    except Exception as exc:
-        transcript_lines.append("**⚠️ Could not reach Agent Studio server.**")
-        transcript_lines.append(f"Error: {exc}")
-        transcript_lines.append("Make sure `qmt-agent web` is running on port 7860.")
-        transcript.set_content("\n".join(transcript_lines))
-        return
+    plan_html = (
+        f"### 🤖 Agent Plan\n\n"
+        f"| | |\n|---|---|\n"
+        f"| **Intent** | `{intent}` |\n"
+        f"| **Confidence** | {confidence:.0%} |\n"
+    )
+    if decision.proposed_workflow:
+        plan_html += f"| **Workflow** | `{decision.proposed_workflow}` |\n"
+    plan_html += f"\n**Rationale:** {decision.rationale}"
+    if decision.required_tools:
+        plan_html += (
+            f"\n\n**Tools:** {', '.join(decision.required_tools[:8])}"
+            f"{'…' if len(decision.required_tools) > 8 else ''}"
+        )
 
-    # ── Step 2: Run real SSE orchestration ──
+    plan_card.clear()
+    with plan_card:
+        ui.markdown(plan_html)
+    plan_card.visible = True
+
+    lines.append(f"**🔍 Intent:** `{intent}` ({confidence:.0%})")
+    lines.append(f"_{decision.rationale}_")
+    transcript.set_content("\n".join(lines))
+
+    # ── Step 2: Run orchestration ──
+    orchestrator = _get_orchestrator()
+    run_id = new_id("run")
+
     progress_card.clear()
     with progress_card:
         ui.spinner(size="sm")
@@ -126,110 +153,52 @@ async def _send(
     progress_card.visible = True
 
     try:
-        import httpx
+        async for event in orchestrator.execute_stream(
+            message=content,
+            routing=decision,
+            run_id=run_id,
+        ):
+            etype = event.type
+            emsg = event.message
+            edata = event.data
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
-            async with client.stream(
-                "POST",
-                f"http://127.0.0.1:7860/api/chat/sessions/{sid}/execute",
-                json={"message": content},
-            ) as response:
-                if response.status_code != 200:
-                    transcript_lines.append(
-                        f"**❌ Server error (HTTP {response.status_code}).**"
-                    )
-                    transcript.set_content("\n".join(transcript_lines))
-                    progress_card.visible = False
-                    return
+            if etype == "run_started":
+                exp_id = edata.get("experiment_id", "?")
+                lines.append(f"**🚀 Started** — experiment `{exp_id}`")
 
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
+            elif etype == "progress":
+                if emsg:
+                    lines.append(f"**🔄** {emsg}")
+                    progress_card.clear()
+                    with progress_card:
+                        ui.spinner(size="sm")
+                        ui.label(emsg).classes("text-sm")
 
-                    # SSE format: "event: <type>" or "data: <json>"
-                    if line.startswith("event: "):
-                        continue  # handled via data payload
-                    if not line.startswith("data: "):
-                        continue
+            elif etype == "tool_done":
+                tool_name = edata.get("tool_name", "")
+                idx = edata.get("index", 0)
+                total = edata.get("total", 0)
+                lines.append(f"**🔧 [{idx}/{total}]** `{tool_name}`")
 
-                    data_str = line[len("data: "):]
-                    try:
-                        event = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
+            elif etype == "llm_message":
+                lines.append("")
+                lines.append("**🤖 Assistant:**")
+                lines.append(emsg)
 
-                    etype = event.get("type", "")
-                    emsg = event.get("message", "")
+            elif etype == "done":
+                progress_card.visible = False
+                plan_card.visible = False
+                tool_count = edata.get("tool_calls_count", 0)
+                lines.append("")
+                lines.append(f"**✅ Done** — {tool_count} tool call(s) completed.")
 
-                    if etype == "routing":
-                        # Show agent plan
-                        intent = event.get("intent", "?")
-                        conf = event.get("confidence", 0)
-                        plan_card.clear()
-                        with plan_card:
-                            ui.markdown(
-                                f"### 🤖 Agent Plan\n\n"
-                                f"| | |\n|---|---|\n"
-                                f"| **Intent** | `{intent}` |\n"
-                                f"| **Confidence** | {conf:.0%} |\n"
-                            )
-                        plan_card.visible = True
+            elif etype == "error":
+                progress_card.visible = False
+                lines.append(f"**❌ Error:** {emsg}")
 
-                    elif etype == "run_started":
-                        transcript_lines.append(
-                            f"**🚀 Running** — `{event.get('data', {}).get('experiment_id', '?')}`"
-                        )
-                        progress_card.clear()
-                        with progress_card:
-                            ui.spinner(size="sm")
-                            ui.label(emsg).classes("text-sm")
-                        progress_card.visible = True
+            transcript.set_content("\n".join(lines))
 
-                    elif etype in ("progress", "tool_done"):
-                        tool_name = event.get("data", {}).get("tool_name", "")
-                        idx = event.get("data", {}).get("index", 0)
-                        total = event.get("data", {}).get("total", 0)
-                        if tool_name:
-                            line = f"**🔧 [{idx}/{total}]** `{tool_name}`"
-                        else:
-                            line = f"**🔄** {emsg}"
-                        transcript_lines.append(line)
-                        if emsg:
-                            progress_card.clear()
-                            with progress_card:
-                                ui.spinner(size="sm")
-                                ui.label(emsg).classes("text-sm")
-                            progress_card.visible = True
-
-                    elif etype == "llm_message":
-                        transcript_lines.append("")
-                        transcript_lines.append("**🤖 Assistant:**")
-                        transcript_lines.append(emsg)
-
-                    elif etype == "done":
-                        progress_card.visible = False
-                        plan_card.visible = False
-                        tool_count = event.get("data", {}).get("tool_calls_count", 0)
-                        transcript_lines.append("")
-                        transcript_lines.append(
-                            f"**✅ Done** — {tool_count} tool call(s) completed."
-                        )
-
-                    elif etype == "error":
-                        progress_card.visible = False
-                        transcript_lines.append(f"**❌ Error:** {emsg}")
-
-                    # Update display
-                    transcript.set_content("\n".join(transcript_lines))
-
-    except httpx.ConnectError:
-        transcript_lines.append(
-            "**⚠️ Cannot connect to Agent Studio SSE endpoint.**\n"
-            "Make sure `qmt-agent web` is running."
-        )
-        progress_card.visible = False
-        transcript.set_content("\n".join(transcript_lines))
     except Exception as exc:
-        transcript_lines.append(f"**❌ SSE error:** {exc}")
         progress_card.visible = False
-        transcript.set_content("\n".join(transcript_lines))
+        lines.append(f"**❌ Orchestration failed:** {exc}")
+        transcript.set_content("\n".join(lines))
