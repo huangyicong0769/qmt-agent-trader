@@ -186,92 +186,134 @@ class AgentOrchestrator:
         )
 
         # ── Run the tool loop in a thread to avoid blocking the event loop ──
-        loop_result: dict[str, Any] = {}
+        import asyncio as _asyncio
+        import concurrent.futures as _futures
 
-        def _run_tool_loop() -> None:
-            result = client.run_tool_loop(
-                messages=messages,
-                tools=tools,
-                max_rounds=max_rounds,
-            )
-            loop_result["content"] = result.content
-            loop_result["tool_calls"] = [
-                {
-                    "name": tc.name,
-                    "arguments": tc.arguments,
-                    "result": _safe_result(tc.result),
-                }
-                for tc in result.tool_calls
-            ]
-            loop_result["messages"] = result.messages
+        stream_buffer: list[Any] = []
+        stream_error_msg: str | None = None
 
-        # Run the synchronous tool loop in a thread
-        # For each tool call, we'd ideally intercept — but DeepSeekClient is synchronous.
-        # We run the whole loop and then report results.
-        try:
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_run_tool_loop)
-                # Yield progress while waiting
+        def _run_stream() -> None:
+            nonlocal stream_error_msg
+            try:
+                for evt in client.run_tool_loop_stream(
+                    messages=messages, tools=tools, max_rounds=max_rounds
+                ):
+                    stream_buffer.append(evt)
+            except Exception as exc:
+                stream_error_msg = str(exc)
+
+        with _futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run_stream)
+            yielded = 0
+
+            while not future.done() or yielded < len(stream_buffer):
+                while yielded < len(stream_buffer):
+                    evt = stream_buffer[yielded]
+                    yielded += 1
+                    for oe in _stream_to_events(evt, rid, experiment_id):
+                        yield oe
+                if future.done():
+                    break
+                await _asyncio.sleep(0.05)
+
+            if stream_error_msg:
                 yield OrchestratorEvent(
-                    type="progress",
+                    type="error",
                     run_id=rid,
-                    message="LLM is reasoning and calling tools...",
-                    data={},
+                    message=f"LLM streaming error: {stream_error_msg}",
+                    data={"error": stream_error_msg},
                 )
-                future.result(timeout=300)  # 5-minute timeout
-        except concurrent.futures.TimeoutError:
-            yield OrchestratorEvent(
-                type="error",
-                run_id=rid,
-                message="LLM tool loop timed out after 300 seconds.",
-                data={"error": "timeout"},
-            )
-            return
-        except Exception as exc:
-            yield OrchestratorEvent(
-                type="error",
-                run_id=rid,
-                message=f"LLM execution error: {exc}",
-                data={"error": str(exc)},
-            )
-            return
+                return
 
-        # ── Emit tool call results ──
-        for i, tc in enumerate(loop_result.get("tool_calls", [])):
-            yield OrchestratorEvent(
-                type="tool_done",
-                run_id=rid,
-                message=f"Tool called: {tc['name']}",
-                data={
-                    "tool_name": tc["name"],
-                    "arguments": tc["arguments"],
-                    "result_preview": _preview(tc["result"]),
-                    "index": i + 1,
-                    "total": len(loop_result["tool_calls"]),
-                },
-            )
-
-        # ── Emit final LLM response ──
-        content = loop_result.get("content", "")
-        yield OrchestratorEvent(
-            type="llm_message",
-            run_id=rid,
-            message=content,
-            data={"experiment_id": experiment_id},
+        # ── Count tool calls ──
+        tcount = sum(
+            1 for e in stream_buffer if e.__class__.__name__ == "ToolResult"
         )
-
-        # ── Done ──
         yield OrchestratorEvent(
             type="done",
             run_id=rid,
             message="Run completed successfully.",
             data={
                 "experiment_id": experiment_id,
-                "tool_calls_count": len(loop_result.get("tool_calls", [])),
+                "tool_calls_count": tcount,
                 "intent": routing.intent.value if routing else "GENERAL_RESEARCH",
             },
         )
+
+
+# ── Stream event converter ──
+
+
+def _stream_to_events(
+    evt: Any, run_id: str, experiment_id: str
+) -> list[OrchestratorEvent]:
+    """Convert a StreamEvent to one or more OrchestratorEvents."""
+    cls_name = evt.__class__.__name__
+
+    if cls_name == "TextDelta":
+        return [
+            OrchestratorEvent(
+                type="token",
+                run_id=run_id,
+                message=evt.content,
+                data={"token": evt.content, "experiment_id": experiment_id},
+            )
+        ]
+
+    if cls_name == "ToolCallStart":
+        return [
+            OrchestratorEvent(
+                type="tool_start",
+                run_id=run_id,
+                message=f"Calling: {evt.tool_name}",
+                data={
+                    "tool_name": evt.tool_name,
+                    "tool_call_id": evt.tool_call_id,
+                    "experiment_id": experiment_id,
+                },
+            )
+        ]
+
+    if cls_name == "ToolCallComplete":
+        return [
+            OrchestratorEvent(
+                type="tool_args",
+                run_id=run_id,
+                message=f"Args ready: {evt.tool_name}",
+                data={
+                    "tool_name": evt.tool_name,
+                    "arguments": evt.arguments,
+                    "experiment_id": experiment_id,
+                },
+            )
+        ]
+
+    if cls_name == "ToolResult":
+        preview = _preview(evt.result)
+        return [
+            OrchestratorEvent(
+                type="tool_done",
+                run_id=run_id,
+                message=f"Tool: {evt.tool_name} ✓",
+                data={
+                    "tool_name": evt.tool_name,
+                    "result_preview": preview,
+                    "experiment_id": experiment_id,
+                },
+            )
+        ]
+
+    if cls_name == "LoopError":
+        return [
+            OrchestratorEvent(
+                type="error",
+                run_id=run_id,
+                message=evt.message,
+                data={"error": evt.message},
+            )
+        ]
+
+    return []
 
 
 # ── Tool registry builder (forked from AgentRuntime for v1 compatibility) ──

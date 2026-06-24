@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from nicegui import ui
 
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
@@ -153,6 +155,7 @@ async def _send(
     progress_card.visible = True
 
     try:
+        assistant_started = False
         async for event in orchestrator.execute_stream(
             message=content,
             routing=decision,
@@ -169,26 +172,42 @@ async def _send(
             elif etype == "progress":
                 if emsg:
                     lines.append(f"**🔄** {emsg}")
-                    progress_card.clear()
-                    with progress_card:
-                        ui.spinner(size="sm")
-                        ui.label(emsg).classes("text-sm")
+
+            # ── Streaming token ──
+            elif etype == "token":
+                if not assistant_started:
+                    lines.append("")
+                    lines.append("**🤖 Assistant:** ")
+                    assistant_started = True
+                lines[-1] += emsg  # append token to last line
+
+            # ── Tool events ──
+            elif etype == "tool_start":
+                tool_name = edata.get("tool_name", "")
+                lines.append(f"**🔧 Calling:** `{tool_name}`")
+                progress_card.clear()
+                with progress_card:
+                    ui.spinner(size="sm")
+                    ui.label(f"Executing: {tool_name}").classes("text-sm")
+                progress_card.visible = True
+
+            elif etype == "tool_args":
+                tool_name = edata.get("tool_name", "")
+                args = edata.get("arguments", {})
+                lines.append(f"  with args: `{_fmt_args(args)}`")
 
             elif etype == "tool_done":
                 tool_name = edata.get("tool_name", "")
-                idx = edata.get("index", 0)
-                total = edata.get("total", 0)
-                lines.append(f"**🔧 [{idx}/{total}]** `{tool_name}`")
-
-            elif etype == "llm_message":
-                lines.append("")
-                lines.append("**🤖 Assistant:**")
-                lines.append(emsg)
+                preview = edata.get("result_preview", "")
+                lines.append(f"  ✓ result: `{preview}`")
+                progress_card.visible = False
 
             elif etype == "done":
                 progress_card.visible = False
                 plan_card.visible = False
                 tool_count = edata.get("tool_calls_count", 0)
+                if not assistant_started:
+                    lines.append("")
                 lines.append("")
                 lines.append(f"**✅ Done** — {tool_count} tool call(s) completed.")
 
@@ -202,3 +221,10 @@ async def _send(
         progress_card.visible = False
         lines.append(f"**❌ Orchestration failed:** {exc}")
         transcript.set_content("\n".join(lines))
+
+
+def _fmt_args(args: dict[str, Any], max_len: int = 80) -> str:
+    """Format tool arguments for display."""
+    import json
+    s = json.dumps(args, ensure_ascii=False, default=str)
+    return s[:max_len] + ("..." if len(s) > max_len else "")

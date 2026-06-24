@@ -268,8 +268,9 @@ def _to_agent_event_type(event_type: str) -> AgentEventType:
         "run_started": AgentEventType.RUN_STARTED,
         "done": AgentEventType.RUN_COMPLETED,
         "error": AgentEventType.RUN_FAILED,
-        "llm_message": AgentEventType.LLM_MESSAGE,
+        "token": AgentEventType.LLM_TOKEN_DELTA,
         "tool_done": AgentEventType.TOOL_CALL_COMPLETED,
+        "tool_start": AgentEventType.TOOL_CALL_STARTED,
         "progress": AgentEventType.PROGRESS,
     }
     return mapping.get(event_type, AgentEventType.PROGRESS)
