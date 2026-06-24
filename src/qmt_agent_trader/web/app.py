@@ -28,6 +28,23 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, prefix="/api/audit", tags=["audit"])
     app.include_router(status.router, prefix="/api/status", tags=["status"])
 
+    # NiceGUI mounts a catch-all route at "/"; exact aliases keep spec paths
+    # like "/api/status" working without relying on slash redirects.
+    app.add_api_route("/api/tools", tools.list_tools, methods=["GET"], include_in_schema=False)
+    app.add_api_route(
+        "/api/experiments",
+        experiments.list_experiments,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        "/api/artifacts",
+        artifacts.list_artifacts,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route("/api/status", status.get_status, methods=["GET"], include_in_schema=False)
+
     create_ui()
     ui.run_with(app, mount_path="/", title="QMT Agent Studio")
 
