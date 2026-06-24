@@ -1,4 +1,9 @@
-"""Chat page — natural conversation with real LLM orchestration via SSE."""
+"""Chat page — natural conversation with real LLM orchestration via SSE.
+
+Cards are appended to a persistent session transcript so previous
+turns remain visible.  After a tool-call round, the next LLM text
+response starts a fresh assistant card.
+"""
 
 from __future__ import annotations
 
@@ -40,14 +45,14 @@ def register() -> None:
                 "Agent routes and executes automatically."
             ).classes("text-sm text-gray-500 mb-2")
 
-        # ── Transcript column (cards appended here) ──
+        # ── Session transcript (cards accumulate across turns) ──
         transcript_col = ui.column().classes("w-full gap-2")
 
-        # ── Plan card (hidden until routing) ──
+        # ── Plan card (reused per turn) ──
         plan_card = ui.card().classes("w-full bg-blue-50 p-3")
         plan_card.visible = False
 
-        # ── Progress card (hidden until tool starts) ──
+        # ── Progress card (reused per turn) ──
         progress_card = ui.card().classes("w-full bg-green-50 p-3")
         with progress_card:
             with ui.row().classes("items-center gap-2"):
@@ -118,10 +123,7 @@ async def _send(
 
     message_input.value = ""
 
-    # ── Clear previous transcript ──
-    transcript_col.clear()
-
-    # ── User message card ──
+    # ── User message card (always new) ──
     user_card = ui.card().classes("w-full bg-white border p-3")
     with user_card:
         ui.markdown(f"**🧑 You**  \n{content}")
@@ -155,12 +157,14 @@ async def _send(
     orchestrator = _get_orchestrator()
     run_id = new_id("run")
 
-    # Assistant response card (appears after first token)
+    # Per-turn state (reset each turn)
     assistant_card: ui.card | None = None
     assistant_md: ui.markdown | None = None
     token_buf: list[str] = []
-
     progress_label_ref: list[ui.label | None] = [None]
+    # Track whether we've seen tool calls since the last assistant card.
+    # When True and new TextDelta arrives, we start a fresh assistant card.
+    need_new_card: bool = False
 
     try:
         async for event in orchestrator.execute_stream(
@@ -185,7 +189,8 @@ async def _send(
 
             # ── Streaming token ──
             elif etype == "token":
-                if assistant_card is None:
+                if assistant_card is None or need_new_card:
+                    # Start a fresh assistant response card
                     assistant_card = ui.card().classes("w-full bg-blue-50 border p-3")
                     with assistant_card:
                         ui.markdown("**🤖 Assistant**").classes(
@@ -193,6 +198,8 @@ async def _send(
                         )
                         assistant_md = ui.markdown("").classes("text-sm text-blue-900")
                     assistant_card.move(transcript_col)
+                    token_buf = []
+                    need_new_card = False
                 token_buf.append(emsg)
                 if assistant_md is not None:
                     assistant_md.set_content("".join(token_buf))
@@ -200,7 +207,6 @@ async def _send(
             # ── Tool events ──
             elif etype == "tool_start":
                 tool_name = edata.get("tool_name", "")
-                # Show progress
                 progress_card.clear()
                 with progress_card:
                     with ui.row().classes("items-center gap-2"):
@@ -209,11 +215,11 @@ async def _send(
                         progress_label_ref[0] = lbl
                 progress_card.visible = True
 
-                # Tool call card
                 tool_card = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
                 with tool_card:
                     ui.markdown(f"🔧 **Calling:** `{tool_name}`")
                 tool_card.move(transcript_col)
+                need_new_card = True  # subsequent text is a new response
 
             elif etype == "tool_args":
                 args = edata.get("arguments", {})
