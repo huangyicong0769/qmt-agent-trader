@@ -9,9 +9,20 @@ from typing import Annotated
 import typer
 from rich import print
 
+from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.runtime import build_default_runtime
-from qmt_agent_trader.agent.workflows.factor_discovery import run_factor_discovery
+from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
+from qmt_agent_trader.agent.tools import build_agent_registry
+from qmt_agent_trader.agent.workflows.factor_discovery import (
+    FactorDiscoveryWorkflow,
+    run_factor_discovery,
+)
+from qmt_agent_trader.agent.workflows.self_bootstrap import SelfBootstrapWorkflow
 from qmt_agent_trader.agent.workflows.strategy_discovery import run_strategy_discovery
+from qmt_agent_trader.agent.workflows.strategy_engineering import (
+    StrategyEngineeringWorkflow,
+)
 from qmt_agent_trader.backtest.service import compare_backtest_reports, run_backtest_report
 from qmt_agent_trader.broker.order_plan import OrderPlan
 from qmt_agent_trader.broker.remote_client import RemoteQMTBrokerClient
@@ -256,7 +267,99 @@ def agent_ask(
     )
 
 
-@strategy_app.command("list")
+def _agent_registry() -> AgentToolRegistry:
+    settings = _settings()
+    lake = _data_lake()
+    return build_agent_registry(
+        data_lake=lake,
+        audit_path=settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
+        experiment_root=settings.resolved_data_dir / "experiments",
+        sandbox=CodeSandbox(),
+    )
+
+
+def _agent_store() -> ExperimentStore:
+    settings = _settings()
+    return ExperimentStore(settings.resolved_data_dir / "experiments")
+
+
+@agent_app.command("experiments")
+def agent_experiments(
+    query: Annotated[str | None, typer.Option("--query")] = None,
+    tag: Annotated[str | None, typer.Option("--tag")] = None,
+    limit: Annotated[int, typer.Option("--limit")] = 20,
+) -> None:
+    """List / search recent agent experiments."""
+    store = _agent_store()
+    tags = [tag] if tag else None
+    results = store.search_experiments(query=query, tags=tags, limit=limit)
+    print_json(
+        {
+            "count": len(results),
+            "experiments": [r.model_dump(mode="json") for r in results],
+        }
+    )
+
+
+@agent_app.command("experiment")
+def agent_experiment(experiment_id: Annotated[str, typer.Option("--id")]) -> None:
+    """Show one experiment by id."""
+    store = _agent_store()
+    try:
+        exp = store.get_experiment(experiment_id)
+        print_json(exp.model_dump(mode="json"))
+    except Exception as exc:
+        print_json({"error": str(exc)})
+
+
+@agent_app.command("run-factor-discovery")
+def agent_run_factor_discovery(
+    theme: Annotated[str, typer.Option("--theme")],
+    universe: Annotated[str, typer.Option("--universe")] = "stock_etf",
+    start: Annotated[str, typer.Option("--start")] = "20200101",
+    end: Annotated[str, typer.Option("--end")] = "20260624",
+) -> None:
+    """Run the new tool-chain factor discovery pipeline."""
+    reg = _agent_registry()
+    store = _agent_store()
+    workflow = FactorDiscoveryWorkflow(reg, store)
+    exp = workflow.run(theme, universe, start, end)
+    print_json(exp.model_dump(mode="json"))
+
+
+@agent_app.command("write-strategy")
+def agent_write_strategy(
+    idea: Annotated[str, typer.Option("--idea")],
+    factors: Annotated[str, typer.Option("--factors")],
+    universe: Annotated[str, typer.Option("--universe")] = "stock_etf",
+    start: Annotated[str, typer.Option("--start")] = "20200101",
+    end: Annotated[str, typer.Option("--end")] = "20260624",
+) -> None:
+    """Run the strategy engineering pipeline."""
+    reg = _agent_registry()
+    store = _agent_store()
+    factor_list = [f.strip() for f in factors.split(",") if f.strip()]
+    workflow = StrategyEngineeringWorkflow(reg, store)
+    exp = workflow.run(idea, factor_list, universe, start, end)
+    print_json(exp.model_dump(mode="json"))
+
+
+@agent_app.command("self-bootstrap")
+def agent_self_bootstrap(
+    recent: Annotated[int, typer.Option("--recent")] = 10,
+    experiment_ids: Annotated[str | None, typer.Option("--experiment-ids")] = None,
+) -> None:
+    """Run the self-bootstrap pipeline to detect tool gaps."""
+    reg = _agent_registry()
+    store = _agent_store()
+    ids = (
+        [i.strip() for i in experiment_ids.split(",")]
+        if experiment_ids
+        else [f"auto_{recent}"]
+    )
+    workflow = SelfBootstrapWorkflow(reg, store)
+    exp = workflow.run(ids)
+    print_json(exp.model_dump(mode="json"))
 def strategy_list() -> None:
     approval_dir = Path("approvals")
     files = (
