@@ -102,7 +102,7 @@ class AgentOrchestrator:
         routing: RoutingDecision | None = None,
         *,
         run_id: str | None = None,
-        max_rounds: int = 10,
+        max_rounds: int = 100,
     ) -> AsyncGenerator[OrchestratorEvent, None]:
         """Execute the LLM tool loop and yield events suitable for SSE streaming."""
         rid = run_id or new_id("run")
@@ -307,12 +307,31 @@ def _stream_to_events(
         ]
 
     if cls_name == "LoopError":
-        # LLM may have already done useful work; soften to warning
+        return [
+            OrchestratorEvent(
+                type="error",
+                run_id=run_id,
+                message=evt.message,
+                data={"error": evt.message},
+            )
+        ]
+
+    if cls_name == "LoopBreak":
         return [
             OrchestratorEvent(
                 type="progress",
                 run_id=run_id,
-                message=f"⚠️ {evt.message}",
+                message=f"⛔ {evt.message}",
+                data={"warning": evt.message},
+            )
+        ]
+
+    if cls_name == "SafetyCapHit":
+        return [
+            OrchestratorEvent(
+                type="progress",
+                run_id=run_id,
+                message=f"🛑 {evt.message}",
                 data={"warning": evt.message},
             )
         ]

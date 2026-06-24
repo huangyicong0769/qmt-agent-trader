@@ -2,6 +2,10 @@
 
 Supports both batch (run_tool_loop) and streaming (run_tool_loop_stream)
 modes for real-time token delivery and tool call interception.
+
+Loop safety: no hard round limit. Instead, heuristic loop detection stops
+the LLM if it repeats the same tool+args 3+ consecutive times.
+A generous safety cap (100 rounds) prevents runaway processes.
 """
 
 from __future__ import annotations
@@ -15,6 +19,11 @@ from openai import OpenAI
 from openai.types.chat import (
     ChatCompletionMessageParam,
 )
+
+# ── Safety constants ──
+
+_MAX_ROUNDS_SAFETY_CAP = 100
+_MAX_REPEAT_BEFORE_BREAK = 3
 
 
 @dataclass(frozen=True)
@@ -86,9 +95,53 @@ class ToolResult(StreamEvent):
 
 
 @dataclass(frozen=True)
-class LoopError(StreamEvent):
-    """An error occurred during the loop."""
+class LoopBreak(StreamEvent):
+    """Heuristic loop detected — same tool+args repeated."""
     message: str
+
+
+@dataclass(frozen=True)
+class SafetyCapHit(StreamEvent):
+    """Absolute safety cap (100 rounds) reached."""
+    message: str
+
+
+@dataclass(frozen=True)
+class LoopError(StreamEvent):
+    """An unexpected error occurred during the loop."""
+    message: str
+
+
+# ── Loop guard ──
+
+
+def _loop_guard(
+    history: list[tuple[str, str]],
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    max_repeat: int = _MAX_REPEAT_BEFORE_BREAK,
+) -> str | None:
+    """Return a break message if the same (tool_name, args) repeats too many
+    consecutive times, otherwise None.
+
+    Args are normalised via stable JSON serialisation to detect same-input
+    calls regardless of key ordering.
+    """
+    args_key = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    entry = (tool_name, args_key)
+    history.append(entry)
+
+    if len(history) >= max_repeat:
+        if all(e == entry for e in history[-max_repeat:]):
+            return (
+                f"Loop detected: '{tool_name}' called with the same arguments "
+                f"{max_repeat} consecutive times. Stopping."
+            )
+    return None
+
+
+# ── Client ──
 
 
 class DeepSeekClient:
@@ -113,8 +166,9 @@ class DeepSeekClient:
         *,
         messages: list[dict[str, Any]],
         tools: list[DeepSeekTool],
-        max_rounds: int = 10,
+        max_rounds: int = _MAX_ROUNDS_SAFETY_CAP,
     ) -> DeepSeekToolLoopResult:
+        """Batch tool loop with heuristic loop detection + safety cap."""
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
 
@@ -122,6 +176,7 @@ class DeepSeekClient:
         tool_map = {tool.name: tool for tool in tools}
         executions: list[ToolExecution] = []
         request_tools = [_to_openai_tool(tool) for tool in tools]
+        call_history: list[tuple[str, str]] = []
 
         for _ in range(max_rounds):
             kwargs: dict[str, Any] = {"model": self.model, "messages": conversation}
@@ -132,7 +187,6 @@ class DeepSeekClient:
             message = response.choices[0].message
             tool_calls = list(getattr(message, "tool_calls", None) or [])
 
-            # Build assistant message dict, preserving reasoning_content
             assistant_dict = _assistant_message_dict(message)
             conversation.append(assistant_dict)
 
@@ -148,6 +202,12 @@ class DeepSeekClient:
                 if name not in tool_map:
                     raise ValueError(f"LLM requested unknown tool: {name}")
                 arguments = _function_arguments(call)
+
+                # ── Loop guard ──
+                break_msg = _loop_guard(call_history, name, arguments)
+                if break_msg:
+                    raise RuntimeError(break_msg)
+
                 result = tool_map[name].fn(**arguments)
                 executions.append(
                     ToolExecution(
@@ -165,17 +225,18 @@ class DeepSeekClient:
                     }
                 )
 
-        raise RuntimeError("LLM tool loop exceeded max_rounds")
+        raise RuntimeError(
+            f"Safety cap: LLM tool loop reached {max_rounds} rounds without finishing."
+        )
 
     def run_tool_loop_stream(
         self,
         *,
         messages: list[dict[str, Any]],
         tools: list[DeepSeekTool],
-        max_rounds: int = 10,
+        max_rounds: int = _MAX_ROUNDS_SAFETY_CAP,
     ) -> Generator[StreamEvent, None, None]:
-        """Streaming tool loop: yields TextDelta, ToolCallStart/Delta/Complete,
-        ToolResult as they happen. Final text is also streamed token-by-token.
+        """Streaming tool loop with heuristic loop detection + safety cap.
 
         DeepSeek thinking mode: accumulates reasoning_content from stream
         deltas and passes it back in subsequent requests (required by API).
@@ -188,6 +249,7 @@ class DeepSeekClient:
         ]
         tool_map = {tool.name: tool for tool in tools}
         request_tools = [_to_openai_tool(tool) for tool in tools]
+        call_history: list[tuple[str, str]] = []
 
         for _round in range(max_rounds):
             kwargs: dict[str, Any] = {
@@ -203,7 +265,7 @@ class DeepSeekClient:
             # Accumulators for streaming deltas
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
-            tool_call_buf: dict[int, dict[str, Any]] = {}  # index -> {id, name, args_str}
+            tool_call_buf: dict[int, dict[str, Any]] = {}
             finished_tool_calls: list[dict[str, Any]] = []
 
             for chunk in stream:
@@ -259,7 +321,7 @@ class DeepSeekClient:
             # ── Build reasoning_content string for conversation ──
             reasoning_str = "".join(reasoning_parts) if reasoning_parts else None
 
-            # ── Complete tool calls: parse args and execute ──
+            # ── Complete tool calls: check loop, parse args, execute ──
             for idx in sorted(tool_call_buf.keys()):
                 buf = tool_call_buf[idx]
                 tc_id = buf["id"]
@@ -272,6 +334,12 @@ class DeepSeekClient:
                     arguments = {}
                 if not isinstance(arguments, dict):
                     arguments = {}
+
+                # ── Loop guard ──
+                break_msg = _loop_guard(call_history, tc_name, arguments)
+                if break_msg:
+                    yield LoopBreak(message=break_msg)
+                    return
 
                 yield ToolCallComplete(
                     tool_call_id=tc_id,
@@ -331,10 +399,15 @@ class DeepSeekClient:
                 if reasoning_str:
                     final_msg["reasoning_content"] = reasoning_str
                 conversation.append(final_msg)  # type: ignore[arg-type]
-                return  # final text already streamed via TextDelta
+                return
 
-        # Exhausted max_rounds
-        yield LoopError(message="LLM tool loop exceeded max_rounds")
+        # Safety cap
+        yield SafetyCapHit(
+            message=f"Safety cap: LLM tool loop reached {max_rounds} rounds without finishing."
+        )
+
+
+# ── Helpers ──
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:
