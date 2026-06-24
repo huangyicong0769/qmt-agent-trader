@@ -1,12 +1,14 @@
-"""Chat page — Codex-style sidebar session list + chat area.
+"""Chat page — persistent multi-session conversations.
 
-Left panel: session list with highlighted active row.
-Right panel: active session's transcript + input.
-Session containers use simple visibility toggle.
+Sessions survive restarts: conversation history is saved as JSON
+in sessions/ directory. UI is rebuilt from stored data on page load.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from nicegui import ui
@@ -17,6 +19,9 @@ from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.web.ui.layout import shell
 
+SESSIONS_DIR = Path("sessions")
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
 SUGGESTED_PROMPTS = [
     "帮我发现几个适合A股个股和ETF的低波动高胜率因子，并自动跑初步验证。",
     "列出当前数据湖中所有可用的因子，并验证 momentum_20d 因子。",
@@ -26,22 +31,174 @@ SUGGESTED_PROMPTS = [
 ]
 
 
+# ── Persistent message model ──
+
+
+@dataclass
+class ChatMessage:
+    role: str  # "user" | "assistant" | "tool" | "info" | "error" | "done"
+    content: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 # ── Session model ──
 
 
 class _ChatSession:
-    """One conversation session with its own transcript and orchestrator."""
-    __slots__ = ("container", "name", "orchestrator", "preview", "sid", "transcript")
+    """One persistent conversation session."""
+
+    __slots__ = (
+        "_path",
+        "container",
+        "messages",
+        "name",
+        "orchestrator",
+        "preview",
+        "sid",
+        "transcript",
+    )
     _counter = 0
 
-    def __init__(self, name: str = "") -> None:
-        _ChatSession._counter += 1
-        self.sid = f"s{_ChatSession._counter}"
+    def __init__(self, name: str = "", sid: str = "") -> None:
+        if sid:
+            self.sid = sid
+        else:
+            _ChatSession._counter += 1
+            self.sid = f"s{_ChatSession._counter}"
         self.name = name or f"Session {_ChatSession._counter}"
         self.orchestrator = AgentOrchestrator(settings=get_settings())
         self.transcript = ui.column().classes("w-full gap-2")
         self.preview = ""
         self.container = ui.column().classes("w-full overflow-auto flex-1 p-4")
+        self.messages: list[ChatMessage] = []
+        self._path = SESSIONS_DIR / f"{self.sid}.json"
+
+    def add_message(self, role: str, content: str, **meta: Any) -> None:
+        msg = ChatMessage(role=role, content=content, metadata=dict(meta))
+        self.messages.append(msg)
+        self._update_preview(role, content)
+
+    def _update_preview(self, role: str, content: str) -> None:
+        if role == "user":
+            self.preview = _trunc(content, 60)
+        elif role == "assistant":
+            self.preview = _trunc(content, 60)
+
+    def save(self) -> None:
+        data: dict[str, Any] = {
+            "sid": self.sid,
+            "name": self.name,
+            "counter": _ChatSession._counter,
+            "preview": self.preview,
+            "messages": [
+                {"role": m.role, "content": m.content, "metadata": m.metadata}
+                for m in self.messages
+            ],
+        }
+        self._path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def rebuild_ui(self) -> None:
+        """Rebuild transcript cards from stored messages."""
+        self.transcript.clear()
+        for msg in self.messages:
+            _render_stored_message(self.transcript, msg)
+
+    @staticmethod
+    def load_all() -> list[_ChatSession]:
+        sessions: list[_ChatSession] = []
+        max_counter = 0
+        for fpath in sorted(
+            SESSIONS_DIR.glob("s*.json"),
+            key=lambda p: p.stat().st_mtime,
+        ):
+            try:
+                data = json.loads(fpath.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            sid = str(data.get("sid", fpath.stem))
+            s = _ChatSession(
+                name=str(data.get("name", "")),
+                sid=sid,
+            )
+            s.preview = str(data.get("preview", ""))
+            for mdata in data.get("messages", []):
+                if isinstance(mdata, dict):
+                    s.messages.append(ChatMessage(
+                        role=str(mdata.get("role", "")),
+                        content=str(mdata.get("content", "")),
+                        metadata=mdata.get("metadata", {}) if isinstance(
+                            mdata.get("metadata"), dict
+                        ) else {},
+                    ))
+            sessions.append(s)
+            # Track max counter
+            try:
+                n = int(sid.lstrip("s"))
+                if n > max_counter:
+                    max_counter = n
+            except ValueError:
+                pass
+        _ChatSession._counter = max_counter
+        return sessions
+
+
+def _render_stored_message(transcript: ui.column, msg: ChatMessage) -> None:
+    """Render one stored message as a card in the transcript."""
+    role = msg.role
+    content = msg.content
+    meta = msg.metadata
+
+    if role == "user":
+        c = ui.card().classes("w-full bg-white border p-3")
+        with c:
+            ui.markdown(f"**🧑 You**  \n{content}")
+        c.move(transcript)
+
+    elif role == "info":
+        c = ui.card().classes("w-full bg-gray-50 p-2 text-xs text-gray-500")
+        with c:
+            ui.label(content)
+        c.move(transcript)
+
+    elif role == "assistant":
+        c = ui.card().classes("w-full bg-blue-50 border p-3")
+        with c:
+            ui.markdown("**🤖 Assistant**").classes(
+                "text-sm font-semibold text-blue-800"
+            )
+            ui.markdown(content).classes("text-sm text-blue-900")
+        c.move(transcript)
+
+    elif role == "tool":
+        c = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+        tool_name = meta.get("tool_name", "")
+        result = meta.get("result_preview", "")
+        tool_phase = meta.get("phase", "done")
+        if tool_phase == "start":
+            with c:
+                ui.markdown(f"🔧 **Calling:** `{tool_name}`")
+        elif tool_phase == "args":
+            with c:
+                ui.markdown(f"```json\n{content[:500]}\n```")
+        elif tool_phase == "done":
+            with c:
+                ui.markdown(f"✅ `{tool_name}`: {result}")
+        c.move(transcript)
+
+    elif role == "done":
+        c = ui.card().classes("w-full bg-green-50 border p-2")
+        with c:
+            ui.markdown(f"**✅ Done** — {content}")
+        c.move(transcript)
+
+    elif role == "error":
+        c = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
+        with c:
+            ui.icon("error", color="red").classes("inline")
+            ui.markdown(f"**❌ Error**  \n{content}")
+        c.move(transcript)
 
 
 # ── Helpers ──
@@ -68,14 +225,15 @@ async def _send(
         return
 
     message_input.value = ""
-    session.preview = _trunc(content, 60)
-    refresh_sidebar()
 
     # ── User ──
     c = ui.card().classes("w-full bg-white border p-3")
     with c:
         ui.markdown(f"**🧑 You**  \n{content}")
     c.move(session.transcript)
+    session.add_message("user", content)
+    session.save()
+    refresh_sidebar()
 
     # ── Route ──
     decision = agent_router.route(content)
@@ -123,6 +281,7 @@ async def _send(
                 with c2:
                     ui.label(f"**Run** `{run_id[:8]}` | **Exp** `{exp}` | `{intent}`")
                 c2.move(session.transcript)
+                session.add_message("info", f"Run {run_id[:8]} | {intent}")
 
             elif et == "progress":
                 if em and lbl_ref[0] is not None:
@@ -143,7 +302,6 @@ async def _send(
                 if assistant_md is not None:
                     assistant_md.set_content("".join(token_buf))
                 if len(token_buf) <= 8:
-                    session.preview = _trunc("".join(token_buf), 60)
                     refresh_sidebar()
 
             elif et == "tool_start":
@@ -158,6 +316,7 @@ async def _send(
                 with c2:
                     ui.markdown(f"🔧 **Calling:** `{tn}`")
                 c2.move(session.transcript)
+                session.add_message("tool", "", tool_name=tn, phase="start")
                 need_new_card = True
 
             elif et == "tool_args":
@@ -168,6 +327,10 @@ async def _send(
                 with c2:
                     ui.markdown(f"```json\n{astr[:500]}\n```")
                 c2.move(session.transcript)
+                session.add_message(
+                    "tool", astr,
+                    tool_name=ed.get("tool_name", ""), phase="args",
+                )
 
             elif et == "tool_done":
                 prv = ed.get("result_preview", "")
@@ -176,6 +339,11 @@ async def _send(
                 with c2:
                     ui.markdown(f"✅ **Result:** `{prv}`")
                 c2.move(session.transcript)
+                session.add_message(
+                    "tool", "",
+                    tool_name=ed.get("tool_name", ""),
+                    result_preview=prv, phase="done",
+                )
 
             elif et == "done":
                 progress_card.visible = False
@@ -185,6 +353,13 @@ async def _send(
                 with c2:
                     ui.markdown(f"**✅ Done** — {tc} tool call(s).")
                 c2.move(session.transcript)
+                # Save assistant response text
+                full_text = "".join(token_buf)
+                if full_text:
+                    session.add_message("assistant", full_text)
+                session.add_message("done", f"{tc} tool call(s) completed.")
+                session.save()
+                refresh_sidebar()
 
             elif et == "error":
                 progress_card.visible = False
@@ -194,6 +369,8 @@ async def _send(
                     ui.icon("error", color="red").classes("inline")
                     ui.markdown(f"**❌ Error**  \n{em}")
                 c2.move(session.transcript)
+                session.add_message("error", em)
+                session.save()
 
     except Exception as exc:
         progress_card.visible = False
@@ -202,6 +379,8 @@ async def _send(
         with c2:
             ui.markdown(f"**❌ Orchestration failed:** {exc}")
         c2.move(session.transcript)
+        session.add_message("error", str(exc))
+        session.save()
 
 
 # ── Page ──
@@ -212,6 +391,8 @@ def register() -> None:
     def chat_page() -> None:
         shell("Chat")
 
+        # Load existing sessions from disk
+        loaded_sessions = _ChatSession.load_all()
         sessions: dict[str, _ChatSession] = {}
         active_sid: str = ""
         _refresh_fn: list[Any] = [lambda: None]
@@ -220,14 +401,11 @@ def register() -> None:
             nonlocal active_sid
             if active_sid == sid:
                 return
-            # Hide old
             if active_sid and active_sid in sessions:
                 sessions[active_sid].container.visible = False
-            # Show new
             if sid in sessions:
                 sessions[sid].container.visible = True
                 active_sid = sid
-            # Clear shared plan/progress
             plan_card.visible = False
             progress_card.visible = False
             _refresh_fn[0]()
@@ -235,10 +413,10 @@ def register() -> None:
         def create_session(name: str = "", focus: bool = True) -> _ChatSession:
             s = _ChatSession(name=name)
             sessions[s.sid] = s
-            # Move transcript into its container, container into chat_stack
             s.transcript.move(s.container)
             s.container.move(chat_stack)
             s.container.visible = False
+            s.save()
             _refresh_fn[0]()
             if focus:
                 activate_session(s.sid)
@@ -251,10 +429,14 @@ def register() -> None:
                 return
             s = sessions.pop(sid, None)
             if s is not None:
+                # Delete session file
+                try:
+                    s._path.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 s.container.clear()
                 s.container.delete()
             if active_sid == sid:
-                # Activate first remaining session
                 first = next(iter(sessions))
                 _refresh_fn[0]()
                 activate_session(first)
@@ -276,7 +458,7 @@ def register() -> None:
 
         # ═══ Layout ═══
         with ui.row().classes("w-full gap-0 flex-1").style("min-height: 0"):
-            # ── LEFT: session sidebar (220px) ──
+            # ── LEFT: session sidebar ──
             with ui.column().classes("border-r bg-gray-50/50").style(
                 "width: 220px; flex-shrink: 0"
             ):
@@ -299,21 +481,17 @@ def register() -> None:
                             if is_active else ""
                         )
                         row = ui.row().classes(
-                            f"w-full items-center gap-2 px-3 py-2.5 cursor-pointer "
-                            f"hover:bg-gray-100 transition-colors {bg}"
+                            f"w-full items-center gap-2 px-3 py-2.5 "
+                            f"cursor-pointer hover:bg-gray-100 "
+                            f"transition-colors {bg}"
                         )
                         with row:
                             ui.icon("chat", size="sm").classes(
                                 "text-blue-500" if is_active else "text-gray-400"
                             )
                             with ui.column().classes("gap-0 flex-1 min-w-0"):
-                                name_cls = (
-                                    "font-semibold text-blue-700"
-                                    if is_active else ""
-                                )
-                                ui.label(s.name).classes(
-                                    f"text-xs truncate {name_cls}"
-                                )
+                                nc = "font-semibold text-blue-700" if is_active else ""
+                                ui.label(s.name).classes(f"text-xs truncate {nc}")
                                 ui.label(
                                     s.preview or "还没有对话"
                                 ).classes("text-[11px] text-gray-400 truncate")
@@ -329,7 +507,6 @@ def register() -> None:
                 sidebar_list()
                 _refresh_fn[0] = sidebar_list.refresh
 
-                # Footer
                 with ui.row().classes(
                     "items-center gap-1 p-3 text-[11px] text-gray-400"
                 ):
@@ -345,12 +522,10 @@ def register() -> None:
             with ui.column().classes("flex-1 flex flex-col gap-0").style(
                 "min-width: 0"
             ):
-                # Stack of session containers
                 chat_stack = ui.column().classes(
                     "w-full flex-1 overflow-auto relative"
                 )
 
-                # Shared plan + progress
                 plan_card = ui.card().classes("w-full bg-blue-50 p-3 mx-4 mt-2")
                 plan_card.visible = False
 
@@ -361,7 +536,6 @@ def register() -> None:
                         ui.label("").classes("text-sm")
                 progress_card.visible = False
 
-                # Input
                 with ui.row().classes("w-full items-end gap-2 p-4 border-t"):
                     message = (
                         ui.textarea("Type your research question...")
@@ -370,7 +544,6 @@ def register() -> None:
                     )
                     ui.button("Send", on_click=send_handler).props("color=primary")
 
-                # Expandables
                 with ui.expansion("Advanced", icon="tune").classes("w-full px-4"):
                     with ui.row().classes("gap-4"):
                         ui.select(
@@ -399,5 +572,17 @@ def register() -> None:
                                 on_click=lambda _, text=p: _fill_prompt(message, text),
                             )
 
-        # ── Initial session ──
-        create_session(focus=True)
+        # ── Load existing sessions ──
+        for s in loaded_sessions:
+            sessions[s.sid] = s
+            s.transcript.move(s.container)
+            s.container.move(chat_stack)
+            s.container.visible = False
+            s.rebuild_ui()
+
+        # ── Activate first session (existing or new) ──
+        if sessions:
+            _refresh_fn[0]()
+            activate_session(next(iter(sessions)))
+        else:
+            create_session(focus=True)
