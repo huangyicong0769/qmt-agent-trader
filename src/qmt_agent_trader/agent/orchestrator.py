@@ -102,7 +102,7 @@ class AgentOrchestrator:
         routing: RoutingDecision | None = None,
         *,
         run_id: str | None = None,
-        max_rounds: int = 6,
+        max_rounds: int = 10,
     ) -> AsyncGenerator[OrchestratorEvent, None]:
         """Execute the LLM tool loop and yield events suitable for SSE streaming."""
         rid = run_id or new_id("run")
@@ -161,12 +161,15 @@ class AgentOrchestrator:
             "You may read data, write research artifacts, and run simulated "
             "backtests. You must not submit live orders, modify live config, "
             "or bypass approvals. "
-            "When the user asks you to discover factors, use the built-in factors "
-            "like momentum_20d, volatility_20d, reversal_5d, and validate them "
-            "using walk_forward_factor_validation. "
-            "When the user asks you to build strategies, run backtests with "
-            "different factor configurations and compare results. "
-            "Always summarize your findings clearly at the end."
+            "CRITICAL: After calling 1-3 tools, STOP and give the user a clear "
+            "Chinese-language summary of what you found. Do not keep calling tools "
+            "in loops. If a tool returns an error, explain it and stop — do not retry "
+            "the same tool with different arguments unless the user explicitly asks. "
+            "Prefer wide exploratory calls (list all, validate all) over one-at-a-time "
+            "calls. Always respond in Chinese. "
+            "Key tools: list_available_factors, validate_factor, "
+            "walk_forward_factor_validation, run_factor_rank_long_only_backtest, "
+            "run_factor_rank_sensitivity, list_backtest_reports."
             + routing_hint
         )
 
@@ -304,12 +307,13 @@ def _stream_to_events(
         ]
 
     if cls_name == "LoopError":
+        # LLM may have already done useful work; soften to warning
         return [
             OrchestratorEvent(
-                type="error",
+                type="progress",
                 run_id=run_id,
-                message=evt.message,
-                data={"error": evt.message},
+                message=f"⚠️ {evt.message}",
+                data={"warning": evt.message},
             )
         ]
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from nicegui import ui
 
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
@@ -35,53 +33,62 @@ def register() -> None:
     def chat_page() -> None:
         shell("Chat")
 
-        ui.label("QMT Agent Studio").classes("text-2xl font-semibold")
-        ui.label(
-            "Ask anything about quantitative research — Agent routes and executes automatically."
-        ).classes("text-sm text-gray-500 mb-4")
+        with ui.column().classes("w-full gap-2"):
+            ui.label("QMT Agent Studio").classes("text-2xl font-semibold")
+            ui.label(
+                "Ask anything about quantitative research — "
+                "Agent routes and executes automatically."
+            ).classes("text-sm text-gray-500 mb-2")
 
-        with ui.column().classes("w-full gap-4"):
-            transcript = ui.markdown(
-                "**🤖 Assistant:** Ready for research. Type your question and press Send."
-            ).classes("min-h-[300px] p-4 border rounded-lg bg-gray-50")
+        # ── Transcript column (cards appended here) ──
+        transcript_col = ui.column().classes("w-full gap-2")
 
-            plan_card = ui.card().classes("w-full bg-blue-50 p-4")
-            plan_card.visible = False
+        # ── Plan card (hidden until routing) ──
+        plan_card = ui.card().classes("w-full bg-blue-50 p-3")
+        plan_card.visible = False
 
-            progress_card = ui.card().classes("w-full bg-green-50 p-4")
-            progress_card.visible = False
+        # ── Progress card (hidden until tool starts) ──
+        progress_card = ui.card().classes("w-full bg-green-50 p-3")
+        with progress_card:
+            with ui.row().classes("items-center gap-2"):
+                ui.spinner(size="sm")
+                ui.label("").classes("text-sm")
+        progress_card.visible = False
 
-            with ui.row().classes("w-full items-end gap-2"):
-                message = (
-                    ui.textarea("Type your research question...")
-                    .classes("grow")
-                    .props("autogrow rows=2")
-                )
-                with ui.column().classes("gap-1"):
-                    ui.button(
-                        "Send",
-                        on_click=lambda: _send(transcript, message, plan_card, progress_card),
-                    ).props("color=primary")
+        # ── Input row ──
+        with ui.row().classes("w-full items-end gap-2"):
+            message = (
+                ui.textarea("Type your research question...")
+                .classes("grow")
+                .props("autogrow rows=2 outlined")
+            )
+            ui.button(
+                "Send",
+                on_click=lambda: _send(transcript_col, message, plan_card, progress_card),
+            ).props("color=primary")
 
-            with ui.expansion("Advanced", icon="tune").classes("w-full"):
-                with ui.row().classes("gap-4"):
-                    ui.select(
-                        ["auto", "stock", "etf", "stock_etf"],
-                        value="auto",
-                        label="Universe",
-                    ).classes("w-40")
-                    with ui.row().classes("gap-2"):
-                        ui.input("Start Date", value="").classes("w-36").props("placeholder=auto")
-                        ui.input("End Date", value="").classes("w-36").props("placeholder=auto")
-                    ui.select(
-                        ["balanced", "fast", "thorough"],
-                        value="balanced",
-                        label="Budget",
-                    ).classes("w-36")
+        # ── Advanced panel ──
+        with ui.expansion("Advanced", icon="tune").classes("w-full"):
+            with ui.row().classes("gap-4"):
+                ui.select(
+                    ["auto", "stock", "etf", "stock_etf"],
+                    value="auto",
+                    label="Universe",
+                ).classes("w-40")
+                with ui.row().classes("gap-2"):
+                    ui.input("Start Date", value="").classes("w-36").props("placeholder=auto")
+                    ui.input("End Date", value="").classes("w-36").props("placeholder=auto")
+                ui.select(
+                    ["balanced", "fast", "thorough"],
+                    value="balanced",
+                    label="Budget",
+                ).classes("w-36")
 
-        with ui.expansion("Suggested prompts", icon="lightbulb").classes("w-full mt-4"):
-            for p in SUGGESTED_PROMPTS:
-                ui.chip(p, on_click=lambda _, text=p: _fill_prompt(message, text))
+        # ── Suggested prompts ──
+        with ui.expansion("Suggested prompts", icon="lightbulb").classes("w-full"):
+            with ui.row().classes("flex-wrap gap-2"):
+                for p in SUGGESTED_PROMPTS:
+                    ui.chip(p, on_click=lambda _, text=p: _fill_prompt(message, text))
 
         # ── LLM status bar ──
         with ui.row().classes("items-center gap-2 mt-2 text-xs text-gray-400"):
@@ -99,7 +106,7 @@ def _fill_prompt(message_input: ui.textarea, text: str) -> None:
 
 
 async def _send(
-    transcript: ui.markdown,
+    transcript_col: ui.column,
     message_input: ui.textarea,
     plan_card: ui.card,
     progress_card: ui.card,
@@ -109,11 +116,16 @@ async def _send(
         ui.notify("Enter a message first.", type="warning")
         return
 
-    # Clear state
     message_input.value = ""
-    lines: list[str] = [f"**🧑 You:** {content}", ""]
-    plan_card.visible = False
-    progress_card.visible = False
+
+    # ── Clear previous transcript ──
+    transcript_col.clear()
+
+    # ── User message card ──
+    user_card = ui.card().classes("w-full bg-white border p-3")
+    with user_card:
+        ui.markdown(f"**🧑 You**  \n{content}")
+    user_card.move(transcript_col)
 
     # ── Step 1: Route intent ──
     decision = agent_router.route(content)
@@ -121,7 +133,6 @@ async def _send(
     confidence = decision.confidence
 
     plan_html = (
-        f"### 🤖 Agent Plan\n\n"
         f"| | |\n|---|---|\n"
         f"| **Intent** | `{intent}` |\n"
         f"| **Confidence** | {confidence:.0%} |\n"
@@ -137,25 +148,21 @@ async def _send(
 
     plan_card.clear()
     with plan_card:
-        ui.markdown(plan_html)
+        ui.markdown(f"### 🤖 Agent Plan\n\n{plan_html}")
     plan_card.visible = True
-
-    lines.append(f"**🔍 Intent:** `{intent}` ({confidence:.0%})")
-    lines.append(f"_{decision.rationale}_")
-    transcript.set_content("\n".join(lines))
 
     # ── Step 2: Run orchestration ──
     orchestrator = _get_orchestrator()
     run_id = new_id("run")
 
-    progress_card.clear()
-    with progress_card:
-        ui.spinner(size="sm")
-        ui.label("Running LLM orchestration...").classes("text-sm")
-    progress_card.visible = True
+    # Assistant response card (appears after first token)
+    assistant_card: ui.card | None = None
+    assistant_md: ui.markdown | None = None
+    token_buf: list[str] = []
+
+    progress_label_ref: list[ui.label | None] = [None]
 
     try:
-        assistant_started = False
         async for event in orchestrator.execute_stream(
             message=content,
             routing=decision,
@@ -167,64 +174,86 @@ async def _send(
 
             if etype == "run_started":
                 exp_id = edata.get("experiment_id", "?")
-                lines.append(f"**🚀 Started** — experiment `{exp_id}`")
+                info_card = ui.card().classes("w-full bg-gray-50 p-2 text-xs text-gray-500")
+                with info_card:
+                    ui.label(f"**Run** `{run_id[:8]}` | **Exp** `{exp_id}` | **Intent** `{intent}`")
+                info_card.move(transcript_col)
 
             elif etype == "progress":
-                if emsg:
-                    lines.append(f"**🔄** {emsg}")
+                if emsg and progress_label_ref[0] is not None:
+                    progress_label_ref[0].set_text(emsg)
 
             # ── Streaming token ──
             elif etype == "token":
-                if not assistant_started:
-                    lines.append("")
-                    lines.append("**🤖 Assistant:** ")
-                    assistant_started = True
-                lines[-1] += emsg  # append token to last line
+                if assistant_card is None:
+                    assistant_card = ui.card().classes("w-full bg-blue-50 border p-3")
+                    with assistant_card:
+                        ui.markdown("**🤖 Assistant**").classes(
+                            "text-sm font-semibold text-blue-800"
+                        )
+                        assistant_md = ui.markdown("").classes("text-sm text-blue-900")
+                    assistant_card.move(transcript_col)
+                token_buf.append(emsg)
+                if assistant_md is not None:
+                    assistant_md.set_content("".join(token_buf))
 
             # ── Tool events ──
             elif etype == "tool_start":
                 tool_name = edata.get("tool_name", "")
-                lines.append(f"**🔧 Calling:** `{tool_name}`")
+                # Show progress
                 progress_card.clear()
                 with progress_card:
-                    ui.spinner(size="sm")
-                    ui.label(f"Executing: {tool_name}").classes("text-sm")
+                    with ui.row().classes("items-center gap-2"):
+                        ui.spinner(size="sm")
+                        lbl = ui.label(f"Executing: `{tool_name}`").classes("text-sm")
+                        progress_label_ref[0] = lbl
                 progress_card.visible = True
 
+                # Tool call card
+                tool_card = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+                with tool_card:
+                    ui.markdown(f"🔧 **Calling:** `{tool_name}`")
+                tool_card.move(transcript_col)
+
             elif etype == "tool_args":
-                tool_name = edata.get("tool_name", "")
                 args = edata.get("arguments", {})
-                lines.append(f"  with args: `{_fmt_args(args)}`")
+                import json as _json
+                args_str = _json.dumps(args, ensure_ascii=False, default=str)
+                args_card = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+                with args_card:
+                    ui.markdown(f"```json\n{args_str[:500]}\n```")
+                args_card.move(transcript_col)
 
             elif etype == "tool_done":
-                tool_name = edata.get("tool_name", "")
                 preview = edata.get("result_preview", "")
-                lines.append(f"  ✓ result: `{preview}`")
                 progress_card.visible = False
+                result_card = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+                with result_card:
+                    ui.markdown(f"✅ **Result:** `{preview}`")
+                result_card.move(transcript_col)
 
             elif etype == "done":
                 progress_card.visible = False
                 plan_card.visible = False
                 tool_count = edata.get("tool_calls_count", 0)
-                if not assistant_started:
-                    lines.append("")
-                lines.append("")
-                lines.append(f"**✅ Done** — {tool_count} tool call(s) completed.")
+                done_card = ui.card().classes("w-full bg-green-50 border p-2")
+                with done_card:
+                    ui.markdown(f"**✅ Done** — {tool_count} tool call(s) completed.")
+                done_card.move(transcript_col)
 
             elif etype == "error":
                 progress_card.visible = False
-                lines.append(f"**❌ Error:** {emsg}")
-
-            transcript.set_content("\n".join(lines))
+                plan_card.visible = False
+                err_card = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
+                with err_card:
+                    ui.icon("error", color="red").classes("inline")
+                    ui.markdown(f"**❌ Error**  \n{emsg}")
+                err_card.move(transcript_col)
 
     except Exception as exc:
         progress_card.visible = False
-        lines.append(f"**❌ Orchestration failed:** {exc}")
-        transcript.set_content("\n".join(lines))
-
-
-def _fmt_args(args: dict[str, Any], max_len: int = 80) -> str:
-    """Format tool arguments for display."""
-    import json
-    s = json.dumps(args, ensure_ascii=False, default=str)
-    return s[:max_len] + ("..." if len(s) > max_len else "")
+        plan_card.visible = False
+        err_card = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
+        with err_card:
+            ui.markdown(f"**❌ Orchestration failed:** {exc}")
+        err_card.move(transcript_col)

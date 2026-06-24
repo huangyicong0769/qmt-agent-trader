@@ -113,7 +113,7 @@ class DeepSeekClient:
         *,
         messages: list[dict[str, Any]],
         tools: list[DeepSeekTool],
-        max_rounds: int = 4,
+        max_rounds: int = 10,
     ) -> DeepSeekToolLoopResult:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -172,7 +172,7 @@ class DeepSeekClient:
         *,
         messages: list[dict[str, Any]],
         tools: list[DeepSeekTool],
-        max_rounds: int = 6,
+        max_rounds: int = 10,
     ) -> Generator[StreamEvent, None, None]:
         """Streaming tool loop: yields TextDelta, ToolCallStart/Delta/Complete,
         ToolResult as they happen. Final text is also streamed token-by-token.
