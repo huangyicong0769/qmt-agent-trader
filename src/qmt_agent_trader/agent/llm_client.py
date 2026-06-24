@@ -131,7 +131,10 @@ class DeepSeekClient:
             response = self.client.chat.completions.create(**kwargs)
             message = response.choices[0].message
             tool_calls = list(getattr(message, "tool_calls", None) or [])
-            conversation.append(_assistant_message_dict(message))
+
+            # Build assistant message dict, preserving reasoning_content
+            assistant_dict = _assistant_message_dict(message)
+            conversation.append(assistant_dict)
 
             if not tool_calls:
                 return DeepSeekToolLoopResult(
@@ -173,6 +176,9 @@ class DeepSeekClient:
     ) -> Generator[StreamEvent, None, None]:
         """Streaming tool loop: yields TextDelta, ToolCallStart/Delta/Complete,
         ToolResult as they happen. Final text is also streamed token-by-token.
+
+        DeepSeek thinking mode: accumulates reasoning_content from stream
+        deltas and passes it back in subsequent requests (required by API).
         """
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -196,6 +202,7 @@ class DeepSeekClient:
 
             # Accumulators for streaming deltas
             content_parts: list[str] = []
+            reasoning_parts: list[str] = []
             tool_call_buf: dict[int, dict[str, Any]] = {}  # index -> {id, name, args_str}
             finished_tool_calls: list[dict[str, Any]] = []
 
@@ -203,6 +210,11 @@ class DeepSeekClient:
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if delta is None:
                     continue
+
+                # ── Reasoning content (DeepSeek thinking mode) ──
+                rc = getattr(delta, "reasoning_content", None)
+                if rc:
+                    reasoning_parts.append(rc)
 
                 # ── Text content ──
                 if delta.content:
@@ -244,6 +256,9 @@ class DeepSeekClient:
                     if new_name and not buf["name"]:
                         buf["name"] = new_name
 
+            # ── Build reasoning_content string for conversation ──
+            reasoning_str = "".join(reasoning_parts) if reasoning_parts else None
+
             # ── Complete tool calls: parse args and execute ──
             for idx in sorted(tool_call_buf.keys()):
                 buf = tool_call_buf[idx]
@@ -274,9 +289,8 @@ class DeepSeekClient:
                         tool_name=tc_name,
                         result=result,
                     )
-                    conversation.append({
+                    assistant_msg: dict[str, Any] = {
                         "role": "assistant",
-                        "content": None,
                         "tool_calls": [
                             {
                                 "id": tc_id,
@@ -287,7 +301,10 @@ class DeepSeekClient:
                                 },
                             }
                         ],
-                    })
+                    }
+                    if reasoning_str:
+                        assistant_msg["reasoning_content"] = reasoning_str
+                    conversation.append(assistant_msg)  # type: ignore[arg-type]
                     conversation.append({
                         "role": "tool",
                         "tool_call_id": tc_id,
@@ -305,8 +322,15 @@ class DeepSeekClient:
                     )
                     return
 
-            # ── No tool calls? Done ──
+            # ── No tool calls? Append final assistant message and done ──
             if not finished_tool_calls:
+                final_content = "".join(content_parts) if content_parts else None
+                final_msg: dict[str, Any] = {"role": "assistant"}
+                if final_content:
+                    final_msg["content"] = final_content
+                if reasoning_str:
+                    final_msg["reasoning_content"] = reasoning_str
+                conversation.append(final_msg)  # type: ignore[arg-type]
                 return  # final text already streamed via TextDelta
 
         # Exhausted max_rounds
@@ -343,6 +367,9 @@ def _assistant_message_dict(message: Any) -> dict[str, Any]:
     content = getattr(message, "content", None)
     if content is not None:
         payload["content"] = content
+    reasoning = getattr(message, "reasoning_content", None)
+    if reasoning is not None:
+        payload["reasoning_content"] = reasoning
     tool_calls = list(getattr(message, "tool_calls", None) or [])
     if tool_calls:
         payload["tool_calls"] = [_tool_call_dict(call) for call in tool_calls]
