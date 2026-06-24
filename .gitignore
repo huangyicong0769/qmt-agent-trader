@@ -20,3 +20,4 @@ build/
 gateway/windows_qmt_gateway/.env
 gateway/windows_qmt_gateway/.venv/
 sessions/
+reports/cache/

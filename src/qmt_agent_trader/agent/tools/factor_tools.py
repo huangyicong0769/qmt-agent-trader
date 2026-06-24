@@ -154,6 +154,16 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             "message": f"factor '{factor_id}' not in built-in set; use generate_factor_code first",
         }
 
+    # ── Dedup: check cache first ──
+    from qmt_agent_trader.agent.tools.cache import (
+        get_cached_validation,
+        put_cached_validation,
+    )
+    cached = get_cached_validation(factor_name, start, end)
+    if cached is not None:
+        cached["cache_hit"] = True
+        return cached
+
     try:
         result = validate_factor(lake, name=factor_name, start=start, end=end).as_dict()
         # Compute quantile returns via walk-forward
@@ -180,6 +190,8 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             if _sandbox
             else ""
         )
+        result["cache_hit"] = False
+        put_cached_validation(factor_name, start, end, result)
         return result
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
