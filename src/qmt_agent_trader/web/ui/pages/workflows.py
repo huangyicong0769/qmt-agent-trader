@@ -1,4 +1,4 @@
-"""Workflow page."""
+"""Runbook page — manual workflow templates for advanced users."""
 
 from __future__ import annotations
 
@@ -10,10 +10,14 @@ from qmt_agent_trader.web.ui.layout import shell
 
 
 def register() -> None:
-    @ui.page("/workflows")
-    def workflows_page() -> None:
-        shell("Workflows")
-        ui.label("Workflows").classes("text-2xl font-semibold")
+    @ui.page("/runbooks")
+    def runbooks_page() -> None:
+        shell("Runbooks")
+        ui.label("Runbooks").classes("text-2xl font-semibold")
+        ui.label(
+            "Fixed workflow templates for advanced users. "
+            "Prefer natural conversation from the Chat page instead."
+        ).classes("text-sm text-gray-500 mb-4")
         with ui.tabs().classes("w-full") as tabs:
             factor_tab = ui.tab("Factor Discovery")
             strategy_tab = ui.tab("Strategy Engineering")

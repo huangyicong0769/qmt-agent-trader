@@ -22,21 +22,41 @@ class ChatMessage(BaseModel):
 class ChatSession(BaseModel):
     session_id: str = Field(default_factory=lambda: new_id("chat"))
     title: str = "New research chat"
-    mode: str = "research"
     created_at: str = Field(default_factory=shanghai_now_iso)
     updated_at: str = Field(default_factory=shanghai_now_iso)
     messages: list[ChatMessage] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
+    routing_history: list[RoutingInfo] = Field(default_factory=list)
+
+
+class AdvancedOptions(BaseModel):
+    universe: str = "auto"
+    start_date: str | None = None
+    end_date: str | None = None
+    max_hypotheses: int | None = None
+    risk_profile: str | None = None
+    budget_mode: str = "balanced"
+
+
+class RoutingInfo(BaseModel):
+    intent: str
+    confidence: float
+    rationale: str
+    required_tools: list[str] = Field(default_factory=list)
+    proposed_workflow: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    needs_user_clarification: bool = False
+    clarification_question: str | None = None
 
 
 class CreateChatSessionRequest(BaseModel):
     title: str | None = None
-    mode: str = "research"
     context: dict[str, Any] = Field(default_factory=dict)
 
 
 class SendMessageRequest(BaseModel):
     content: str
+    advanced: AdvancedOptions | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

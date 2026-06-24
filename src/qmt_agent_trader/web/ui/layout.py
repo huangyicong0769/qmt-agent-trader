@@ -7,7 +7,7 @@ from nicegui import ui
 NAV_ITEMS = [
     ("Chat", "/"),
     ("Tools", "/tools"),
-    ("Workflows", "/workflows"),
+    ("Runbooks", "/runbooks"),
     ("Experiments", "/experiments"),
     ("Artifacts", "/artifacts"),
     ("Backtests", "/backtests"),
