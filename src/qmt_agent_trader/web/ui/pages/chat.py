@@ -1,10 +1,13 @@
-"""Chat page — multi-session conversation like Codex.
+"""Chat page — Codex-style sidebar session list + chat area.
 
-Each session has its own transcript, orchestrator, and history.
-Sessions are listed in a top bar; click to switch or create new.
+Left panel: session list with highlighted active row, + button.
+Right panel: active session's transcript + input row.
+Sessions use pre-allocated containers (max 20) for NiceGUI compatibility.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from nicegui import ui
 
@@ -22,46 +25,36 @@ SUGGESTED_PROMPTS = [
     "解释一下上一个回测为什么收益高但回撤也大。",
 ]
 
+MAX_SESSIONS = 20
 
-# ── Session manager ──
+
+# ── Session store (reactive, page-level) ──
 
 
 class _ChatSession:
-    __slots__ = ("container", "name", "orchestrator", "sid", "transcript_col")
+    """One conversation session."""
+    __slots__ = ("container", "name", "orchestrator", "preview", "sid", "transcript")
+    _counter = 0
 
-    def __init__(self, sid: str, name: str) -> None:
-        self.sid = sid
-        self.name = name
+    def __init__(self, name: str = "") -> None:
+        _ChatSession._counter += 1
+        self.sid = f"s{_ChatSession._counter}"
+        self.name = name or f"Session {_ChatSession._counter}"
         self.orchestrator = AgentOrchestrator(settings=get_settings())
-        self.transcript_col = ui.column().classes("w-full gap-2")
-        self.container = ui.column().classes("w-full")  # wraps transcript
+        self.transcript = ui.column().classes("w-full gap-2")
+        self.preview = ""
+        self.container = ui.column().classes("w-full overflow-auto flex-1 p-4")
 
 
-class _SessionManager:
-    """Tracks multiple chat sessions; one active at a time."""
-
-    def __init__(self) -> None:
-        self.sessions: dict[str, _ChatSession] = {}
-        self.active_sid: str = ""
-        self._counter = 0
-
-    def create(self, name: str = "") -> _ChatSession:
-        self._counter += 1
-        sid = f"s{self._counter}"
-        sname = name or f"Session {self._counter}"
-        s = _ChatSession(sid, sname)
-        self.sessions[sid] = s
-        return s
-
-    def remove(self, sid: str) -> None:
-        if sid in self.sessions:
-            del self.sessions[sid]
-        if self.active_sid == sid and self.sessions:
-            self.active_sid = next(iter(self.sessions))
+# ── Helpers ──
 
 
-def _fill_prompt(message_input: ui.textarea, text: str) -> None:
-    message_input.value = text
+def _fill_prompt(inp: ui.textarea, text: str) -> None:
+    inp.value = text
+
+
+def _trunc(s: str, n: int) -> str:
+    return s[:n] + ("…" if len(s) > n else "")
 
 
 async def _send(
@@ -69,6 +62,7 @@ async def _send(
     message_input: ui.textarea,
     plan_card: ui.card,
     progress_card: ui.card,
+    refresh_sidebar: Any,
 ) -> None:
     content = (message_input.value or "").strip()
     if not content:
@@ -76,14 +70,16 @@ async def _send(
         return
 
     message_input.value = ""
+    session.preview = _trunc(content, 60)
+    refresh_sidebar()
 
-    # ── User message card ──
-    user_card = ui.card().classes("w-full bg-white border p-3")
-    with user_card:
+    # ── User ──
+    c = ui.card().classes("w-full bg-white border p-3")
+    with c:
         ui.markdown(f"**🧑 You**  \n{content}")
-    user_card.move(session.transcript_col)
+    c.move(session.transcript)
 
-    # ── Route intent ──
+    # ── Route ──
     decision = agent_router.route(content)
     intent = decision.intent.value
     confidence = decision.confidence
@@ -107,42 +103,34 @@ async def _send(
         ui.markdown(f"### 🤖 Agent Plan\n\n{plan_html}")
     plan_card.visible = True
 
-    # ── Run orchestration ──
+    # ── Orchestrate ──
     run_id = new_id("run")
-
     assistant_card: ui.card | None = None
     assistant_md: ui.markdown | None = None
     token_buf: list[str] = []
-    progress_label_ref: list[ui.label | None] = [None]
+    lbl_ref: list[ui.label | None] = [None]
     need_new_card: bool = False
 
     try:
-        async for event in session.orchestrator.execute_stream(
-            message=content,
-            routing=decision,
-            run_id=run_id,
+        async for evt in session.orchestrator.execute_stream(
+            message=content, routing=decision, run_id=run_id,
         ):
-            etype = event.type
-            emsg = event.message
-            edata = event.data
+            et = evt.type
+            em = evt.message
+            ed = evt.data
 
-            if etype == "run_started":
-                exp_id = edata.get("experiment_id", "?")
-                info_card = ui.card().classes(
-                    "w-full bg-gray-50 p-2 text-xs text-gray-500"
-                )
-                with info_card:
-                    ui.label(
-                        f"**Run** `{run_id[:8]}` | "
-                        f"**Exp** `{exp_id}` | **Intent** `{intent}`"
-                    )
-                info_card.move(session.transcript_col)
+            if et == "run_started":
+                exp = ed.get("experiment_id", "?")
+                c2 = ui.card().classes("w-full bg-gray-50 p-2 text-xs text-gray-500")
+                with c2:
+                    ui.label(f"**Run** `{run_id[:8]}` | **Exp** `{exp}` | `{intent}`")
+                c2.move(session.transcript)
 
-            elif etype == "progress":
-                if emsg and progress_label_ref[0] is not None:
-                    progress_label_ref[0].set_text(emsg)
+            elif et == "progress":
+                if em and lbl_ref[0] is not None:
+                    lbl_ref[0].set_text(em)
 
-            elif etype == "token":
+            elif et == "token":
                 if assistant_card is None or need_new_card:
                     assistant_card = ui.card().classes(
                         "w-full bg-blue-50 border p-3"
@@ -151,92 +139,78 @@ async def _send(
                         ui.markdown("**🤖 Assistant**").classes(
                             "text-sm font-semibold text-blue-800"
                         )
-                        assistant_md = ui.markdown("").classes(
-                            "text-sm text-blue-900"
-                        )
-                    assistant_card.move(session.transcript_col)
+                        assistant_md = ui.markdown("").classes("text-sm text-blue-900")
+                    assistant_card.move(session.transcript)
                     token_buf = []
                     need_new_card = False
-                token_buf.append(emsg)
+                token_buf.append(em)
                 if assistant_md is not None:
                     assistant_md.set_content("".join(token_buf))
+                if len(token_buf) <= 8:
+                    session.preview = _trunc("".join(token_buf), 60)
+                    refresh_sidebar()
 
-            elif etype == "tool_start":
-                tool_name = edata.get("tool_name", "")
+            elif et == "tool_start":
+                tn = ed.get("tool_name", "")
                 progress_card.clear()
                 with progress_card:
                     with ui.row().classes("items-center gap-2"):
                         ui.spinner(size="sm")
-                        lbl = ui.label(
-                            f"Executing: `{tool_name}`"
-                        ).classes("text-sm")
-                        progress_label_ref[0] = lbl
+                        lbl_ref[0] = ui.label(f"Executing: `{tn}`").classes("text-sm")
                 progress_card.visible = True
-
-                tool_card = ui.card().classes(
-                    "w-full bg-gray-50 border p-2 text-xs"
-                )
-                with tool_card:
-                    ui.markdown(f"🔧 **Calling:** `{tool_name}`")
-                tool_card.move(session.transcript_col)
+                c2 = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+                with c2:
+                    ui.markdown(f"🔧 **Calling:** `{tn}`")
+                c2.move(session.transcript)
                 need_new_card = True
 
-            elif etype == "tool_args":
-                args = edata.get("arguments", {})
+            elif et == "tool_args":
+                args = ed.get("arguments", {})
                 import json as _json
-                args_str = _json.dumps(
-                    args, ensure_ascii=False, default=str
-                )
-                args_card = ui.card().classes(
-                    "w-full bg-gray-50 border p-2 text-xs"
-                )
-                with args_card:
-                    ui.markdown(f"```json\n{args_str[:500]}\n```")
-                args_card.move(session.transcript_col)
+                astr = _json.dumps(args, ensure_ascii=False, default=str)
+                c2 = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+                with c2:
+                    ui.markdown(f"```json\n{astr[:500]}\n```")
+                c2.move(session.transcript)
 
-            elif etype == "tool_done":
-                preview = edata.get("result_preview", "")
+            elif et == "tool_done":
+                prv = ed.get("result_preview", "")
                 progress_card.visible = False
-                result_card = ui.card().classes(
-                    "w-full bg-gray-50 border p-2 text-xs"
-                )
-                with result_card:
-                    ui.markdown(f"✅ **Result:** `{preview}`")
-                result_card.move(session.transcript_col)
+                c2 = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+                with c2:
+                    ui.markdown(f"✅ **Result:** `{prv}`")
+                c2.move(session.transcript)
 
-            elif etype == "done":
+            elif et == "done":
                 progress_card.visible = False
                 plan_card.visible = False
-                tool_count = edata.get("tool_calls_count", 0)
-                done_card = ui.card().classes(
-                    "w-full bg-green-50 border p-2"
-                )
-                with done_card:
-                    ui.markdown(
-                        f"**✅ Done** — {tool_count} tool call(s) completed."
-                    )
-                done_card.move(session.transcript_col)
+                tc = ed.get("tool_calls_count", 0)
+                c2 = ui.card().classes("w-full bg-green-50 border p-2")
+                with c2:
+                    ui.markdown(f"**✅ Done** — {tc} tool call(s).")
+                c2.move(session.transcript)
 
-            elif etype == "error":
+            elif et == "error":
                 progress_card.visible = False
                 plan_card.visible = False
-                err_card = ui.card().classes(
+                c2 = ui.card().classes(
                     "w-full bg-red-50 border border-red-300 p-3"
                 )
-                with err_card:
+                with c2:
                     ui.icon("error", color="red").classes("inline")
-                    ui.markdown(f"**❌ Error**  \n{emsg}")
-                err_card.move(session.transcript_col)
+                    ui.markdown(f"**❌ Error**  \n{em}")
+                c2.move(session.transcript)
 
     except Exception as exc:
         progress_card.visible = False
         plan_card.visible = False
-        err_card = ui.card().classes(
-            "w-full bg-red-50 border border-red-300 p-3"
-        )
-        with err_card:
+        c2 = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
+        with c2:
             ui.markdown(f"**❌ Orchestration failed:** {exc}")
-        err_card.move(session.transcript_col)
+        c2.move(session.transcript)
+
+
+# ── Page ──
 
 
 def register() -> None:
@@ -244,190 +218,179 @@ def register() -> None:
     def chat_page() -> None:
         shell("Chat")
 
-        mgr = _SessionManager()
+        # ── Session state
+        _refresh_ref: list[Any] = [lambda: None]  # set after sidebar_list
+        sessions: dict[str, _ChatSession] = {}
+        active_sid: str = ""
+        slot_containers: list[ui.column] = []  # pre-allocated
 
-        # ── Active session state ──
-        active: dict[str, _ChatSession | None] = {"s": None}
-        plan_card: dict[str, ui.card | None] = {"c": None}
-        progress_card: dict[str, ui.card | None] = {"c": None}
-        session_tabs_ref: dict[str, ui.tabs | None] = {"t": None}
-        session_panels_ref: dict[str, ui.tab_panels | None] = {"p": None}
-
-        # ── Header: title + new-session button ──
-        with ui.row().classes("w-full items-center justify-between"):
-            with ui.column().classes("gap-1"):
-                ui.label("QMT Agent Studio").classes("text-2xl font-semibold")
-                ui.label(
-                    "Ask anything about quantitative research."
-                ).classes("text-sm text-gray-500")
-            ui.button(
-                "+ New Session",
-                on_click=lambda: _create_session(
-                    mgr, active, session_tabs_ref, session_panels_ref,
-                    plan_card, progress_card,
-                ),
-            ).props("outline size=sm color=primary")
-
-        # ── Session tabs ──
-        session_tabs = ui.tabs().classes("w-full mt-2")
-        session_panels = ui.tab_panels().classes("w-full")
-        session_tabs_ref["t"] = session_tabs
-        session_panels_ref["p"] = session_panels
-
-        # ── Shared plan / progress cards (reused across sessions) ──
-        with ui.column().classes("w-full gap-2"):
-            pc = ui.card().classes("w-full bg-blue-50 p-3")
-            pc.visible = False
-            plan_card["c"] = pc
-
-            prc = ui.card().classes("w-full bg-green-50 p-3")
-            with prc:
-                with ui.row().classes("items-center gap-2"):
-                    ui.spinner(size="sm")
-                    ui.label("").classes("text-sm")
-            prc.visible = False
-            progress_card["c"] = prc
-
-        # ── Input row ──
-        with ui.row().classes("w-full items-end gap-2 mt-2"):
-            message = (
-                ui.textarea("Type your research question...")
-                .classes("grow")
-                .props("autogrow rows=2 outlined")
-            )
-            ui.button(
-                "Send",
-                on_click=lambda: _send_active(
-                    active, message, plan_card, progress_card
-                ),
-            ).props("color=primary")
-
-        # ── Advanced panel ──
-        with ui.expansion("Advanced", icon="tune").classes("w-full"):
-            with ui.row().classes("gap-4"):
-                ui.select(
-                    ["auto", "stock", "etf", "stock_etf"],
-                    value="auto",
-                    label="Universe",
-                ).classes("w-40")
-                with ui.row().classes("gap-2"):
-                    ui.input("Start Date", value="").classes("w-36").props(
-                        "placeholder=auto"
-                    )
-                    ui.input("End Date", value="").classes("w-36").props(
-                        "placeholder=auto"
-                    )
-                ui.select(
-                    ["balanced", "fast", "thorough"],
-                    value="balanced",
-                    label="Budget",
-                ).classes("w-36")
-
-        # ── Suggested prompts ──
-        with ui.expansion(
-            "Suggested prompts", icon="lightbulb"
-        ).classes("w-full"):
-            with ui.row().classes("flex-wrap gap-2"):
-                for p in SUGGESTED_PROMPTS:
-                    ui.chip(
-                        p,
-                        on_click=lambda _, text=p: _fill_prompt(message, text),
-                    )
-
-        # ── LLM status bar ──
-        with ui.row().classes(
-            "items-center gap-2 mt-2 text-xs text-gray-400"
-        ):
-            settings = get_settings()
-            if settings.deepseek_api_key:
-                ui.icon("check_circle", size="xs", color="green")
-                ui.label(
-                    f"DeepSeek connected ({settings.deepseek_model})"
-                )
+        # ═══ Create a session ═══
+        def create_session(name: str = "", focus: bool = True) -> _ChatSession:
+            if len(sessions) >= MAX_SESSIONS:
+                ui.notify(f"Max {MAX_SESSIONS} sessions.", type="warning")
+                raise RuntimeError("too many sessions")
+            s = _ChatSession(name=name)
+            sessions[s.sid] = s
+            # Move transcript into its container
+            s.transcript.move(s.container)
+            # Assign a pre-allocated slot
+            if slot_containers:
+                slot = slot_containers.pop(0)
+                s.container.move(slot)
             else:
-                ui.icon("warning", size="xs", color="orange")
-                ui.label("DeepSeek not configured — stub mode only")
+                # Shouldn't happen with pre-allocation
+                s.container.move(chat_stack)
+            _refresh_ref[0]()
+            if focus:
+                activate_session(s.sid)
+            return s
 
-        # ── Create initial session ──
-        _create_session(
-            mgr, active, session_tabs_ref, session_panels_ref,
-            plan_card, progress_card,
-        )
+        def activate_session(sid: str) -> None:
+            nonlocal active_sid
+            if active_sid == sid:
+                return
+            # Hide current
+            if active_sid and active_sid in sessions:
+                sessions[active_sid].container.set_visibility(False)
+            # Show new
+            if sid in sessions:
+                sessions[sid].container.set_visibility(True)
+                active_sid = sid
+            _refresh_ref[0]()
 
+        def close_session(sid: str) -> None:
+            nonlocal active_sid
+            if len(sessions) <= 1:
+                ui.notify("Cannot close the last session.", type="warning")
+                return
+            s = sessions.pop(sid, None)
+            if s is not None:
+                s.container.clear()
+                s.container.set_visibility(False)
+                slot_containers.append(s.container)
+            if active_sid == sid and sessions:
+                activate_session(next(iter(sessions)))
 
-# ── Session management helpers ──
+        async def send_handler() -> None:
+            nonlocal active_sid
+            if not active_sid or active_sid not in sessions:
+                ui.notify("No active session.", type="warning")
+                return
+            s = sessions[active_sid]
+            await _send(s, message, plan_card, progress_card, _refresh_ref[0])
 
+        # ═══ Layout ═══
+        with ui.row().classes("w-full gap-0 flex-1").style("min-height: 0"):
+            # ── LEFT: session sidebar (220px) ──
+            with ui.column().classes("border-r bg-gray-50/50").style(
+                "width: 220px; flex-shrink: 0"
+            ):
+                with ui.row().classes(
+                    "w-full items-center justify-between p-3 border-b"
+                ):
+                    ui.label("Sessions").classes(
+                        "text-sm font-semibold text-gray-500 uppercase tracking-wide"
+                    )
+                    ui.button(
+                        icon="add", on_click=lambda: create_session(),
+                    ).props("flat round size=sm dense")
 
-def _create_session(
-    mgr: _SessionManager,
-    active: dict[str, _ChatSession | None],
-    tabs_ref: dict[str, ui.tabs | None],
-    panels_ref: dict[str, ui.tab_panels | None],
-    plan_card: dict[str, ui.card | None],
-    progress_card: dict[str, ui.card | None],
-) -> None:
-    s = mgr.create()
-    sid = s.sid
-    tabs = tabs_ref["t"]
-    panels = panels_ref["p"]
-    if tabs is None or panels is None:
-        return
+                # Refreshable session list
+                @ui.refreshable
+                def sidebar_list() -> None:
+                    for sid, s in sessions.items():
+                        is_active = sid == active_sid
+                        bg = "bg-blue-50 border-l-[3px] border-l-blue-500" if is_active else ""
+                        row = ui.row().classes(
+                            f"w-full items-center gap-2 px-3 py-2.5 cursor-pointer "
+                            f"hover:bg-gray-100 transition-colors {bg}"
+                        )
+                        with row:
+                            ui.icon("chat", size="sm").classes(
+                                "text-blue-500" if is_active else "text-gray-400"
+                            )
+                            with ui.column().classes("gap-0 flex-1 min-w-0"):
+                                ui.label(s.name).classes(
+                                    f"text-xs truncate "
+                                    f"{'font-semibold text-blue-700' if is_active else ''}"
+                                )
+                                ui.label(s.preview or "还没有对话").classes(
+                                    "text-[11px] text-gray-400 truncate"
+                                )
+                            if len(sessions) > 1:
+                                ui.button(
+                                    icon="close",
+                                    on_click=lambda sid=sid: close_session(sid),
+                                ).props("flat round size=xs dense").classes(
+                                    "opacity-30 hover:opacity-100"
+                                )
+                        row.on("click", lambda sid=sid: activate_session(sid))
 
-    name = s.name
+                sidebar_list()
+                _refresh_ref[0] = sidebar_list.refresh
 
-    with panels:
-        panel = ui.tab_panel(name).props(f"name={sid}")
+                # Footer
+                with ui.row().classes("items-center gap-1 p-3 text-[11px] text-gray-400"):
+                    st = get_settings()
+                    if st.deepseek_api_key:
+                        ui.icon("check_circle", size="xs", color="green")
+                        ui.label(f"DeepSeek ({st.deepseek_model})")
+                    else:
+                        ui.icon("warning", size="xs", color="orange")
+                        ui.label("No LLM")
 
-    # Move session container into the tab panel
-    s.container.move(panel)
+            # ── RIGHT: chat area ──
+            with ui.column().classes("flex-1 flex flex-col gap-0").style("min-width: 0"):
+                # Stack of pre-allocated session containers
+                chat_stack = ui.column().classes("w-full flex-1 overflow-auto relative")
+                # Pre-allocate slots
+                for _ in range(MAX_SESSIONS):
+                    slot = ui.column().classes("w-full h-full absolute inset-0")
+                    slot.set_visibility(False)
+                    slot.move(chat_stack)
+                    slot_containers.append(slot)
 
-    # Tab with close button
-    with tabs:
-        with ui.tab(name).props(f"name={sid}").classes("gap-1"):
-            ui.label(name)
-            ui.button(
-                icon="close",
-                on_click=lambda sid=sid: _close_session(
-                    mgr, sid, active, tabs, panels,
-                    plan_card, progress_card,
-                ),
-            ).props("flat round size=xs dense")
+                # Plan + progress (shared)
+                plan_card = ui.card().classes("w-full bg-blue-50 p-3 mx-4 mt-2")
+                plan_card.visible = False
 
-    panels.set_value(sid)
-    tabs.set_value(sid)
-    active["s"] = s
+                progress_card = ui.card().classes("w-full bg-green-50 p-3 mx-4")
+                with progress_card:
+                    with ui.row().classes("items-center gap-2"):
+                        ui.spinner(size="sm")
+                        ui.label("").classes("text-sm")
+                progress_card.visible = False
 
+                # Input
+                with ui.row().classes("w-full items-end gap-2 p-4 border-t"):
+                    message = (
+                        ui.textarea("Type your research question...")
+                        .classes("grow")
+                        .props("autogrow rows=2 outlined")
+                    )
+                    ui.button("Send", on_click=send_handler).props("color=primary")
 
-def _close_session(
-    mgr: _SessionManager,
-    sid: str,
-    active: dict[str, _ChatSession | None],
-    tabs: ui.tabs,
-    panels: ui.tab_panels,
-    plan_card: dict[str, ui.card | None],
-    progress_card: dict[str, ui.card | None],
-) -> None:
-    if len(mgr.sessions) <= 1:
-        ui.notify("Cannot close the last session.", type="warning")
-        return
-    mgr.remove(sid)
-    # Switch to first remaining session
-    next_sid = next(iter(mgr.sessions))
-    panels.set_value(next_sid)
-    tabs.set_value(next_sid)
-    active["s"] = mgr.sessions.get(next_sid)
+                # Expandables
+                with ui.expansion("Advanced", icon="tune").classes("w-full px-4"):
+                    with ui.row().classes("gap-4"):
+                        ui.select(
+                            ["auto", "stock", "etf", "stock_etf"],
+                            value="auto", label="Universe",
+                        ).classes("w-40")
+                        with ui.row().classes("gap-2"):
+                            ui.input("Start", value="").classes("w-32").props("placeholder=auto")
+                            ui.input("End", value="").classes("w-32").props("placeholder=auto")
+                        ui.select(
+                            ["balanced", "fast", "thorough"],
+                            value="balanced", label="Budget",
+                        ).classes("w-36")
 
+                with ui.expansion(
+                    "Suggested prompts", icon="lightbulb"
+                ).classes("w-full px-4"):
+                    with ui.row().classes("flex-wrap gap-2"):
+                        for p in SUGGESTED_PROMPTS:
+                            ui.chip(p, on_click=lambda _, text=p: _fill_prompt(message, text))
 
-async def _send_active(
-    active: dict[str, _ChatSession | None],
-    message: ui.textarea,
-    plan_card: dict[str, ui.card | None],
-    progress_card: dict[str, ui.card | None],
-) -> None:
-    s = active.get("s")
-    pc = plan_card.get("c")
-    prc = progress_card.get("c")
-    if s is None or pc is None or prc is None:
-        ui.notify("No active session.", type="warning")
-        return
-    await _send(s, message, pc, prc)
+        # ── Initial session ──
+        create_session(focus=True)
