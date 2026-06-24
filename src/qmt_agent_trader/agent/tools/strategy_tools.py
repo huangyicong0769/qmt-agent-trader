@@ -3,15 +3,17 @@ and report tool: generate_research_report."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import StrategySpec, ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
-from qmt_agent_trader.backtest.service import run_backtest_report
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.data.storage import DataLake
 
@@ -128,36 +130,143 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     if lake is None:
         return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
 
-    input_data.get("strategy_id", "")
-    input_data.get("start_date", "20200101")
-    input_data.get("end_date", "20260624")
-    input_data.get("initial_cash", 1_000_000)
+    strategy_id = input_data.get("strategy_id", "")
+    factor_name = input_data.get("factor_name", "")
+    start_date = input_data.get("start_date", "20200101")
+    end_date = input_data.get("end_date", "20260624")
+    initial_cash = float(input_data.get("initial_cash", 1_000_000))
+    top_n = int(input_data.get("top_n", 20))
 
-    reports_dir = Path("reports/backtests")
-    try:
-        summary = run_backtest_report(
-            lake,
-            reports_dir=reports_dir,
-            quantity=100,
-        ).as_dict()
+    # Resolve factor_name from strategy_id if not provided
+    if not factor_name and strategy_id:
+        factor_name = _map_strategy_factor(strategy_id)
+    if not factor_name:
         return {
-            "run_id": summary.get("run_id", new_id("bt")),
-            "metrics": {
-                "fills": summary.get("fills", 0),
-                "leakage_valid": summary.get("leakage_valid", True),
-            },
-            "report_path": summary.get("report_path", ""),
-            "leakage_report": {"valid": summary.get("leakage_valid", True)},
-            "status": "completed",
+            "status": "error",
+            "message": "必须提供 strategy_id 或 factor_name 才能回测策略。"
+            f"当前内置因子: {', '.join(sorted(_STRATEGY_FACTORS.values()))}",
         }
-    except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+
+    # Use the research runner for a baseline backtest
+    from qmt_agent_trader.backtest.research_runner import (
+        FactorRankResearchConfig,
+        FactorRankResearchRunner,
+    )
+    from qmt_agent_trader.backtest.sensitivity import SensitivityScenario
+    from qmt_agent_trader.data.bars import load_daily_bars
+
+    bars = load_daily_bars(lake)
+    if bars.empty:
+        return {"status": "error", "message": "data lake is empty; run data update first"}
+
+    # Filter bars to date range
+    bars = bars[
+        (bars["trade_date"] >= pd.to_datetime(start_date))
+        & (bars["trade_date"] <= pd.to_datetime(end_date))
+    ]
+    if bars.empty:
+        return {
+            "status": "error",
+            "message": f"no bars in range {start_date}–{end_date}",
+        }
+
+    config = FactorRankResearchConfig(
+        factor_name=factor_name,
+        top_n=top_n,
+        initial_cash=initial_cash,
+    )
+    runner = FactorRankResearchRunner(bars, config)
+    baseline = SensitivityScenario(
+        cost_multiplier=1.0,
+        slippage_bps=0.0,
+        execution_delay_days=1,
+        top_n=top_n,
+        max_single_position_pct=0.10,
+    )
+
+    result = runner.run(baseline)
+    result_dict = result.as_dict()
+
+    # Persist report
+    reports_dir = Path("reports/research")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "run_id": new_id("research"),
+        "created_at": shanghai_now_iso(),
+        "artifact_type": "strategy_backtest",
+        "title": f"Strategy backtest: {factor_name} (top_n={top_n})",
+        "research_only": True,
+        "approval_status": "NOT_REQUESTED",
+        "live_trading_allowed": False,
+        "metadata": {
+            "factor_name": factor_name,
+            "top_n": top_n,
+            "initial_cash": initial_cash,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "summary": {
+            "baseline_total_return": result.metrics.total_return,
+            "sharpe": result.metrics.sharpe,
+            "max_drawdown": result.metrics.max_drawdown,
+            "turnover": result.metrics.turnover,
+            "diagnostic_pass": result.metrics.diagnostic_pass,
+            "trade_count": len(result.trades),
+            "rejected_orders": result.rejected_orders,
+        },
+        "performance_report": {
+            "total_return": result.metrics.total_return,
+            "sharpe": result.metrics.sharpe,
+            "max_drawdown": result.metrics.max_drawdown,
+            "turnover": result.metrics.turnover,
+            "trade_count": len(result.trades),
+            "fills": len(result.trades),
+        },
+        "trade_blotter": [
+            {
+                "symbol": t.symbol,
+                "execution_date": t.trade_date,
+                "side": t.side.value,
+                "quantity": t.quantity,
+                "price": t.price,
+            }
+            for t in result.trades
+        ],
+        "payload": result_dict,
+    }
+    report_path = reports_dir / f"{report['run_id']}.json"
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    return {
+        "run_id": report["run_id"],
+        "status": "completed",
+        "factor_name": factor_name,
+        "start_date": start_date,
+        "end_date": end_date,
+        "metrics": {
+            "total_return": round(result.metrics.total_return, 4),
+            "sharpe": round(result.metrics.sharpe, 4),
+            "max_drawdown": round(result.metrics.max_drawdown, 4),
+            "turnover": round(result.metrics.turnover, 4),
+            "trade_count": len(result.trades),
+        },
+        "report_path": str(report_path),
+        "cache_hit": False,
+    }
 
 
 run_backtest_tool: AgentTool = tool(
     ToolSpec(
         name="run_backtest",
-        description="对候选策略运行真实约束回测。",
+        description=(
+            "运行因子排名策略的基线回测。返回 total_return, sharpe, max_drawdown,"
+            " turnover, trade_count。需提供 factor_name 或 strategy_id。"
+            " 内置因子: momentum_20d, momentum_60d, reversal_5d, volatility_20d,"
+            " turnover_20d, amount_zscore_20d"
+        ),
         permission=PermissionLevel.BACKTEST_EXECUTE,
         deterministic=False,
         timeout_seconds=120,
@@ -279,3 +388,33 @@ def test_generates_signals():
     assert "symbol" in result.columns
     assert "target_weight" in result.columns
 '''
+
+
+# ── Strategy → factor mapping (for run_backtest) ────────────────────────────
+
+
+_STRATEGY_FACTORS: dict[str, str] = {
+    "momentum": "momentum_20d",
+    "momentum_20d": "momentum_20d",
+    "momentum_60d": "momentum_60d",
+    "reversal": "reversal_5d",
+    "reversal_5d": "reversal_5d",
+    "volatility": "volatility_20d",
+    "volatility_20d": "volatility_20d",
+    "turnover": "turnover_20d",
+    "turnover_20d": "turnover_20d",
+    "amount_zscore": "amount_zscore_20d",
+    "amount_zscore_20d": "amount_zscore_20d",
+}
+
+
+def _map_strategy_factor(strategy_id: str) -> str | None:
+    """Resolve strategy_id to a built-in factor name."""
+    sid = strategy_id.lower().strip()
+    if sid in _STRATEGY_FACTORS:
+        return _STRATEGY_FACTORS[sid]
+    # Fuzzy match
+    for key, value in _STRATEGY_FACTORS.items():
+        if key in sid or sid in key:
+            return value
+    return None
