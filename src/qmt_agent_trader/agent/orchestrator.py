@@ -6,6 +6,7 @@ tool loop with real-time event streaming suitable for SSE delivery.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -103,8 +104,13 @@ class AgentOrchestrator:
         *,
         run_id: str | None = None,
         max_rounds: int = 100,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncGenerator[OrchestratorEvent, None]:
-        """Execute the LLM tool loop and yield events suitable for SSE streaming."""
+        """Execute the LLM tool loop and yield events suitable for SSE streaming.
+
+        If cancel_event is set, the generator checks it during the polling loop
+        and yields a 'cancelled' event instead of completing normally.
+        """
         rid = run_id or new_id("run")
         experiment_id = new_id("exp")
 
@@ -220,7 +226,21 @@ class AgentOrchestrator:
                         yield oe
                 if future.done():
                     break
+                # Check for cancellation
+                if cancel_event is not None and cancel_event.is_set():
+                    stream_error_msg = "cancelled"
+                    future.cancel()
+                    break
                 await _asyncio.sleep(0.05)
+
+            if stream_error_msg == "cancelled":
+                yield OrchestratorEvent(
+                    type="cancelled",
+                    run_id=rid,
+                    message="Execution cancelled by user.",
+                    data={"reason": "user_interrupt"},
+                )
+                return
 
             if stream_error_msg:
                 yield OrchestratorEvent(

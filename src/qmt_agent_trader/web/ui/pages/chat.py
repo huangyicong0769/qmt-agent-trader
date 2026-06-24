@@ -1,11 +1,14 @@
-"""Chat page — persistent multi-session conversations.
+"""Chat page — persistent multi-session conversations with interrupt control.
 
-Sessions survive restarts: conversation history is saved as JSON
-in sessions/ directory. UI is rebuilt from stored data on page load.
+Interrupt levels (排队 / 引导 / 打断):
+- 排队: Queue new message until current run finishes.
+- 引导 (default): Append to conversation when current run completes.
+- 打断: Cancel running execution, start fresh with new message.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,13 +33,20 @@ SUGGESTED_PROMPTS = [
     "解释一下上一个回测为什么收益高但回撤也大。",
 ]
 
+INTERRUPT_LEVELS = {
+    "guide": "引导",
+    "queue": "排队",
+    "interrupt": "打断",
+}
+INTERRUPT_LABELS = {v: k for k, v in INTERRUPT_LEVELS.items()}
+
 
 # ── Persistent message model ──
 
 
 @dataclass
 class ChatMessage:
-    role: str  # "user" | "assistant" | "tool" | "info" | "error" | "done"
+    role: str
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -45,8 +55,6 @@ class ChatMessage:
 
 
 class _ChatSession:
-    """One persistent conversation session."""
-
     __slots__ = (
         "_path",
         "container",
@@ -100,7 +108,6 @@ class _ChatSession:
         )
 
     def rebuild_ui(self) -> None:
-        """Rebuild transcript cards from stored messages."""
         self.transcript.clear()
         for msg in self.messages:
             _render_stored_message(self.transcript, msg)
@@ -133,7 +140,6 @@ class _ChatSession:
                         ) else {},
                     ))
             sessions.append(s)
-            # Track max counter
             try:
                 n = int(sid.lstrip("s"))
                 if n > max_counter:
@@ -145,7 +151,6 @@ class _ChatSession:
 
 
 def _render_stored_message(transcript: ui.column, msg: ChatMessage) -> None:
-    """Render one stored message as a card in the transcript."""
     role = msg.role
     content = msg.content
     meta = msg.metadata
@@ -217,7 +222,9 @@ async def _send(
     message_input: ui.textarea,
     plan_card: ui.card,
     progress_card: ui.card,
+    queue_badge: ui.badge,
     refresh_sidebar: Any,
+    cancel_event: asyncio.Event,
 ) -> None:
     content = (message_input.value or "").strip()
     if not content:
@@ -266,11 +273,18 @@ async def _send(
     token_buf: list[str] = []
     lbl_ref: list[ui.label | None] = [None]
     need_new_card: bool = False
+    cancelled = False
 
     try:
         async for evt in session.orchestrator.execute_stream(
             message=content, routing=decision, run_id=run_id,
+            cancel_event=cancel_event,
         ):
+            # Check for cancellation
+            if evt.type == "cancelled":
+                cancelled = True
+                break
+
             et = evt.type
             em = evt.message
             ed = evt.data
@@ -279,7 +293,9 @@ async def _send(
                 exp = ed.get("experiment_id", "?")
                 c2 = ui.card().classes("w-full bg-gray-50 p-2 text-xs text-gray-500")
                 with c2:
-                    ui.label(f"**Run** `{run_id[:8]}` | **Exp** `{exp}` | `{intent}`")
+                    ui.label(
+                        f"**Run** `{run_id[:8]}` | **Exp** `{exp}` | `{intent}`"
+                    )
                 c2.move(session.transcript)
                 session.add_message("info", f"Run {run_id[:8]} | {intent}")
 
@@ -289,12 +305,16 @@ async def _send(
 
             elif et == "token":
                 if assistant_card is None or need_new_card:
-                    assistant_card = ui.card().classes("w-full bg-blue-50 border p-3")
+                    assistant_card = ui.card().classes(
+                        "w-full bg-blue-50 border p-3"
+                    )
                     with assistant_card:
                         ui.markdown("**🤖 Assistant**").classes(
                             "text-sm font-semibold text-blue-800"
                         )
-                        assistant_md = ui.markdown("").classes("text-sm text-blue-900")
+                        assistant_md = ui.markdown("").classes(
+                            "text-sm text-blue-900"
+                        )
                     assistant_card.move(session.transcript)
                     token_buf = []
                     need_new_card = False
@@ -310,7 +330,9 @@ async def _send(
                 with progress_card:
                     with ui.row().classes("items-center gap-2"):
                         ui.spinner(size="sm")
-                        lbl_ref[0] = ui.label(f"Executing: `{tn}`").classes("text-sm")
+                        lbl_ref[0] = ui.label(
+                            f"Executing: `{tn}`"
+                        ).classes("text-sm")
                 progress_card.visible = True
                 c2 = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
                 with c2:
@@ -321,8 +343,7 @@ async def _send(
 
             elif et == "tool_args":
                 args = ed.get("arguments", {})
-                import json as _json
-                astr = _json.dumps(args, ensure_ascii=False, default=str)
+                astr = json.dumps(args, ensure_ascii=False, default=str)
                 c2 = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
                 with c2:
                     ui.markdown(f"```json\n{astr[:500]}\n```")
@@ -353,7 +374,6 @@ async def _send(
                 with c2:
                     ui.markdown(f"**✅ Done** — {tc} tool call(s).")
                 c2.move(session.transcript)
-                # Save assistant response text
                 full_text = "".join(token_buf)
                 if full_text:
                     session.add_message("assistant", full_text)
@@ -364,7 +384,9 @@ async def _send(
             elif et == "error":
                 progress_card.visible = False
                 plan_card.visible = False
-                c2 = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
+                c2 = ui.card().classes(
+                    "w-full bg-red-50 border border-red-300 p-3"
+                )
                 with c2:
                     ui.icon("error", color="red").classes("inline")
                     ui.markdown(f"**❌ Error**  \n{em}")
@@ -382,6 +404,15 @@ async def _send(
         session.add_message("error", str(exc))
         session.save()
 
+    finally:
+        if cancelled:
+            progress_card.visible = False
+            plan_card.visible = False
+            c2 = ui.card().classes("w-full bg-yellow-50 border p-2")
+            with c2:
+                ui.markdown("**⏸️ Interrupted** — 上一个任务被打断。")
+            c2.move(session.transcript)
+
 
 # ── Page ──
 
@@ -391,11 +422,15 @@ def register() -> None:
     def chat_page() -> None:
         shell("Chat")
 
-        # Load existing sessions from disk
         loaded_sessions = _ChatSession.load_all()
         sessions: dict[str, _ChatSession] = {}
         active_sid: str = ""
         _refresh_fn: list[Any] = [lambda: None]
+
+        # Interrupt state
+        cancel_event = asyncio.Event()
+        queued_message: str | None = None
+        is_running: bool = False
 
         def activate_session(sid: str) -> None:
             nonlocal active_sid
@@ -429,7 +464,6 @@ def register() -> None:
                 return
             s = sessions.pop(sid, None)
             if s is not None:
-                # Delete session file
                 try:
                     s._path.unlink(missing_ok=True)
                 except Exception:
@@ -444,17 +478,62 @@ def register() -> None:
                 _refresh_fn[0]()
 
         async def send_handler() -> None:
-            nonlocal active_sid
+            nonlocal active_sid, is_running, queued_message
             if not active_sid or active_sid not in sessions:
                 ui.notify("No active session.", type="warning")
                 return
-            await _send(
-                sessions[active_sid],
-                message,
-                plan_card,
-                progress_card,
-                _refresh_fn[0],
-            )
+
+            level = INTERRUPT_LABELS.get(interrupt_select.value, "guide")
+
+            if is_running:
+                if level == "interrupt":
+                    # 打断: cancel current, run new
+                    cancel_event.set()
+                    cancel_event.clear()
+                    # Wait briefly for cancellation to propagate
+                    await asyncio.sleep(0.1)
+                    is_running = False
+                    queue_badge.visible = False
+                    # Fall through to start new run
+                elif level == "queue":
+                    # 排队: store message, auto-process later
+                    queued_message = message.value.strip()
+                    message.value = ""
+                    queue_badge.text = "排队中…"
+                    queue_badge.visible = True
+                    ui.notify("已排队，当前任务完成后自动执行。", type="info")
+                    return
+                else:
+                    # 引导 (default): queue for after current run
+                    queued_message = message.value.strip()
+                    message.value = ""
+                    queue_badge.text = "引导中…"
+                    queue_badge.visible = True
+                    ui.notify("已加入引导队列，当前任务完成后自动执行。", type="info")
+                    return
+
+            is_running = True
+            queue_badge.visible = False
+            queued_message = None
+
+            try:
+                await _send(
+                    sessions[active_sid],
+                    message,
+                    plan_card,
+                    progress_card,
+                    queue_badge,
+                    _refresh_fn[0],
+                    cancel_event,
+                )
+            finally:
+                is_running = False
+                # Process queued message if any
+                if queued_message:
+                    qm = queued_message
+                    queued_message = None
+                    message.value = qm
+                    await send_handler()
 
         # ═══ Layout ═══
         with ui.row().classes("w-full gap-0 flex-1").style("min-height: 0"):
@@ -490,7 +569,10 @@ def register() -> None:
                                 "text-blue-500" if is_active else "text-gray-400"
                             )
                             with ui.column().classes("gap-0 flex-1 min-w-0"):
-                                nc = "font-semibold text-blue-700" if is_active else ""
+                                nc = (
+                                    "font-semibold text-blue-700"
+                                    if is_active else ""
+                                )
                                 ui.label(s.name).classes(f"text-xs truncate {nc}")
                                 ui.label(
                                     s.preview or "还没有对话"
@@ -536,12 +618,23 @@ def register() -> None:
                         ui.label("").classes("text-sm")
                 progress_card.visible = False
 
+                # ── Input row with interrupt control ──
                 with ui.row().classes("w-full items-end gap-2 p-4 border-t"):
                     message = (
                         ui.textarea("Type your research question...")
                         .classes("grow")
                         .props("autogrow rows=2 outlined")
                     )
+                    # Interrupt level selector
+                    interrupt_select = ui.select(
+                        list(INTERRUPT_LABELS.keys()),
+                        label="等级",
+                        value="引导",
+                    ).classes("w-20").props("dense outlined")
+
+                    queue_badge = ui.badge("", color="orange")
+                    queue_badge.visible = False
+
                     ui.button("Send", on_click=send_handler).props("color=primary")
 
                 with ui.expansion("Advanced", icon="tune").classes("w-full px-4"):
@@ -569,7 +662,9 @@ def register() -> None:
                         for p in SUGGESTED_PROMPTS:
                             ui.chip(
                                 p,
-                                on_click=lambda _, text=p: _fill_prompt(message, text),
+                                on_click=lambda _, text=p: _fill_prompt(
+                                    message, text
+                                ),
                             )
 
         # ── Load existing sessions ──
@@ -580,7 +675,6 @@ def register() -> None:
             s.container.visible = False
             s.rebuild_ui()
 
-        # ── Activate first session (existing or new) ──
         if sessions:
             _refresh_fn[0]()
             activate_session(next(iter(sessions)))
