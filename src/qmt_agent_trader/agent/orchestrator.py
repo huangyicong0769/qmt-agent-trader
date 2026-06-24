@@ -167,9 +167,12 @@ class AgentOrchestrator:
             "the same tool with different arguments unless the user explicitly asks. "
             "Prefer wide exploratory calls (list all, validate all) over one-at-a-time "
             "calls. Always respond in Chinese. "
-            "Key tools: list_available_factors, validate_factor, "
+            "Key tools: list_factors, compute_factor, validate_factor, "
             "walk_forward_factor_validation, run_factor_rank_long_only_backtest, "
-            "run_factor_rank_sensitivity, list_backtest_reports."
+            "run_factor_rank_sensitivity, list_backtest_reports. "
+            "After validating a factor and confirming it has predictive power "
+            "(|IC| > 0.01, positive spread), use compute_factor to persist it "
+            "to the data lake gold layer."
             + routing_hint
         )
 

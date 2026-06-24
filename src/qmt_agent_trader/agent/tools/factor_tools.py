@@ -180,19 +180,6 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             if _sandbox
             else ""
         )
-
-        # ── Persist validated factor to data lake ──
-        try:
-            from qmt_agent_trader.factors.service import compute_factor_to_lake
-            persist_result = compute_factor_to_lake(lake, name=factor_name, date=end)
-            result["persisted"] = {
-                "dataset": f"factor_{factor_name}_{end}",
-                "path": persist_result.path,
-                "rows": persist_result.rows,
-            }
-        except Exception as pe:
-            result["persisted"] = {"status": "skipped", "reason": str(pe)}
-
         return result
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
@@ -208,7 +195,6 @@ evaluate_factor_candidate_tool: AgentTool = tool(
     ),
     fn=_evaluate_factor_candidate,
 )
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

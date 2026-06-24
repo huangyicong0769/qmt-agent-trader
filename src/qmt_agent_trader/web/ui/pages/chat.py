@@ -1,8 +1,7 @@
 """Chat page — natural conversation with real LLM orchestration via SSE.
 
-Cards are appended to a persistent session transcript so previous
-turns remain visible.  After a tool-call round, the next LLM text
-response starts a fresh assistant card.
+Each browser tab/session gets its own AgentOrchestrator instance.
+Cards accumulate across turns so history is preserved.
 """
 
 from __future__ import annotations
@@ -23,94 +22,13 @@ SUGGESTED_PROMPTS = [
     "解释一下上一个回测为什么收益高但回撤也大。",
 ]
 
-_orchestrator: AgentOrchestrator | None = None
-
-
-def _get_orchestrator() -> AgentOrchestrator:
-    global _orchestrator
-    if _orchestrator is None:
-        _orchestrator = AgentOrchestrator(settings=get_settings())
-    return _orchestrator
-
-
-def register() -> None:
-    @ui.page("/")
-    def chat_page() -> None:
-        shell("Chat")
-
-        with ui.column().classes("w-full gap-2"):
-            ui.label("QMT Agent Studio").classes("text-2xl font-semibold")
-            ui.label(
-                "Ask anything about quantitative research — "
-                "Agent routes and executes automatically."
-            ).classes("text-sm text-gray-500 mb-2")
-
-        # ── Session transcript (cards accumulate across turns) ──
-        transcript_col = ui.column().classes("w-full gap-2")
-
-        # ── Plan card (reused per turn) ──
-        plan_card = ui.card().classes("w-full bg-blue-50 p-3")
-        plan_card.visible = False
-
-        # ── Progress card (reused per turn) ──
-        progress_card = ui.card().classes("w-full bg-green-50 p-3")
-        with progress_card:
-            with ui.row().classes("items-center gap-2"):
-                ui.spinner(size="sm")
-                ui.label("").classes("text-sm")
-        progress_card.visible = False
-
-        # ── Input row ──
-        with ui.row().classes("w-full items-end gap-2"):
-            message = (
-                ui.textarea("Type your research question...")
-                .classes("grow")
-                .props("autogrow rows=2 outlined")
-            )
-            ui.button(
-                "Send",
-                on_click=lambda: _send(transcript_col, message, plan_card, progress_card),
-            ).props("color=primary")
-
-        # ── Advanced panel ──
-        with ui.expansion("Advanced", icon="tune").classes("w-full"):
-            with ui.row().classes("gap-4"):
-                ui.select(
-                    ["auto", "stock", "etf", "stock_etf"],
-                    value="auto",
-                    label="Universe",
-                ).classes("w-40")
-                with ui.row().classes("gap-2"):
-                    ui.input("Start Date", value="").classes("w-36").props("placeholder=auto")
-                    ui.input("End Date", value="").classes("w-36").props("placeholder=auto")
-                ui.select(
-                    ["balanced", "fast", "thorough"],
-                    value="balanced",
-                    label="Budget",
-                ).classes("w-36")
-
-        # ── Suggested prompts ──
-        with ui.expansion("Suggested prompts", icon="lightbulb").classes("w-full"):
-            with ui.row().classes("flex-wrap gap-2"):
-                for p in SUGGESTED_PROMPTS:
-                    ui.chip(p, on_click=lambda _, text=p: _fill_prompt(message, text))
-
-        # ── LLM status bar ──
-        with ui.row().classes("items-center gap-2 mt-2 text-xs text-gray-400"):
-            orch = _get_orchestrator()
-            if orch.settings.deepseek_api_key:
-                ui.icon("check_circle", size="xs", color="green")
-                ui.label(f"DeepSeek connected ({orch.settings.deepseek_model})")
-            else:
-                ui.icon("warning", size="xs", color="orange")
-                ui.label("DeepSeek not configured — stub mode only")
-
 
 def _fill_prompt(message_input: ui.textarea, text: str) -> None:
     message_input.value = text
 
 
 async def _send(
+    orchestrator: AgentOrchestrator,
     transcript_col: ui.column,
     message_input: ui.textarea,
     plan_card: ui.card,
@@ -123,7 +41,7 @@ async def _send(
 
     message_input.value = ""
 
-    # ── User message card (always new) ──
+    # ── User message card ──
     user_card = ui.card().classes("w-full bg-white border p-3")
     with user_card:
         ui.markdown(f"**🧑 You**  \n{content}")
@@ -154,16 +72,12 @@ async def _send(
     plan_card.visible = True
 
     # ── Step 2: Run orchestration ──
-    orchestrator = _get_orchestrator()
     run_id = new_id("run")
 
-    # Per-turn state (reset each turn)
     assistant_card: ui.card | None = None
     assistant_md: ui.markdown | None = None
     token_buf: list[str] = []
     progress_label_ref: list[ui.label | None] = [None]
-    # Track whether we've seen tool calls since the last assistant card.
-    # When True and new TextDelta arrives, we start a fresh assistant card.
     need_new_card: bool = False
 
     try:
@@ -178,25 +92,32 @@ async def _send(
 
             if etype == "run_started":
                 exp_id = edata.get("experiment_id", "?")
-                info_card = ui.card().classes("w-full bg-gray-50 p-2 text-xs text-gray-500")
+                info_card = ui.card().classes(
+                    "w-full bg-gray-50 p-2 text-xs text-gray-500"
+                )
                 with info_card:
-                    ui.label(f"**Run** `{run_id[:8]}` | **Exp** `{exp_id}` | **Intent** `{intent}`")
+                    ui.label(
+                        f"**Run** `{run_id[:8]}` | "
+                        f"**Exp** `{exp_id}` | **Intent** `{intent}`"
+                    )
                 info_card.move(transcript_col)
 
             elif etype == "progress":
                 if emsg and progress_label_ref[0] is not None:
                     progress_label_ref[0].set_text(emsg)
 
-            # ── Streaming token ──
             elif etype == "token":
                 if assistant_card is None or need_new_card:
-                    # Start a fresh assistant response card
-                    assistant_card = ui.card().classes("w-full bg-blue-50 border p-3")
+                    assistant_card = ui.card().classes(
+                        "w-full bg-blue-50 border p-3"
+                    )
                     with assistant_card:
                         ui.markdown("**🤖 Assistant**").classes(
                             "text-sm font-semibold text-blue-800"
                         )
-                        assistant_md = ui.markdown("").classes("text-sm text-blue-900")
+                        assistant_md = ui.markdown("").classes(
+                            "text-sm text-blue-900"
+                        )
                     assistant_card.move(transcript_col)
                     token_buf = []
                     need_new_card = False
@@ -204,7 +125,6 @@ async def _send(
                 if assistant_md is not None:
                     assistant_md.set_content("".join(token_buf))
 
-            # ── Tool events ──
             elif etype == "tool_start":
                 tool_name = edata.get("tool_name", "")
                 progress_card.clear()
@@ -219,7 +139,7 @@ async def _send(
                 with tool_card:
                     ui.markdown(f"🔧 **Calling:** `{tool_name}`")
                 tool_card.move(transcript_col)
-                need_new_card = True  # subsequent text is a new response
+                need_new_card = True
 
             elif etype == "tool_args":
                 args = edata.get("arguments", {})
@@ -233,7 +153,9 @@ async def _send(
             elif etype == "tool_done":
                 preview = edata.get("result_preview", "")
                 progress_card.visible = False
-                result_card = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
+                result_card = ui.card().classes(
+                    "w-full bg-gray-50 border p-2 text-xs"
+                )
                 with result_card:
                     ui.markdown(f"✅ **Result:** `{preview}`")
                 result_card.move(transcript_col)
@@ -244,13 +166,17 @@ async def _send(
                 tool_count = edata.get("tool_calls_count", 0)
                 done_card = ui.card().classes("w-full bg-green-50 border p-2")
                 with done_card:
-                    ui.markdown(f"**✅ Done** — {tool_count} tool call(s) completed.")
+                    ui.markdown(
+                        f"**✅ Done** — {tool_count} tool call(s) completed."
+                    )
                 done_card.move(transcript_col)
 
             elif etype == "error":
                 progress_card.visible = False
                 plan_card.visible = False
-                err_card = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
+                err_card = ui.card().classes(
+                    "w-full bg-red-50 border border-red-300 p-3"
+                )
                 with err_card:
                     ui.icon("error", color="red").classes("inline")
                     ui.markdown(f"**❌ Error**  \n{emsg}")
@@ -259,7 +185,98 @@ async def _send(
     except Exception as exc:
         progress_card.visible = False
         plan_card.visible = False
-        err_card = ui.card().classes("w-full bg-red-50 border border-red-300 p-3")
+        err_card = ui.card().classes(
+            "w-full bg-red-50 border border-red-300 p-3"
+        )
         with err_card:
             ui.markdown(f"**❌ Orchestration failed:** {exc}")
         err_card.move(transcript_col)
+
+
+def register() -> None:
+    @ui.page("/")
+    def chat_page() -> None:
+        shell("Chat")
+
+        # ── Per-session orchestrator (isolated from other tabs/users) ──
+        orchestrator = AgentOrchestrator(settings=get_settings())
+
+        with ui.column().classes("w-full gap-2"):
+            ui.label("QMT Agent Studio").classes("text-2xl font-semibold")
+            ui.label(
+                "Ask anything about quantitative research — "
+                "Agent routes and executes automatically."
+            ).classes("text-sm text-gray-500 mb-2")
+
+        # ── Session transcript ──
+        transcript_col = ui.column().classes("w-full gap-2")
+
+        # ── Plan card ──
+        plan_card = ui.card().classes("w-full bg-blue-50 p-3")
+        plan_card.visible = False
+
+        # ── Progress card ──
+        progress_card = ui.card().classes("w-full bg-green-50 p-3")
+        with progress_card:
+            with ui.row().classes("items-center gap-2"):
+                ui.spinner(size="sm")
+                ui.label("").classes("text-sm")
+        progress_card.visible = False
+
+        # ── Input row ──
+        with ui.row().classes("w-full items-end gap-2"):
+            message = (
+                ui.textarea("Type your research question...")
+                .classes("grow")
+                .props("autogrow rows=2 outlined")
+            )
+            ui.button(
+                "Send",
+                on_click=lambda: _send(
+                    orchestrator,
+                    transcript_col,
+                    message,
+                    plan_card,
+                    progress_card,
+                ),
+            ).props("color=primary")
+
+        # ── Advanced panel ──
+        with ui.expansion("Advanced", icon="tune").classes("w-full"):
+            with ui.row().classes("gap-4"):
+                ui.select(
+                    ["auto", "stock", "etf", "stock_etf"],
+                    value="auto",
+                    label="Universe",
+                ).classes("w-40")
+                with ui.row().classes("gap-2"):
+                    ui.input("Start Date", value="").classes("w-36").props(
+                        "placeholder=auto"
+                    )
+                    ui.input("End Date", value="").classes("w-36").props(
+                        "placeholder=auto"
+                    )
+                ui.select(
+                    ["balanced", "fast", "thorough"],
+                    value="balanced",
+                    label="Budget",
+                ).classes("w-36")
+
+        # ── Suggested prompts ──
+        with ui.expansion("Suggested prompts", icon="lightbulb").classes("w-full"):
+            with ui.row().classes("flex-wrap gap-2"):
+                for p in SUGGESTED_PROMPTS:
+                    ui.chip(
+                        p, on_click=lambda _, text=p: _fill_prompt(message, text)
+                    )
+
+        # ── LLM status bar ──
+        with ui.row().classes("items-center gap-2 mt-2 text-xs text-gray-400"):
+            if orchestrator.settings.deepseek_api_key:
+                ui.icon("check_circle", size="xs", color="green")
+                ui.label(
+                    f"DeepSeek connected ({orchestrator.settings.deepseek_model})"
+                )
+            else:
+                ui.icon("warning", size="xs", color="orange")
+                ui.label("DeepSeek not configured — stub mode only")
