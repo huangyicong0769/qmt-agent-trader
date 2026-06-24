@@ -111,6 +111,21 @@ def tui() -> None:
     run_tui()
 
 
+@app.command("web")
+def serve_web(
+    host: str = typer.Option("127.0.0.1"),
+    port: int = typer.Option(7860),
+    reload: bool = typer.Option(False),
+) -> None:
+    """Start QMT Agent Studio web interface."""
+    import uvicorn
+
+    from qmt_agent_trader.web.app import create_app
+
+    web_app = create_app()
+    uvicorn.run(web_app, host=host, port=port, reload=reload)
+
+
 @data_app.command("update")
 def data_update(
     from_date: Annotated[str, typer.Option("--from")],
