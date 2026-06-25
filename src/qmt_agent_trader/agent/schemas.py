@@ -47,7 +47,12 @@ class ToolSpec(BaseModel):
 
     name: str
     description: str
-    input_schema: dict[str, Any] = Field(default_factory=dict)
+    input_schema: dict[str, Any] = Field(default_factory=lambda: {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    })
     output_schema: dict[str, Any] = Field(default_factory=dict)
     permission: PermissionLevel = PermissionLevel.READ_ONLY
     side_effect_level: str = "none"  # none | write_generated | write_formal

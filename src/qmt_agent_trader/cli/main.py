@@ -260,7 +260,7 @@ def agent_call_tool(
 @agent_app.command("ask")
 def agent_ask(
     prompt: Annotated[str, typer.Option("--prompt")],
-    max_rounds: Annotated[int, typer.Option("--max-rounds")] = 4,
+    max_rounds: Annotated[int, typer.Option("--max-rounds")] = 100,
 ) -> None:
     runtime = build_default_runtime(_settings())
     try:

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from qmt_agent_trader.agent.llm_client import DeepSeekClient, DeepSeekToolLoopResult
 from qmt_agent_trader.agent.permissions import ToolCapability
+from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tool_registry import ToolDefinition, ToolRegistry
 from qmt_agent_trader.agent.tools.backtest_tools import (
     plan_sensitivity_analysis,
@@ -23,6 +24,7 @@ from qmt_agent_trader.backtest.service import (
 )
 from qmt_agent_trader.broker.remote_client import RemoteQMTBrokerClient
 from qmt_agent_trader.core.config import Settings, get_settings
+from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.service import (
@@ -32,6 +34,9 @@ from qmt_agent_trader.factors.service import (
 )
 from qmt_agent_trader.services.research_report_service import compare_research_reports
 from qmt_agent_trader.strategy.approval import read_approval_file
+
+if TYPE_CHECKING:
+    from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
 
 
 @dataclass
@@ -49,7 +54,18 @@ class AgentRuntime:
     def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
         return self.registry().call_as_llm(tool_name, **kwargs)
 
-    def ask(self, prompt: str, *, max_rounds: int = 4) -> DeepSeekToolLoopResult:
+    def agent_registry(self) -> AgentToolRegistry:
+        from qmt_agent_trader.agent.sandbox import CodeSandbox
+        from qmt_agent_trader.agent.tools import build_agent_registry
+
+        return build_agent_registry(
+            data_lake=self.lake,
+            audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
+            experiment_root=self.settings.resolved_data_dir / "experiments",
+            sandbox=CodeSandbox(),
+        )
+
+    def ask(self, prompt: str, *, max_rounds: int = 100) -> DeepSeekToolLoopResult:
         if self.settings.deepseek_api_key is None:
             raise ValueError("DEEPSEEK_API_KEY is required for agent ask")
         client = DeepSeekClient(
@@ -57,20 +73,32 @@ class AgentRuntime:
             base_url=self.settings.deepseek_base_url,
             model=self.settings.deepseek_model,
         )
+        run_id = new_id("run")
         return client.run_tool_loop(
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are the QMT research agent. Use tools for local facts. "
-                        "You may read data, write research artifacts, and run simulated "
-                        "backtests. You must not submit live orders, modify live config, "
-                        "or bypass approvals."
+                        "You are the QMT research agent. Use tools for local facts and "
+                        "multi-step research loops. You may read data, write generated "
+                        "research artifacts, generate candidate code in the sandbox, and run "
+                        "simulated backtests. You must not submit live orders, modify live "
+                        "config, or bypass approvals. Always respond in Chinese."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            tools=self.registry().deepseek_tools_for_llm(),
+            tools=(
+                self.agent_registry()
+                .to_legacy_registry(
+                    context_factory=lambda: ToolContext(
+                        run_id=run_id,
+                        requested_by_llm=True,
+                        dry_run=True,
+                    )
+                )
+                .deepseek_tools_for_llm()
+            ),
             max_rounds=max_rounds,
         )
 

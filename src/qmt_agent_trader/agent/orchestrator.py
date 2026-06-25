@@ -20,7 +20,10 @@ from qmt_agent_trader.agent.llm_client import (
 )
 from qmt_agent_trader.agent.permissions import ToolCapability
 from qmt_agent_trader.agent.router import RoutingDecision
-from qmt_agent_trader.agent.tool_registry import ToolDefinition, ToolRegistry
+from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.agent.schemas import ToolContext
+from qmt_agent_trader.agent.tool_registry import AgentToolRegistry, ToolDefinition, ToolRegistry
+from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.tools.backtest_tools import (
     plan_sensitivity_analysis,
     run_factor_rank_sensitivity,
@@ -90,12 +93,14 @@ class AgentOrchestrator:
     def lake(self) -> DataLake:
         return self._lake
 
-    def _build_registry(self) -> ToolRegistry:
-        """Reuse the v1 AgentRuntime tool registry for LLM interaction."""
-        registry = ToolRegistry()
-        _register_all_tools(registry, self._lake, self._reports_dir,
-                           self._research_dir, self._approvals_dir)
-        return registry
+    def _build_registry(self) -> AgentToolRegistry:
+        """Build the full AgentTool registry used by chat orchestration."""
+        return build_agent_registry(
+            data_lake=self._lake,
+            audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
+            experiment_root=self.settings.resolved_data_dir / "experiments",
+            sandbox=CodeSandbox(),
+        )
 
     async def execute_stream(
         self,
@@ -163,27 +168,36 @@ class AgentOrchestrator:
             )
 
         system_msg = (
-            "You are the QMT research agent. Use tools for local facts. "
-            "You may read data, write research artifacts, and run simulated "
-            "backtests. You must not submit live orders, modify live config, "
-            "or bypass approvals. "
-            "CRITICAL: After calling 1-3 tools, STOP and give the user a clear "
-            "Chinese-language summary of what you found. Do not keep calling tools "
-            "in loops. If a tool returns an error, explain it and stop — do not retry "
-            "the same tool with different arguments unless the user explicitly asks. "
-            "Prefer wide exploratory calls (list all, validate all) over one-at-a-time "
-            "calls. Always respond in Chinese. "
-            "Key tools: list_factors, compute_factor, validate_factor, "
-            "walk_forward_factor_validation, run_factor_rank_long_only_backtest, "
-            "run_factor_rank_sensitivity, list_backtest_reports. "
-            "After validating a factor and confirming it has predictive power "
-            "(|IC| > 0.01, positive spread), use compute_factor to persist it "
-            "to the data lake gold layer."
+            "You are the QMT research agent. Use tools for local facts and for "
+            "multi-step research loops. You may read data, write generated research "
+            "artifacts, generate candidate code in the sandbox, and run simulated "
+            "backtests. You must not submit live orders, modify live config, or bypass "
+            "approvals. Tools that require human approval are not available to you as "
+            "function calls. Use list_tools and describe_tool when you need to discover "
+            "the available surface. Keep calling distinct useful tools until you have "
+            "enough evidence to answer; avoid repeating the same tool with the same "
+            "arguments. If a tool returns NOT_AVAILABLE or an error, either choose a "
+            "different relevant tool or report the blocker clearly. Always respond in "
+            "Chinese. Typical factor loop: list_data_catalog, query_universe/query_bars, "
+            "create_factor_spec, generate_factor_code, run_factor_static_checks, "
+            "evaluate_factor_candidate, generate_research_report. Typical strategy "
+            "loop: search_experiments, create_strategy_spec, generate_strategy_code, "
+            "run_backtest, generate_research_report. Typical self-bootstrap loop: "
+            "search_experiments, detect_tool_gap, create_tool_spec, generate_tool_code, "
+            "generate_tool_tests, run_tool_sandbox_tests, score_tool_candidate."
             + routing_hint
         )
 
         registry = self._build_registry()
-        tools = registry.deepseek_tools_for_llm()
+        legacy_registry = registry.to_legacy_registry(
+            context_factory=lambda: ToolContext(
+                run_id=rid,
+                experiment_id=experiment_id,
+                requested_by_llm=True,
+                dry_run=True,
+            )
+        )
+        tools = legacy_registry.deepseek_tools_for_llm()
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_msg},

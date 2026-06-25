@@ -22,6 +22,7 @@ from qmt_agent_trader.agent.llm_client import DeepSeekTool
 from qmt_agent_trader.agent.permissions import (
     ToolCapability,
     assert_llm_tool_allowed,
+    can_llm_call,
     require_permission,
     to_capability,
 )
@@ -135,6 +136,7 @@ class AgentToolRegistry:
                     "output_schema": spec.output_schema,
                     "side_effect_level": spec.side_effect_level,
                     "deterministic": spec.deterministic,
+                    "llm_callable": can_llm_call(spec.permission),
                 }
             )
         return result
@@ -199,15 +201,26 @@ class AgentToolRegistry:
 
     # ── Bridge: expose as original ToolRegistry (for LLM client) ──────────
 
-    def to_legacy_registry(self) -> ToolRegistry:
+    def to_legacy_registry(
+        self,
+        *,
+        context_factory: Callable[[], ToolContext] | None = None,
+        llm_callable_only: bool = True,
+    ) -> ToolRegistry:
         legacy = ToolRegistry()
         for name, tool in sorted(self.tools.items()):
             spec = tool.spec
+            if llm_callable_only and not can_llm_call(spec.permission):
+                continue
             capability = to_capability(spec.permission)
 
             def build_fn(nt: str) -> Callable[..., Any]:
                 def fn(**kwargs: Any) -> dict[str, Any]:
-                    context = ToolContext(run_id="legacy")
+                    context = (
+                        context_factory()
+                        if context_factory is not None
+                        else ToolContext(run_id="legacy")
+                    )
                     return self.run_tool(nt, kwargs, context)
 
                 return fn
@@ -218,7 +231,7 @@ class AgentToolRegistry:
                     capability=capability,
                     fn=build_fn(name),
                     description=spec.description,
-                    parameters=spec.input_schema,
+                    parameters=_llm_input_schema(spec.input_schema),
                 )
             )
         return legacy
@@ -260,3 +273,22 @@ class AgentToolRegistry:
                 )
             except Exception:
                 pass  # audit failure must not break tool execution
+
+
+def _llm_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return an OpenAI function-tool compatible object schema."""
+    if schema.get("type") == "object":
+        return schema
+    if not schema:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
+    return {
+        "type": "object",
+        "properties": schema.get("properties", {}),
+        "required": schema.get("required", []),
+        "additionalProperties": schema.get("additionalProperties", False),
+    }

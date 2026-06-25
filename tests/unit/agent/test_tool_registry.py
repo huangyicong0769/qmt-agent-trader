@@ -170,3 +170,45 @@ def test_legacy_register_and_list() -> None:
         )
     )
     assert len(reg.list_tools()) == 1
+
+
+def test_agent_registry_legacy_bridge_exports_llm_callable_tools_only() -> None:
+    reg = AgentToolRegistry()
+    reg.register(_echo_tool("read", permission=PermissionLevel.READ_ONLY))
+    reg.register(_echo_tool("code", permission=PermissionLevel.CODE_GENERATION))
+    reg.register(_echo_tool("backtest", permission=PermissionLevel.BACKTEST_EXECUTE))
+    reg.register(_echo_tool("approval", permission=PermissionLevel.APPROVAL_REQUIRED))
+    reg.register(_echo_tool("forbidden", permission=PermissionLevel.FORBIDDEN_TO_LLM))
+
+    legacy = reg.to_legacy_registry()
+    names = set(legacy.tools)
+
+    assert {"read", "code", "backtest"}.issubset(names)
+    assert "approval" not in names
+    assert "forbidden" not in names
+    deepseek_tools = legacy.deepseek_tools_for_llm()
+    assert {item.name for item in deepseek_tools} == names
+    assert all(item.parameters.get("type") == "object" for item in deepseek_tools)
+
+
+def test_agent_registry_legacy_bridge_uses_context_factory() -> None:
+    seen_contexts: list[ToolContext] = []
+    reg = AgentToolRegistry()
+    reg.register(
+        tool(
+            ToolSpec(name="echo_context", description="Echo context"),
+            fn=lambda data, context: seen_contexts.append(context) or {
+                "run_id": context.run_id,
+                "experiment_id": context.experiment_id,
+            },
+        )
+    )
+
+    legacy = reg.to_legacy_registry(
+        context_factory=lambda: ToolContext(run_id="run-llm", experiment_id="exp-1")
+    )
+
+    result = legacy.call_as_llm("echo_context", value=1)
+
+    assert result == {"run_id": "run-llm", "experiment_id": "exp-1"}
+    assert seen_contexts[0].requested_by_llm is True
