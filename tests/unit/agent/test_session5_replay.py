@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -134,6 +135,60 @@ def test_session5_trend_persistence_does_not_match_rsi_substring(tmp_path) -> No
     assert "avg_gain" not in code
     assert "moving_average" in code
     assert "rolling(lookback)" in code
+
+
+def test_session5_rsi_template_produces_numeric_coverage(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    registry = _registry(tmp_path, lake)
+
+    code_result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_spec": {
+                "factor_id": "factor_rsi",
+                "name": "rsi_14d_single",
+                "lookback": 14,
+                "formula": "100 - 100/(1 + mean_gain_14 / mean_loss_14)",
+            }
+        },
+        ToolContext(run_id="s5"),
+    )
+    spec = importlib.util.spec_from_file_location("candidate_rsi", code_result["code_path"])
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    closes = [
+        10.0,
+        10.4,
+        10.1,
+        10.7,
+        10.3,
+        10.9,
+        10.6,
+        11.0,
+        10.8,
+        11.3,
+        11.0,
+        11.5,
+        11.2,
+        11.7,
+        11.4,
+        11.9,
+        11.6,
+        12.1,
+    ]
+    bars = pd.DataFrame(
+        {
+            "symbol": ["159259.SZ"] * len(closes),
+            "trade_date": pd.date_range("2025-01-01", periods=len(closes)),
+            "close": closes,
+        }
+    )
+
+    result = module.compute(bars)
+
+    assert pd.api.types.is_numeric_dtype(result)
+    assert result.notna().sum() > 0
 
 
 def test_session5_save_factor_infers_sibling_spec_when_omitted(tmp_path) -> None:
@@ -279,3 +334,35 @@ def test_session5_run_backtest_can_scope_to_single_etf(tmp_path) -> None:
     assert result["status"] == "completed"
     assert result["symbols"] == ["159259.SZ"]
     assert result["metrics"]["trade_count"] > 0
+
+
+def test_session5_factor_tools_default_to_current_end_date(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    _seed_etf_bars(lake)
+    registry = _registry(tmp_path, lake)
+    today = pd.Timestamp.now(tz="Asia/Shanghai").strftime("%Y%m%d")
+
+    evaluated = registry.run_tool(
+        "evaluate_factor_candidate",
+        {
+            "factor_id": "momentum_20d",
+            "symbol": "159259.SZ",
+            "start_date": "2025-09-30",
+        },
+        ToolContext(run_id="s5"),
+    )
+    backtest = registry.run_tool(
+        "run_backtest",
+        {
+            "factor_name": "momentum_20d",
+            "symbol": "159259.SZ",
+            "start_date": "2025-09-30",
+            "top_n": 1,
+        },
+        ToolContext(run_id="s5"),
+    )
+
+    assert evaluated["status"] == "validated"
+    assert evaluated["end"] == today
+    assert backtest["status"] == "completed"
+    assert backtest["end_date"] == today

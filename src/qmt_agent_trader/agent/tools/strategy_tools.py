@@ -4,6 +4,7 @@ and report tool: generate_research_report."""
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import StrategySpec, ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
-from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
+from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 
@@ -140,7 +141,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     strategy_id = input_data.get("strategy_id", "")
     factor_name = input_data.get("factor_name", "")
     start_date = input_data.get("start_date", "20200101")
-    end_date = input_data.get("end_date", "20260624")
+    end_date = input_data.get("end_date", _today_yyyymmdd())
     initial_cash = float(input_data.get("initial_cash", 1_000_000))
     top_n = int(input_data.get("top_n", 20))
     symbols = _requested_symbols(input_data)
@@ -466,6 +467,10 @@ def _map_strategy_factor(strategy_id: str) -> str | None:
 
 def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
+
+
+def _today_yyyymmdd() -> str:
+    return datetime.now(tz=SHANGHAI_TZ).strftime("%Y%m%d")
 
 
 def _requested_symbols(input_data: dict[str, Any]) -> list[str]:

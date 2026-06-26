@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import FactorSpec, ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
-from qmt_agent_trader.core.ids import new_id
+from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import (
@@ -272,7 +273,7 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
     if not str(factor_id).strip():
         return {"status": "INVALID_REQUEST", "message": "factor_id is required"}
     start = input_data.get("start_date", "20200101")
-    end = input_data.get("end_date", "20260624")
+    end = input_data.get("end_date", _today_yyyymmdd())
     symbols = _requested_symbols(input_data)
 
     lake = _lake
@@ -449,11 +450,13 @@ def _factor_compute_body(name: str, formula: str, lookback: int) -> str:
     if _is_rsi_formula(name, formula):
         return '''    delta = bars.groupby("symbol")["close"].diff()
     gain = delta.clip(lower=0)
-    loss = (-delta.clip(upper=0)).replace(0, float("nan"))
+    loss = -delta.clip(upper=0)
     avg_gain = gain.groupby(bars["symbol"]).transform(lambda item: item.rolling(14).mean())
     avg_loss = loss.groupby(bars["symbol"]).transform(lambda item: item.rolling(14).mean())
-    rs = avg_gain / avg_loss
-    return 100 - 100 / (1 + rs)'''
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    rsi = 100 - 100 / (1 + rs)
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    return rsi.mask((avg_loss == 0) & (avg_gain == 0), 50.0)'''
     if "volume_breakout" in name or "volume_ratio" in formula:
         return '''    volume_ma = bars.groupby("symbol")["volume"].transform(
         lambda item: item.rolling(5).mean()
@@ -485,6 +488,10 @@ def _is_rsi_formula(name: str, formula: str) -> bool:
         if token
     }
     return "rsi" in tokens or "relative strength" in formula or "rs =" in formula
+
+
+def _today_yyyymmdd() -> str:
+    return datetime.now(tz=SHANGHAI_TZ).strftime("%Y%m%d")
 
 
 def _render_factor_test_code(name: str) -> str:
