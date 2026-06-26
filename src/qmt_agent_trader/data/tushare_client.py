@@ -14,6 +14,10 @@ import pandas as pd
 from qmt_agent_trader.core.errors import ConfigurationError
 
 
+def _normalize_tushare_date(value: str) -> str:
+    return str(value).replace("-", "")
+
+
 @dataclass(frozen=True)
 class TushareRequest:
     api_name: str
@@ -30,26 +34,39 @@ class TushareClient:
     def build_daily_request(
         self, *, start_date: str, end_date: str, ts_code: str | None = None
     ) -> TushareRequest:
-        params: dict[str, Any] = {"start_date": start_date, "end_date": end_date}
+        params: dict[str, Any] = {
+            "start_date": _normalize_tushare_date(start_date),
+            "end_date": _normalize_tushare_date(end_date),
+        }
         if ts_code:
             params["ts_code"] = ts_code
         return TushareRequest(api_name="daily", params=params)
 
     def build_daily_by_trade_date_request(self, trade_date: str) -> TushareRequest:
-        return TushareRequest(api_name="daily", params={"trade_date": trade_date})
+        return TushareRequest(
+            api_name="daily", params={"trade_date": _normalize_tushare_date(trade_date)}
+        )
 
     def build_fund_daily_request(
         self, *, ts_code: str, start_date: str, end_date: str
     ) -> TushareRequest:
         return TushareRequest(
             api_name="fund_daily",
-            params={"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
+            params={
+                "ts_code": ts_code,
+                "start_date": _normalize_tushare_date(start_date),
+                "end_date": _normalize_tushare_date(end_date),
+            },
         )
 
     def build_trade_calendar_request(self, *, start_date: str, end_date: str) -> TushareRequest:
         return TushareRequest(
             api_name="trade_cal",
-            params={"exchange": "SSE", "start_date": start_date, "end_date": end_date},
+            params={
+                "exchange": "SSE",
+                "start_date": _normalize_tushare_date(start_date),
+                "end_date": _normalize_tushare_date(end_date),
+            },
         )
 
     def build_stock_basic_request(self) -> TushareRequest:
@@ -83,14 +100,17 @@ class TushareClient:
     def build_suspend_request(self, *, start_date: str, end_date: str) -> TushareRequest:
         return TushareRequest(
             api_name="suspend_d",
-            params={"start_date": start_date, "end_date": end_date},
+            params={
+                "start_date": _normalize_tushare_date(start_date),
+                "end_date": _normalize_tushare_date(end_date),
+            },
             fields="ts_code,trade_date,suspend_type",
         )
 
     def build_stk_limit_by_trade_date_request(self, trade_date: str) -> TushareRequest:
         return TushareRequest(
             api_name="stk_limit",
-            params={"trade_date": trade_date},
+            params={"trade_date": _normalize_tushare_date(trade_date)},
             fields="ts_code,trade_date,up_limit,down_limit",
         )
 

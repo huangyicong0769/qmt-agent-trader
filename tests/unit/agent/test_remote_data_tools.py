@@ -58,6 +58,22 @@ class FailingClient(TushareClient):
         raise RuntimeError("upstream rejected request with secret-token")
 
 
+class RecordingEtfClient(TushareClient):
+    def __init__(self) -> None:
+        super().__init__(token="secret-token")
+        self.requests: list[TushareRequest] = []
+
+    def execute(self, request: TushareRequest) -> pd.DataFrame:
+        self.requests.append(request)
+        if request.api_name == "fund_basic":
+            return pd.DataFrame(
+                [{"ts_code": "159259.SZ", "name": "ETF", "list_date": "20200101"}]
+            )
+        if request.api_name == "fund_daily":
+            return pd.DataFrame()
+        raise AssertionError(f"unexpected request: {request.api_name}")
+
+
 def test_run_remote_data_update_fetches_even_when_agent_context_is_dry_run(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = RecordingClient()
@@ -80,6 +96,33 @@ def test_run_remote_data_update_fetches_even_when_agent_context_is_dry_run(tmp_p
     assert result["status"] == "updated"
     assert "daily" in client.seen
     assert lake.dataset_path("raw", "tushare_daily").exists()
+
+
+def test_run_remote_data_update_normalizes_hyphenated_dates_for_tushare(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    client = RecordingEtfClient()
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path),
+        client_factory=lambda: client,
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "2026-01-01",
+            "end_date": "2026-06-26",
+            "ts_code": "159259.SZ",
+            "asset_type": "etf",
+            "include_basics": False,
+        },
+        ToolContext(run_id="r-hyphenated-dates", dry_run=False),
+    )
+
+    fund_daily_request = next(item for item in client.requests if item.api_name == "fund_daily")
+    assert result["status"] == "updated"
+    assert fund_daily_request.params["start_date"] == "20260101"
+    assert fund_daily_request.params["end_date"] == "20260626"
 
 
 def test_run_remote_data_update_supports_explicit_dry_run_plan(tmp_path) -> None:
