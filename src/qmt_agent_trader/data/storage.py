@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import duckdb
 import pandas as pd
@@ -29,6 +30,44 @@ class DataLake:
         if len(frame.columns) == 0:
             writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
         writable.to_parquet(path, index=False)
+        return path
+
+    def write_incremental_parquet(
+        self,
+        frame: pd.DataFrame,
+        layer: str,
+        name: str,
+        *,
+        key_columns: list[str],
+    ) -> Path:
+        if frame.empty and len(frame.columns) == 0:
+            frame = pd.DataFrame({column: pd.Series(dtype="object") for column in key_columns})
+        missing = [column for column in key_columns if column not in frame.columns]
+        if missing:
+            raise ValueError(f"incremental dataset missing key columns: {missing}")
+
+        frames: list[pd.DataFrame] = []
+        path = self.dataset_path(layer, name)
+        if path.exists():
+            existing = self.read_parquet(layer, name)
+            if "_empty" in existing.columns:
+                existing = existing.drop(columns=["_empty"])
+            if not existing.empty:
+                frames.append(existing)
+        if not frame.empty:
+            frames.append(frame.copy())
+
+        if frames:
+            merged = (
+                pd.concat(frames, ignore_index=True)
+                .drop_duplicates(key_columns, keep="last")
+                .sort_values(key_columns)
+                .reset_index(drop=True)
+            )
+        else:
+            merged = frame.copy()
+        path = self.write_parquet(merged, layer, name)
+        self.register_parquet(name, layer, name)
         return path
 
     def read_parquet(self, layer: str, name: str) -> pd.DataFrame:
@@ -64,3 +103,119 @@ class DataLake:
         )
         with self.connect() as con:
             con.execute(sql)
+
+    def ensure_fetch_tables(self) -> None:
+        with self.connect() as con:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS data_fetch_state (
+                    source TEXT NOT NULL,
+                    dataset TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    row_count BIGINT NOT NULL,
+                    checksum TEXT,
+                    updated_at TIMESTAMP NOT NULL,
+                    error TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS data_fetch_events (
+                    source TEXT NOT NULL,
+                    dataset TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    row_count BIGINT NOT NULL,
+                    checksum TEXT,
+                    updated_at TIMESTAMP NOT NULL,
+                    error TEXT
+                )
+                """
+            )
+
+    def record_fetch_result(
+        self,
+        *,
+        source: str,
+        dataset: str,
+        start_date: str,
+        end_date: str,
+        status: str,
+        row_count: int,
+        checksum: str | None,
+        error: str | None,
+    ) -> None:
+        self.ensure_fetch_tables()
+        updated_at = datetime.now(tz=UTC).replace(tzinfo=None)
+        values = [
+            source,
+            dataset,
+            start_date,
+            end_date,
+            status,
+            row_count,
+            checksum,
+            updated_at,
+            error,
+        ]
+        with self.connect() as con:
+            con.execute(
+                """
+                DELETE FROM data_fetch_state
+                WHERE source = ?
+                  AND dataset = ?
+                  AND start_date = ?
+                  AND end_date = ?
+                """,
+                [source, dataset, start_date, end_date],
+            )
+            con.execute(
+                """
+                INSERT INTO data_fetch_state
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                values,
+            )
+            con.execute(
+                """
+                INSERT INTO data_fetch_events
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                values,
+            )
+
+    def fetch_state(self, source: str, dataset: str) -> list[dict[str, Any]]:
+        self.ensure_fetch_tables()
+        with self.connect() as con:
+            rows = con.execute(
+                """
+                SELECT source, dataset, start_date, end_date, status, row_count, checksum, error
+                FROM data_fetch_state
+                WHERE source = ? AND dataset = ?
+                ORDER BY start_date, end_date
+                """,
+                [source, dataset],
+            ).fetchdf()
+        return cast(list[dict[str, Any]], rows.to_dict(orient="records"))
+
+    def fetch_events(self, source: str, dataset: str) -> list[dict[str, Any]]:
+        self.ensure_fetch_tables()
+        with self.connect() as con:
+            rows = con.execute(
+                """
+                SELECT source, dataset, start_date, end_date, status, row_count, checksum, error
+                FROM data_fetch_events
+                WHERE source = ? AND dataset = ?
+                ORDER BY updated_at
+                """,
+                [source, dataset],
+            ).fetchdf()
+        return cast(list[dict[str, Any]], rows.to_dict(orient="records"))

@@ -39,12 +39,17 @@ from qmt_agent_trader.agent.tools.query_tools import (
     query_fundamentals_pit_tool,
     query_universe_tool,
 )
+from qmt_agent_trader.agent.tools.remote_data_tools import (
+    plan_remote_data_update_tool,
+    run_remote_data_update_tool,
+)
 from qmt_agent_trader.agent.tools.strategy_tools import (
     create_strategy_spec_tool,
     generate_research_report_tool,
     generate_strategy_code_tool,
     run_backtest_tool,
 )
+from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
 
 # Avoid circular import: import AgentToolRegistry inside build_agent_registry
@@ -55,6 +60,7 @@ def build_agent_registry(
     data_lake: DataLake,
     audit_path: Path,
     experiment_root: Path,
+    settings: Settings | None = None,
     sandbox: CodeSandbox | None = None,
 ) -> AgentToolRegistry:
     """Assemble the full AgentToolRegistry with all 16+ MVP tools wired."""
@@ -64,9 +70,11 @@ def build_agent_registry(
         factor_tools,
         meta_tools,
         query_tools,
+        remote_data_tools,
         strategy_tools,
     )
 
+    resolved_settings = settings or get_settings()
     sb = sandbox or CodeSandbox()
     store = ExperimentStore(experiment_root)
     audit = AuditLogger(audit_path)
@@ -74,6 +82,7 @@ def build_agent_registry(
     # Wire singletons
     experiment_tools.set_experiment_store(store)
     query_tools.set_data_lake(data_lake)
+    remote_data_tools.wire(data_lake=data_lake, settings=resolved_settings)
     factor_tools.wire(sb, store, data_lake)
     strategy_tools.wire(sb, store, data_lake)
     meta_tools.wire(sb, store)
@@ -138,6 +147,8 @@ def build_agent_registry(
         query_universe_tool,
         query_bars_tool,
         query_fundamentals_pit_tool,
+        plan_remote_data_update_tool,
+        run_remote_data_update_tool,
         # Factor tools
         create_factor_spec_tool,
         generate_factor_code_tool,

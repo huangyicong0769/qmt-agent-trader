@@ -62,6 +62,7 @@ class AgentRuntime:
             data_lake=self.lake,
             audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
             experiment_root=self.settings.resolved_data_dir / "experiments",
+            settings=self.settings,
             sandbox=CodeSandbox(),
         )
 

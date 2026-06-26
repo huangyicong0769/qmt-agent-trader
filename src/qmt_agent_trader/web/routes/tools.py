@@ -38,6 +38,7 @@ def get_registry() -> AgentToolRegistry:
         data_lake=data_lake,
         audit_path=settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
         experiment_root=settings.resolved_data_dir / "experiments",
+        settings=settings,
         sandbox=CodeSandbox(),
     )
 
