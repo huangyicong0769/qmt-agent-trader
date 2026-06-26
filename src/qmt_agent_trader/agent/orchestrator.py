@@ -37,6 +37,7 @@ from qmt_agent_trader.backtest.service import (
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.data.bars import load_daily_bars
+from qmt_agent_trader.data.catalog import visible_dataset_names
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.service import (
     compute_factor_to_lake,
@@ -195,7 +196,7 @@ class AgentOrchestrator:
                 run_id=rid,
                 experiment_id=experiment_id,
                 requested_by_llm=True,
-                dry_run=True,
+                dry_run=False,
             )
         )
         tools = legacy_registry.deepseek_tools_for_llm()
@@ -636,7 +637,8 @@ def _list_datasets(
     layers = [layer] if layer else ["raw", "bronze", "silver", "gold"]
     return {
         "layers": {
-            item: lake.list_dataset_names(item, prefix=prefix) for item in layers
+            item: visible_dataset_names(item, lake.list_dataset_names(item, prefix=prefix))
+            for item in layers
         }
     }
 

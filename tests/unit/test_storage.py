@@ -64,6 +64,58 @@ def test_incremental_parquet_accepts_empty_fetch_frames(tmp_path) -> None:
     assert loaded.empty
 
 
+def test_migrate_legacy_dataset_merges_batches_and_removes_old_files(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240102", "close": 10.0},
+                {"ts_code": "000002.SZ", "trade_date": "20240102", "close": 20.0},
+            ]
+        ),
+        "raw",
+        "tushare_daily_20240101_20240102",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240102", "close": 10.5},
+                {"ts_code": "000003.SZ", "trade_date": "20240103", "close": 30.0},
+            ]
+        ),
+        "raw",
+        "tushare_daily_20240102_20240103",
+    )
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000004.SZ", "trade_date": "20240104", "close": 40.0}]),
+        "raw",
+        "tushare_daily_adjusted",
+    )
+
+    result = lake.migrate_legacy_dataset(
+        layer="raw",
+        stable_name="tushare_daily",
+        legacy_prefix="tushare_daily_",
+        key_columns=["ts_code", "trade_date"],
+        remove_legacy=True,
+    )
+
+    assert result.legacy_names == [
+        "tushare_daily_20240101_20240102",
+        "tushare_daily_20240102_20240103",
+    ]
+    assert result.removed_names == result.legacy_names
+    assert result.rows == 3
+    assert lake.dataset_path("raw", "tushare_daily_adjusted").exists()
+    assert not lake.dataset_path("raw", "tushare_daily_20240101_20240102").exists()
+    assert not lake.dataset_path("raw", "tushare_daily_20240102_20240103").exists()
+    assert lake.read_parquet("raw", "tushare_daily").to_dict("records") == [
+        {"ts_code": "000001.SZ", "trade_date": "20240102", "close": 10.5},
+        {"ts_code": "000002.SZ", "trade_date": "20240102", "close": 20.0},
+        {"ts_code": "000003.SZ", "trade_date": "20240103", "close": 30.0},
+    ]
+
+
 def test_fetch_state_and_events_are_persisted(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
 

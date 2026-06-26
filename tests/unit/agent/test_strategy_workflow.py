@@ -46,7 +46,7 @@ def registry(lake, tmp_path):
             }
         ),
         "raw",
-        "tushare_daily_20240101_20240102",
+        "tushare_daily",
     )
     return reg
 

@@ -85,7 +85,7 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
     except ValueError as exc:
         return {"status": "INVALID_REQUEST", "message": str(exc)}
 
-    if context.dry_run:
+    if bool(input_data.get("dry_run", False)):
         planned = _plan_remote_data_update(input_data, context)
         planned["dry_run"] = True
         return planned
@@ -218,23 +218,14 @@ _UPDATE_INPUT_SCHEMA = {
         "end_date": {"type": "string", "description": "YYYYMMDD or YYYY-MM-DD."},
         "include_daily": {"type": "boolean"},
         "include_basics": {"type": "boolean"},
+        "dry_run": {
+            "type": "boolean",
+            "description": "When true, return the local gap plan without contacting Tushare.",
+        },
     },
     "required": ["start_date", "end_date"],
     "additionalProperties": False,
 }
-
-
-plan_remote_data_update_tool: AgentTool = tool(
-    ToolSpec(
-        name="plan_remote_data_update",
-        description="规划远程数据补齐请求，只检查本地覆盖缺口，不联网不写入。",
-        permission=PermissionLevel.READ_ONLY,
-        input_schema=_UPDATE_INPUT_SCHEMA,
-        output_schema={"type": "object"},
-        deterministic=False,
-    ),
-    fn=_plan_remote_data_update,
-)
 
 
 run_remote_data_update_tool: AgentTool = tool(

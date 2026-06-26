@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     dry_run: bool = True
     live_trading_enabled: bool = False
 
-    remote_data_max_concurrency: int = 1
-    remote_data_min_interval_seconds: float = 0.5
+    remote_data_max_concurrency: int = 200
+    remote_data_min_interval_seconds: float = 0.3
     remote_data_max_days_per_call: int = 366
     remote_data_lock_timeout_seconds: float = 30.0
 

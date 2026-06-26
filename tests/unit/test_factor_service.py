@@ -26,7 +26,7 @@ def test_compute_factor_to_lake(tmp_path) -> None:
         }
         for offset in range(21)
     ]
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily_fixture")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
 
     result = compute_factor_to_lake(lake, name="momentum_20d", date="20240121")
 
@@ -61,7 +61,7 @@ def test_validate_factor_computes_ic(tmp_path) -> None:
                 "close": 20.0 + offset,
             }
         )
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily_fixture")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
 
     result = validate_factor(lake, name="momentum_20d", start="20240121", end="20240121")
 
@@ -95,7 +95,7 @@ def test_walk_forward_factor_validation_slices_history(tmp_path) -> None:
                 "close": 20.0 + offset * 0.1,
             }
         )
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily_fixture")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
 
     result = walk_forward_factor_validation(
         lake,

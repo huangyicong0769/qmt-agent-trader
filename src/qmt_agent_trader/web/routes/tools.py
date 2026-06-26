@@ -103,8 +103,11 @@ async def run_tool(tool_name: str, request: ToolRunRequest) -> ToolRunResponse:
         dry_run=request.dry_run,
         user_id=request.user_id,
     )
+    input_data = dict(request.input_data)
+    if tool_name == "run_remote_data_update" and request.dry_run:
+        input_data.setdefault("dry_run", True)
     try:
-        result = registry.run_tool(tool_name, request.input_data, context)
+        result = registry.run_tool(tool_name, input_data, context)
     except PermissionDeniedError as exc:
         message = str(exc)
         _audit_denial(registry, spec, run_id, request, message)

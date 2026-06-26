@@ -38,6 +38,34 @@ def test_tool_api_allows_read_only_and_sets_human_context(tmp_path, monkeypatch)
     assert audit["status"] == "ok"
 
 
+def test_tool_api_injects_remote_data_update_dry_run_for_web_requests(
+    tmp_path, monkeypatch
+) -> None:
+    seen_inputs: list[dict[str, object]] = []
+    registry = AgentToolRegistry(audit_logger=AuditLogger(tmp_path / "audit.jsonl"))
+    registry.register(
+        tool(
+            ToolSpec(
+                name="run_remote_data_update",
+                description="Update remote data",
+                permission=PermissionLevel.RESEARCH_WRITE,
+            ),
+            fn=lambda data, context: seen_inputs.append(data) or {"status": "planned"},
+        )
+    )
+    monkeypatch.setattr(tools, "get_registry", lambda: registry)
+    app = FastAPI()
+    app.include_router(tools.router)
+
+    response = TestClient(app).post(
+        "/run_remote_data_update/run",
+        json={"input_data": {"start_date": "20240101", "end_date": "20240103"}},
+    )
+
+    assert response.status_code == 200
+    assert seen_inputs[0]["dry_run"] is True
+
+
 def test_tool_api_blocks_approval_required_and_audits(tmp_path, monkeypatch) -> None:
     registry = AgentToolRegistry(audit_logger=AuditLogger(tmp_path / "audit.jsonl"))
     registry.register(

@@ -177,6 +177,44 @@ def data_validate() -> None:
     )
 
 
+@data_app.command("migrate-legacy")
+def data_migrate_legacy(
+    keep_legacy: Annotated[bool, typer.Option("--keep-legacy")] = False,
+) -> None:
+    """Migrate legacy Tushare batch files into stable incremental datasets."""
+    lake = _data_lake()
+    migrations = [
+        lake.migrate_legacy_dataset(
+            layer="raw",
+            stable_name="tushare_daily",
+            legacy_prefix="tushare_daily_",
+            key_columns=["ts_code", "trade_date"],
+            remove_legacy=not keep_legacy,
+        ),
+        lake.migrate_legacy_dataset(
+            layer="raw",
+            stable_name="tushare_suspend",
+            legacy_prefix="tushare_suspend_",
+            key_columns=["ts_code", "trade_date"],
+            remove_legacy=not keep_legacy,
+        ),
+        lake.migrate_legacy_dataset(
+            layer="raw",
+            stable_name="tushare_stk_limit",
+            legacy_prefix="tushare_stk_limit_",
+            key_columns=["ts_code", "trade_date"],
+            remove_legacy=not keep_legacy,
+        ),
+    ]
+    print_json(
+        {
+            "status": "ok",
+            "remove_legacy": not keep_legacy,
+            "migrations": [item.as_dict() for item in migrations],
+        }
+    )
+
+
 @data_app.command("qmt-sync")
 def data_qmt_sync(
     from_date: Annotated[str, typer.Option("--from")],
