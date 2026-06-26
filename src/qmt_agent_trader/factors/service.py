@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
+from typing import Any
 
 import pandas as pd
 
@@ -42,9 +43,12 @@ class FactorValidationResult:
     coverage: float
     ic_mean: float | None
     ic_by_date: dict[str, float]
+    symbols: tuple[str, ...] = ()
+    evaluation_mode: str = "cross_sectional"
+    time_series: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "status": "validated",
             "name": self.name,
             "start": self.start,
@@ -54,7 +58,12 @@ class FactorValidationResult:
             "coverage": self.coverage,
             "ic_mean": self.ic_mean,
             "ic_by_date": self.ic_by_date,
+            "symbols": list(self.symbols),
+            "evaluation_mode": self.evaluation_mode,
         }
+        if self.time_series is not None:
+            payload["time_series"] = self.time_series
+        return payload
 
 
 @dataclass(frozen=True)
@@ -164,10 +173,11 @@ def validate_factor(
     start: str,
     end: str,
     registry_root: str | None = None,
+    symbols: list[str] | None = None,
 ) -> FactorValidationResult:
     start_date = pd.to_datetime(start).date()
     end_date = pd.to_datetime(end).date()
-    bars = load_daily_bars(lake)
+    bars = load_daily_bars(lake, symbols=symbols)
     if bars.empty:
         raise ValueError("no daily bars found in data lake; run data update first")
 
@@ -182,6 +192,7 @@ def validate_factor(
         raise ValueError(f"no validation rows between {start_date} and {end_date}")
 
     usable = validation.dropna(subset=["factor_value", "forward_return_1d"])
+    evaluated_symbols = tuple(sorted(validation["symbol"].astype(str).unique()))
     ic_by_date: dict[str, float] = {}
     for trade_date, group in usable.groupby("trade_date"):
         if len(group) < 2:
@@ -191,6 +202,12 @@ def validate_factor(
             ic_by_date[f"{trade_date:%Y%m%d}"] = float(ic)
 
     ic_mean = float(pd.Series(ic_by_date).mean()) if ic_by_date else None
+    time_series = (
+        _time_series_factor_metrics(usable)
+        if len(evaluated_symbols) == 1
+        else None
+    )
+    evaluation_mode = "time_series" if time_series is not None else "cross_sectional"
     observations = len(validation)
     non_null = len(usable)
     return FactorValidationResult(
@@ -202,6 +219,9 @@ def validate_factor(
         coverage=non_null / observations if observations else 0.0,
         ic_mean=ic_mean,
         ic_by_date=ic_by_date,
+        symbols=evaluated_symbols,
+        evaluation_mode=evaluation_mode,
+        time_series=time_series,
     )
 
 
@@ -215,6 +235,7 @@ def walk_forward_factor_validation(
     step_days: int = 63,
     quantile: float = 0.20,
     registry_root: str | None = None,
+    symbols: list[str] | None = None,
 ) -> FactorWalkForwardResult:
     if window_days <= 1:
         raise ValueError("window_days must be greater than 1")
@@ -225,7 +246,7 @@ def walk_forward_factor_validation(
 
     start_date = pd.to_datetime(start).date()
     end_date = pd.to_datetime(end).date()
-    bars = load_daily_bars(lake)
+    bars = load_daily_bars(lake, symbols=symbols)
     if bars.empty:
         raise ValueError("no daily bars found in data lake; run data update first")
 
@@ -297,6 +318,40 @@ def _walk_forward_slice(frame: pd.DataFrame, *, quantile: float) -> FactorWalkFo
         mean_ic=float(mean(ic_values)) if ic_values else None,
         long_short_spread=float(mean(spread_values)) if spread_values else None,
     )
+
+
+def _time_series_factor_metrics(usable: pd.DataFrame) -> dict[str, Any]:
+    if usable.empty:
+        return {
+            "observations": 0,
+            "pearson_ic": None,
+            "spearman_ic": None,
+            "direction_hit_rate": None,
+            "mean_forward_return": None,
+        }
+    factor = usable["factor_value"]
+    forward = usable["forward_return_1d"]
+    pearson = factor.corr(forward, method="pearson") if len(usable) >= 2 else None
+    spearman = factor.corr(forward, method="spearman") if len(usable) >= 2 else None
+    directional = usable[(factor != 0) & (forward != 0)]
+    if directional.empty:
+        hit_rate = None
+    else:
+        directional_hits = directional["factor_value"] * directional["forward_return_1d"] > 0
+        hit_rate = float(directional_hits.mean())
+    return {
+        "observations": len(usable),
+        "pearson_ic": _optional_float(pearson),
+        "spearman_ic": _optional_float(spearman),
+        "direction_hit_rate": hit_rate,
+        "mean_forward_return": float(forward.mean()) if pd.notna(forward.mean()) else None,
+    }
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or not pd.notna(value):
+        return None
+    return float(value)
 
 
 def _positive_slice(item: FactorWalkForwardSlice) -> bool:

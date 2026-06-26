@@ -39,7 +39,9 @@ def _create_factor_spec(input_data: dict[str, Any], context: ToolContext) -> dic
         hypothesis = input_data
     name = hypothesis.get("name", "unnamed")
     name = hypothesis.get("factor_name", name)
-    required_data = hypothesis.get("required_data", ["daily_bars"])
+    required_data = hypothesis.get("required_data") or hypothesis.get("data_sources") or [
+        "daily_bars"
+    ]
     formula_sketch = hypothesis.get("formula_sketch", "")
     formula_sketch = hypothesis.get("factor_description", formula_sketch)
     lookback = hypothesis.get("lookback", hypothesis.get("expected_holding_period", "20"))
@@ -64,6 +66,18 @@ create_factor_spec_tool: AgentTool = tool(
     ToolSpec(
         name="create_factor_spec",
         description="将自然语言因子假设转成结构化 factor spec。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "hypothesis": {"type": "object"},
+                "factor_name": {"type": "string"},
+                "factor_description": {"type": "string"},
+                "formula_sketch": {"type": "string"},
+                "lookback": {"type": "integer"},
+                "data_sources": {"type": "array", "items": {"type": "string"}},
+                "universe": {"type": "string"},
+            },
+        },
         permission=PermissionLevel.RESEARCH_WRITE,
         side_effect_level="write_generated",
         deterministic=False,
@@ -76,6 +90,11 @@ create_factor_spec_tool: AgentTool = tool(
 
 def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     spec_data = input_data.get("factor_spec", {})
+    if not isinstance(spec_data, dict) or not spec_data.get("factor_id"):
+        return {
+            "status": "INVALID_REQUEST",
+            "message": "factor_spec with factor_id is required",
+        }
     name = spec_data.get("name", "candidate")
     factor_id = spec_data.get("factor_id", new_id("factor"))
     lookback = spec_data.get("lookback", 20)
@@ -116,6 +135,11 @@ generate_factor_code_tool: AgentTool = tool(
     ToolSpec(
         name="generate_factor_code",
         description="根据 factor spec 生成候选因子代码和测试。",
+        input_schema={
+            "type": "object",
+            "properties": {"factor_spec": {"type": "object"}},
+            "required": ["factor_spec"],
+        },
         permission=PermissionLevel.CODE_GENERATION,
         side_effect_level="write_generated",
         deterministic=False,
@@ -128,9 +152,13 @@ generate_factor_code_tool: AgentTool = tool(
 
 def _run_factor_static_checks(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     code_path_str = input_data.get("code_path", "")
+    if not code_path_str:
+        return {"status": "INVALID_REQUEST", "issues": ["code_path is required"]}
     code_path = Path(code_path_str)
     if not code_path.exists():
         return {"status": "FAILED", "issues": [f"file not found: {code_path_str}"]}
+    if not code_path.is_file():
+        return {"status": "INVALID_REQUEST", "issues": [f"not a file: {code_path_str}"]}
     sb = _sandbox
     if sb is None:
         return {"status": "FAILED", "issues": ["sandbox not wired"]}
@@ -142,6 +170,11 @@ run_factor_static_checks_tool: AgentTool = tool(
     ToolSpec(
         name="run_factor_static_checks",
         description="检查候选因子是否存在未来函数或危险行为。",
+        input_schema={
+            "type": "object",
+            "properties": {"code_path": {"type": "string"}},
+            "required": ["code_path"],
+        },
         permission=PermissionLevel.BACKTEST_EXECUTE,
         deterministic=True,
     ),
@@ -209,6 +242,16 @@ save_factor_tool: AgentTool = tool(
         description=(
             "将通过静态检查的候选因子保存到统一 Factor Registry。保存后才可评估或回测。"
         ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "factor_id": {"type": "string"},
+                "code_path": {"type": "string"},
+                "spec_path": {"type": "string"},
+                "created_by": {"type": "string"},
+            },
+            "required": ["factor_id", "code_path"],
+        },
         permission=PermissionLevel.RESEARCH_WRITE,
         side_effect_level="write_generated",
         deterministic=False,
@@ -221,8 +264,11 @@ save_factor_tool: AgentTool = tool(
 
 def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     factor_id = input_data.get("factor_id", "")
+    if not str(factor_id).strip():
+        return {"status": "INVALID_REQUEST", "message": "factor_id is required"}
     start = input_data.get("start_date", "20200101")
     end = input_data.get("end_date", "20260624")
+    symbols = _requested_symbols(input_data)
 
     lake = _lake
     if lake is None:
@@ -242,7 +288,8 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
         get_cached_validation,
         put_cached_validation,
     )
-    cached = get_cached_validation(factor_name, start, end)
+    cache_factor_name = factor_name if not symbols else f"{factor_name}|{','.join(symbols)}"
+    cached = get_cached_validation(cache_factor_name, start, end)
     if cached is not None:
         cached["cache_hit"] = True
         return cached
@@ -254,6 +301,7 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             start=start,
             end=end,
             registry_root=str(registry_root),
+            symbols=symbols or None,
         ).as_dict()
         # Compute quantile returns via walk-forward
         from qmt_agent_trader.factors.service import walk_forward_factor_validation
@@ -264,6 +312,7 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             start=start,
             end=end,
             registry_root=str(registry_root),
+            symbols=symbols or None,
         ).as_dict()
         slices_raw = wf.get("walk_forward", [])
         if not isinstance(slices_raw, list):
@@ -284,7 +333,7 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             else ""
         )
         result["cache_hit"] = False
-        put_cached_validation(factor_name, start, end, result)
+        put_cached_validation(cache_factor_name, start, end, result)
         return result
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
@@ -294,6 +343,18 @@ evaluate_factor_candidate_tool: AgentTool = tool(
     ToolSpec(
         name="evaluate_factor_candidate",
         description="计算并评估候选因子。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "factor_id": {"type": "string"},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "symbol": {"type": "string"},
+                "code": {"type": "string"},
+                "symbols": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["factor_id"],
+        },
         permission=PermissionLevel.BACKTEST_EXECUTE,
         deterministic=False,
         timeout_seconds=120,
@@ -326,6 +387,30 @@ def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
         if candidate in formula and candidate not in columns:
             columns.append(candidate)
     return tuple(columns)
+
+
+def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
+    raw_symbols: list[Any] = []
+    symbols_value = input_data.get("symbols", [])
+    if isinstance(symbols_value, list):
+        raw_symbols.extend(symbols_value)
+    elif symbols_value:
+        raw_symbols.append(symbols_value)
+    for alias in ("symbol", "code", "universe"):
+        value = input_data.get(alias)
+        if value:
+            raw_symbols.append(value)
+
+    normalized: list[str] = []
+    for raw in raw_symbols:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if "." not in text and text.isdigit() and len(text) == 6:
+            text = f"{text}.SZ" if text.startswith(("0", "1", "2", "3")) else f"{text}.SH"
+        if text not in normalized:
+            normalized.append(text)
+    return normalized
 
 
 def _render_factor_code(name: str, lookback: int, formula: str) -> str:

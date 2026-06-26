@@ -143,6 +143,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     end_date = input_data.get("end_date", "20260624")
     initial_cash = float(input_data.get("initial_cash", 1_000_000))
     top_n = int(input_data.get("top_n", 20))
+    symbols = _requested_symbols(input_data)
 
     # Resolve factor_name from strategy_id if not provided
     if not factor_name and strategy_id:
@@ -169,14 +170,16 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             "message": f"factor '{factor_name}' is a draft or unknown; save_factor first",
         }
 
-    bars = load_daily_bars(lake)
+    bars = load_daily_bars(lake, symbols=symbols or None)
     if bars.empty:
         return {"status": "error", "message": "data lake is empty; run data update first"}
 
     # Filter bars to date range
+    start_bound = pd.to_datetime(start_date).date()
+    end_bound = pd.to_datetime(end_date).date()
     bars = bars[
-        (bars["trade_date"] >= pd.to_datetime(start_date))
-        & (bars["trade_date"] <= pd.to_datetime(end_date))
+        (bars["trade_date"] >= start_bound)
+        & (bars["trade_date"] <= end_bound)
     ]
     if bars.empty:
         return {
@@ -215,6 +218,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         "live_trading_allowed": False,
         "metadata": {
             "factor_name": factor_name,
+            "symbols": symbols,
             "top_n": top_n,
             "initial_cash": initial_cash,
             "start_date": start_date,
@@ -259,6 +263,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         "run_id": report["run_id"],
         "status": "completed",
         "factor_name": factor_name,
+        "symbols": symbols,
         "start_date": start_date,
         "end_date": end_date,
         "metrics": {
@@ -282,6 +287,21 @@ run_backtest_tool: AgentTool = tool(
             " 内置因子: momentum_20d, momentum_60d, reversal_5d, volatility_20d,"
             " turnover_20d, amount_zscore_20d"
         ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "factor_name": {"type": "string"},
+                "strategy_id": {"type": "string"},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "symbol": {"type": "string"},
+                "code": {"type": "string"},
+                "symbols": {"type": "array", "items": {"type": "string"}},
+                "initial_cash": {"type": "number"},
+                "top_n": {"type": "integer"},
+            },
+            "required": ["factor_name"],
+        },
         permission=PermissionLevel.BACKTEST_EXECUTE,
         deterministic=False,
         timeout_seconds=120,
@@ -444,3 +464,27 @@ def _map_strategy_factor(strategy_id: str) -> str | None:
 
 def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
+
+
+def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
+    raw_symbols: list[Any] = []
+    symbols_value = input_data.get("symbols", [])
+    if isinstance(symbols_value, list):
+        raw_symbols.extend(symbols_value)
+    elif symbols_value:
+        raw_symbols.append(symbols_value)
+    for alias in ("symbol", "code", "universe"):
+        value = input_data.get(alias)
+        if value:
+            raw_symbols.append(value)
+
+    normalized: list[str] = []
+    for raw in raw_symbols:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if "." not in text and text.isdigit() and len(text) == 6:
+            text = f"{text}.SZ" if text.startswith(("0", "1", "2", "3")) else f"{text}.SH"
+        if text not in normalized:
+            normalized.append(text)
+    return normalized

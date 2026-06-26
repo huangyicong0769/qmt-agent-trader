@@ -30,6 +30,8 @@ def get_cached_validation(
         return None
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("result"), dict):
+            return dict(data["result"])
         return dict(data)
     except Exception:
         cache_path.unlink(missing_ok=True)
