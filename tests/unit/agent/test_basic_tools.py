@@ -55,6 +55,17 @@ def test_run_shell_command_rejects_paths_outside_project(tmp_path) -> None:
     assert result["status"] == "DENIED"
 
 
+def test_run_shell_command_rejects_tail_follow_path_outside_project(tmp_path) -> None:
+    wire(settings=Settings(project_root=tmp_path))
+
+    result = run_shell_command_tool.run(
+        {"argv": ["tail", "-f", "../secret.txt"]},
+        ToolContext(run_id="shell"),
+    )
+
+    assert result["status"] == "DENIED"
+
+
 def test_run_shell_command_times_out(tmp_path) -> None:
     (tmp_path / "sample.txt").write_text("hello\n", encoding="utf-8")
     wire(settings=Settings(project_root=tmp_path))

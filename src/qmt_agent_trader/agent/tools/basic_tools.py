@@ -119,7 +119,7 @@ def _first_escaping_path(args: list[str], root: Path, cwd: Path) -> str | None:
         if skip_next:
             skip_next = False
             continue
-        if arg in {"-e", "-f", "-m", "-n"}:
+        if arg in {"-e", "-m", "-n"}:
             skip_next = True
             continue
         if arg.startswith("-"):
