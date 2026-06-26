@@ -105,6 +105,19 @@ class PagingNamechangeClient(TushareClient):
         return pd.DataFrame(rows[offset : offset + limit])
 
 
+class FlakyCalendarClient(FakeTushareClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calendar_attempts = 0
+
+    def execute(self, request: TushareRequest) -> pd.DataFrame:
+        if request.api_name == "trade_cal":
+            self.calendar_attempts += 1
+            if self.calendar_attempts == 1:
+                raise TimeoutError("temporary timeout")
+        return super().execute(request)
+
+
 def test_tushare_data_update_writes_lake(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = FakeTushareClient()
@@ -174,6 +187,21 @@ def test_request_limiter_enforces_minimum_interval() -> None:
     limiter.wait()
 
     assert sleeps == [0.5]
+
+
+def test_tushare_data_update_retries_transient_request_errors(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    client = FlakyCalendarClient()
+
+    result = TushareDataUpdateService(
+        client,
+        lake,
+        retry_attempts=2,
+        retry_backoff_seconds=0,
+    ).update("20260609", "20260610", include_daily=False)
+
+    assert result.open_dates == ["20260609"]
+    assert client.calendar_attempts == 2
 
 
 def test_tushare_data_update_fetches_etf_daily_from_list_date(tmp_path) -> None:

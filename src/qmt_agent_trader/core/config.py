@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     remote_data_max_days_per_call: int = 366
     remote_data_lock_timeout_seconds: float = 30.0
     remote_data_http_timeout_seconds: float = 300.0
+    remote_data_retry_attempts: int = 3
+    remote_data_retry_backoff_seconds: float = 2.0
 
     @property
     def resolved_data_dir(self) -> Path:

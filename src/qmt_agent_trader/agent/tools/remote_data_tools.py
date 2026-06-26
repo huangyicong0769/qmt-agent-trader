@@ -119,6 +119,8 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
                 min_interval_seconds=settings.remote_data_min_interval_seconds
             ),
             lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+            retry_attempts=settings.remote_data_retry_attempts,
+            retry_backoff_seconds=settings.remote_data_retry_backoff_seconds,
         )
         result = service.update(
             start,

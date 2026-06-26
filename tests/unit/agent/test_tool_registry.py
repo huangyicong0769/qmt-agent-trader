@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
 from qmt_agent_trader.agent.audit import AuditLogger
@@ -100,6 +103,7 @@ def test_run_tool_with_audit(tmp_path) -> None:
     assert audit.log_path.exists()
     lines = audit.log_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) == 1
+    assert json.loads(lines[0])["output_data"] == {"echo": {"x": 1}, "run_id": "r2"}
 
 
 # ── Execution — permissions ──────────────────────────────────────────────────
@@ -145,6 +149,36 @@ def test_run_tool_error_is_audited(tmp_path) -> None:
     with pytest.raises(ToolExecutionError):
         reg.run_tool("fragile", {}, ToolContext(run_id="r5"))
     assert audit.log_path.exists()
+
+
+def test_run_tool_timeout_returns_structured_result_and_audits(tmp_path) -> None:
+    audit = AuditLogger(tmp_path / "audit.jsonl")
+    reg = AgentToolRegistry(audit_logger=audit)
+
+    def _slow(_d: dict, _c: ToolContext) -> dict:
+        time.sleep(0.2)
+        return {"late": True}
+
+    reg.register(
+        tool(
+            ToolSpec(
+                name="slow",
+                description="slow",
+                permission=PermissionLevel.READ_ONLY,
+                timeout_seconds=0,
+            ),
+            fn=_slow,
+        )
+    )
+
+    result = reg.run_tool("slow", {}, ToolContext(run_id="r-timeout"))
+
+    assert result == {
+        "status": "TIMEOUT",
+        "tool_name": "slow",
+        "timeout_seconds": 0,
+    }
+    assert '"status": "timeout"' in audit.log_path.read_text(encoding="utf-8")
 
 
 # ── Legacy ToolRegistry ──────────────────────────────────────────────────────

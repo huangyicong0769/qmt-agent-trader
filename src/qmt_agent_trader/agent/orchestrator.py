@@ -7,6 +7,7 @@ tool loop with real-time event streaming suitable for SSE delivery.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -332,6 +333,7 @@ def _stream_to_events(
 
     if cls_name == "ToolResult":
         preview = _preview(evt.result)
+        result_id = _result_id(evt.result)
         return [
             OrchestratorEvent(
                 type="tool_done",
@@ -340,6 +342,7 @@ def _stream_to_events(
                 data={
                     "tool_name": evt.tool_name,
                     "result_preview": preview,
+                    "result_id": result_id,
                     "experiment_id": experiment_id,
                 },
             )
@@ -401,6 +404,11 @@ def _conversation_history(
         natural_messages = natural_messages[:-1]
 
     return natural_messages[-max_turns * 2 :]
+
+
+def _result_id(result: Any) -> str:
+    payload = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 # ── Tool registry builder (forked from AgentRuntime for v1 compatibility) ──

@@ -359,6 +359,7 @@ async def _send(
 
             elif et == "tool_done":
                 prv = ed.get("result_preview", "")
+                result_id = ed.get("result_id", "")
                 progress_card.visible = False
                 c2 = ui.card().classes("w-full bg-gray-50 border p-2 text-xs")
                 with c2:
@@ -367,7 +368,7 @@ async def _send(
                 session.add_message(
                     "tool", "",
                     tool_name=ed.get("tool_name", ""),
-                    result_preview=prv, phase="done",
+                    result_preview=prv, result_id=result_id, phase="done",
                 )
 
             elif et == "done":

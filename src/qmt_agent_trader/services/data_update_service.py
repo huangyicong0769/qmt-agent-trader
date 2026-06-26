@@ -140,11 +140,17 @@ class TushareDataUpdateService:
         *,
         limiter: RequestLimiter | None = None,
         lock_timeout_seconds: float = 30.0,
+        retry_attempts: int = 3,
+        retry_backoff_seconds: float = 2.0,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.client = client
         self.lake = lake
         self.limiter = limiter or RequestLimiter(min_interval_seconds=0.5)
         self.lock_timeout_seconds = lock_timeout_seconds
+        self.retry_attempts = max(retry_attempts, 1)
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.sleep = sleep
 
     def update(
         self,
@@ -272,8 +278,19 @@ class TushareDataUpdateService:
             return DataUpdateResult(start=start, end=end, writes=writes, open_dates=open_dates)
 
     def _execute(self, request: object) -> pd.DataFrame:
-        self.limiter.wait()
-        return self.client.execute(request)  # type: ignore[arg-type]
+        last_error: Exception | None = None
+        for attempt in range(1, self.retry_attempts + 1):
+            self.limiter.wait()
+            try:
+                return self.client.execute(request)  # type: ignore[arg-type]
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.retry_attempts:
+                    break
+                if self.retry_backoff_seconds > 0:
+                    self.sleep(self.retry_backoff_seconds * attempt)
+        assert last_error is not None
+        raise last_error
 
     def _write(self, name: str, frame: pd.DataFrame, *, start: str, end: str) -> DatasetWrite:
         path = self.lake.write_parquet(frame, "raw", name)

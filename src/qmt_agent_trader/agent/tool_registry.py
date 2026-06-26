@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -171,9 +172,16 @@ class AgentToolRegistry:
         error_message = None
         result: dict[str, Any] = {}
         try:
-            result = tool.run(input_data, context)
+            result = _run_with_timeout(tool, input_data, context, spec.timeout_seconds)
             if not isinstance(result, dict):
                 result = {"value": result}
+        except FutureTimeoutError:
+            status = "timeout"
+            result = {
+                "status": "TIMEOUT",
+                "tool_name": name,
+                "timeout_seconds": spec.timeout_seconds,
+            }
         except Exception as exc:
             status = "permission_denied" if "PermissionDenied" in type(exc).__name__ else "error"
             error_message = str(exc)
@@ -292,3 +300,17 @@ def _llm_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
         "required": schema.get("required", []),
         "additionalProperties": schema.get("additionalProperties", False),
     }
+
+
+def _run_with_timeout(
+    tool: AgentTool,
+    input_data: dict[str, Any],
+    context: ToolContext,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(tool.run, input_data, context)
+        return future.result(timeout=max(timeout_seconds, 0))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)

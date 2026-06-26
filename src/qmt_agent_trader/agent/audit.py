@@ -22,6 +22,7 @@ class AuditEntry:
     status: str  # "ok" | "permission_denied" | "error"
     error_message: str | None
     duration_ms: int
+    output_data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -55,6 +56,7 @@ class AuditLogger:
             status=status,
             error_message=self._scrub_error(error_message),
             duration_ms=duration_ms,
+            output_data=output_data,
         )
         self._entry_cache.append(entry)
         self._flush_one(entry)
@@ -82,6 +84,7 @@ class AuditLogger:
             "status": entry.status,
             "error_message": entry.error_message,
             "duration_ms": entry.duration_ms,
+            "output_data": entry.output_data,
         }
 
     @staticmethod
