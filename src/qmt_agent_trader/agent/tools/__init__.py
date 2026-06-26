@@ -14,6 +14,10 @@ from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import tool
+from qmt_agent_trader.agent.tools.basic_tools import (
+    get_current_time_tool,
+    run_shell_command_tool,
+)
 from qmt_agent_trader.agent.tools.experiment_tools import (
     log_experiment_event_tool,
     search_experiments_tool,
@@ -69,6 +73,7 @@ def build_agent_registry(
         factor_tools,
         meta_tools,
         query_tools,
+        basic_tools,
         remote_data_tools,
         strategy_tools,
     )
@@ -81,6 +86,7 @@ def build_agent_registry(
     # Wire singletons
     experiment_tools.set_experiment_store(store)
     query_tools.set_data_lake(data_lake)
+    basic_tools.wire(settings=resolved_settings)
     remote_data_tools.wire(data_lake=data_lake, settings=resolved_settings)
     factor_tools.wire(sb, store, data_lake)
     strategy_tools.wire(sb, store, data_lake)
@@ -147,6 +153,8 @@ def build_agent_registry(
         query_bars_tool,
         query_fundamentals_pit_tool,
         run_remote_data_update_tool,
+        run_shell_command_tool,
+        get_current_time_tool,
         # Factor tools
         create_factor_spec_tool,
         generate_factor_code_tool,
