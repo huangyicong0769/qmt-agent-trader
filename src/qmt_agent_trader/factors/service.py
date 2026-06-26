@@ -124,7 +124,7 @@ def compute_factor_frame(
 ) -> pd.DataFrame:
     data = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True).copy()
     factor_registry = registry or FactorRegistry()
-    values = factor_registry.compute(name, data)
+    values = pd.to_numeric(factor_registry.compute(name, data), errors="coerce")
 
     return pd.DataFrame(
         {

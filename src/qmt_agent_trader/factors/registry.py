@@ -77,7 +77,17 @@ class FactorRegistry:
         return sorted(self._saved.values(), key=lambda item: item.factor_id)
 
     def get_factor(self, factor_id: str) -> SavedFactor | None:
-        return self._saved.get(factor_id)
+        saved = self._saved.get(factor_id)
+        if saved is not None:
+            return saved
+        matches = [item for item in self._saved.values() if item.name == factor_id]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def resolve_factor_id(self, factor_id_or_name: str) -> str | None:
+        saved = self.get_factor(factor_id_or_name)
+        return saved.factor_id if saved is not None else None
 
     def save_factor(
         self,

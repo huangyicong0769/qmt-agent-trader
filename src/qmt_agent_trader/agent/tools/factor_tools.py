@@ -212,6 +212,9 @@ def _save_factor(input_data: dict[str, Any], context: ToolContext) -> dict[str, 
     if issues:
         return {"status": "FAILED", "issues": issues}
 
+    if not spec_path_raw:
+        sibling_spec = code_path.with_name("factor_spec.json")
+        spec_path_raw = str(sibling_spec) if sibling_spec.exists() else ""
     spec_data = _load_factor_spec(spec_path_raw, sb) if spec_path_raw else {}
     if spec_data.get("factor_id") and spec_data["factor_id"] != factor_id:
         return {
@@ -232,6 +235,7 @@ def _save_factor(input_data: dict[str, Any], context: ToolContext) -> dict[str, 
     return {
         "status": saved.status,
         "factor_id": saved.factor_id,
+        "name": saved.name,
         "registry_path": str(registry.registry_path),
         "implementation_ref": saved.implementation_ref,
     }
@@ -278,11 +282,13 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
     factor_name = str(factor_id).strip()
     registry_root = _factor_registry_root(lake)
     registry = FactorRegistry(registry_root)
-    if registry.get_factor(factor_name) is None:
+    saved = registry.get_factor(factor_name)
+    if saved is None:
         return {
             "status": "FACTOR_NOT_SAVED",
             "message": f"factor '{factor_name}' is a draft or unknown; save_factor first",
         }
+    factor_name = saved.factor_id
 
     # ── Dedup: check cache first ──
     from qmt_agent_trader.agent.tools.cache import (
@@ -440,10 +446,10 @@ def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Seri
 
 
 def _factor_compute_body(name: str, formula: str, lookback: int) -> str:
-    if "rsi" in name or "relative strength" in formula or "rs =" in formula:
+    if _is_rsi_formula(name, formula):
         return '''    delta = bars.groupby("symbol")["close"].diff()
     gain = delta.clip(lower=0)
-    loss = (-delta.clip(upper=0)).replace(0, pd.NA)
+    loss = (-delta.clip(upper=0)).replace(0, float("nan"))
     avg_gain = gain.groupby(bars["symbol"]).transform(lambda item: item.rolling(14).mean())
     avg_loss = loss.groupby(bars["symbol"]).transform(lambda item: item.rolling(14).mean())
     rs = avg_gain / avg_loss
@@ -464,7 +470,21 @@ def _factor_compute_body(name: str, formula: str, lookback: int) -> str:
         lambda item: item.rolling(20).mean()
     )
     return ma5 / ma20 - 1'''
+    if "trend_persistence" in name or "ma60" in formula:
+        return '''    moving_average = bars.groupby("symbol")["close"].transform(
+        lambda item: item.rolling(lookback).mean()
+    )
+    return bars["close"] / moving_average - 1'''
     return '    return bars.groupby("symbol")["close"].pct_change(lookback)'
+
+
+def _is_rsi_formula(name: str, formula: str) -> bool:
+    tokens = {
+        token
+        for token in name.replace("-", "_").split("_")
+        if token
+    }
+    return "rsi" in tokens or "relative strength" in formula or "rs =" in formula
 
 
 def _render_factor_test_code(name: str) -> str:

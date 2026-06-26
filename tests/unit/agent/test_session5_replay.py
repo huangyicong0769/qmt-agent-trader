@@ -113,6 +113,81 @@ def test_session5_generated_factor_code_uses_known_formula_templates(tmp_path) -
     assert "rolling(20)" in code
 
 
+def test_session5_trend_persistence_does_not_match_rsi_substring(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    registry = _registry(tmp_path, lake)
+
+    code_result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_spec": {
+                "factor_id": "factor_trend_persistence",
+                "name": "trend_persistence_60",
+                "lookback": 60,
+                "formula": "(close - MA60) / MA60",
+            }
+        },
+        ToolContext(run_id="s5"),
+    )
+
+    code = Path(code_result["code_path"]).read_text(encoding="utf-8")
+    assert "avg_gain" not in code
+    assert "moving_average" in code
+    assert "rolling(lookback)" in code
+
+
+def test_session5_save_factor_infers_sibling_spec_when_omitted(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    _seed_etf_bars(lake)
+    registry = _registry(tmp_path, lake)
+    context = ToolContext(run_id="s5")
+
+    spec = registry.run_tool(
+        "create_factor_spec",
+        {
+            "factor_name": "multi_momentum_5_20_60",
+            "formula_sketch": "(ret_5d + ret_20d + ret_60d) / 3",
+            "lookback": 60,
+        },
+        context,
+    )["factor_spec"]
+    code = registry.run_tool("generate_factor_code", {"factor_spec": spec}, context)
+    saved = registry.run_tool(
+        "save_factor",
+        {"factor_id": spec["factor_id"], "code_path": code["code_path"]},
+        context,
+    )
+
+    assert saved["status"] == "saved"
+    assert saved["name"] == "multi_momentum_5_20_60"
+
+    evaluated = registry.run_tool(
+        "evaluate_factor_candidate",
+        {
+            "factor_id": "multi_momentum_5_20_60",
+            "symbol": "159259.SZ",
+            "start_date": "2025-09-30",
+            "end_date": "2025-11-20",
+        },
+        context,
+    )
+    backtest = registry.run_tool(
+        "run_backtest",
+        {
+            "factor_name": "multi_momentum_5_20_60",
+            "symbol": "159259.SZ",
+            "start_date": "2025-09-30",
+            "end_date": "2025-11-20",
+            "top_n": 1,
+        },
+        context,
+    )
+
+    assert evaluated["status"] == "validated"
+    assert backtest["status"] == "completed"
+    assert backtest["factor_name"] == spec["factor_id"]
+
+
 def test_session5_empty_factor_tool_args_return_structured_errors(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     registry = _registry(tmp_path, lake)

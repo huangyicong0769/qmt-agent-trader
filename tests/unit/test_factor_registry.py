@@ -84,6 +84,66 @@ def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Seri
     assert frame["factor_value"].notna().sum() == 42
 
 
+def test_saved_factor_can_be_resolved_by_saved_name(tmp_path) -> None:
+    factor_file = tmp_path / "factor.py"
+    factor_file.write_text(
+        """
+import pandas as pd
+
+
+def compute(bars: pd.DataFrame) -> pd.Series:
+    return bars.groupby("symbol")["close"].pct_change(3)
+""",
+        encoding="utf-8",
+    )
+    registry = FactorRegistry(tmp_path / "registry")
+    registry.save_factor(
+        factor_id="factor_123",
+        name="agent_momentum_3d",
+        version="0.1.0",
+        implementation_ref=f"file:{factor_file}",
+        required_columns=("symbol", "trade_date", "close"),
+        lookback=3,
+        params={"lookback": 3},
+        created_by="agent",
+    )
+
+    assert registry.get_factor("agent_momentum_3d").factor_id == "factor_123"
+    frame = compute_factor_frame(_bars(), "agent_momentum_3d", registry=registry)
+    assert frame["factor_name"].unique().tolist() == ["agent_momentum_3d"]
+    assert frame["factor_value"].notna().sum() == 42
+
+
+def test_file_factor_object_output_is_coerced_to_numeric(tmp_path) -> None:
+    factor_file = tmp_path / "factor.py"
+    factor_file.write_text(
+        """
+import pandas as pd
+
+
+def compute(bars: pd.DataFrame) -> pd.Series:
+    return pd.Series(["bad"] * 6 + list(range(len(bars) - 6)), index=bars.index)
+""",
+        encoding="utf-8",
+    )
+    registry = FactorRegistry(tmp_path / "registry")
+    registry.save_factor(
+        factor_id="factor_object",
+        name="object_output",
+        version="0.1.0",
+        implementation_ref=f"file:{factor_file}",
+        required_columns=("symbol", "trade_date", "close"),
+        lookback=3,
+        params={},
+        created_by="agent",
+    )
+
+    frame = compute_factor_frame(_bars(), "object_output", registry=registry)
+
+    assert pd.api.types.is_numeric_dtype(frame["factor_value"])
+    assert frame["factor_value"].isna().sum() == 6
+
+
 def test_unsaved_file_factor_is_not_available(tmp_path) -> None:
     factor_file = tmp_path / "draft.py"
     factor_file.write_text("def compute(bars):\n    return bars['close']\n", encoding="utf-8")

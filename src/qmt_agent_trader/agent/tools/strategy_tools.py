@@ -164,11 +164,13 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
 
     registry_root = _factor_registry_root(lake)
     factor_registry = FactorRegistry(registry_root)
-    if factor_registry.get_factor(factor_name) is None:
+    saved = factor_registry.get_factor(factor_name)
+    if saved is None:
         return {
             "status": "FACTOR_NOT_SAVED",
             "message": f"factor '{factor_name}' is a draft or unknown; save_factor first",
         }
+    factor_name = saved.factor_id
 
     bars = load_daily_bars(lake, symbols=symbols or None)
     if bars.empty:
