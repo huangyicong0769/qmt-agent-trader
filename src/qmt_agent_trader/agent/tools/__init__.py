@@ -40,7 +40,6 @@ from qmt_agent_trader.agent.tools.query_tools import (
     query_universe_tool,
 )
 from qmt_agent_trader.agent.tools.remote_data_tools import (
-    plan_remote_data_update_tool,
     run_remote_data_update_tool,
 )
 from qmt_agent_trader.agent.tools.strategy_tools import (
@@ -147,7 +146,6 @@ def build_agent_registry(
         query_universe_tool,
         query_bars_tool,
         query_fundamentals_pit_tool,
-        plan_remote_data_update_tool,
         run_remote_data_update_tool,
         # Factor tools
         create_factor_spec_tool,

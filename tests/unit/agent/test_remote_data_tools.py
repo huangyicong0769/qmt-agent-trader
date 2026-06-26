@@ -5,7 +5,6 @@ from pydantic import SecretStr
 
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools.remote_data_tools import (
-    plan_remote_data_update_tool,
     run_remote_data_update_tool,
     wire,
 )
@@ -22,6 +21,35 @@ class ExplodingClient(TushareClient):
         raise AssertionError(f"unexpected live request: {request.api_name}")
 
 
+class RecordingClient(TushareClient):
+    def __init__(self) -> None:
+        super().__init__(token="secret-token")
+        self.seen: list[str] = []
+
+    def execute(self, request: TushareRequest) -> pd.DataFrame:
+        self.seen.append(request.api_name)
+        if request.api_name == "trade_cal":
+            return pd.DataFrame([{"cal_date": "20240102", "is_open": 1}])
+        if request.api_name == "daily":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": request.params["trade_date"],
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.5,
+                    }
+                ]
+            )
+        if request.api_name == "suspend_d":
+            return pd.DataFrame()
+        if request.api_name == "stk_limit":
+            return pd.DataFrame()
+        raise AssertionError(f"unexpected request: {request.api_name}")
+
+
 class FailingClient(TushareClient):
     def __init__(self) -> None:
         super().__init__(token="secret-token")
@@ -30,26 +58,31 @@ class FailingClient(TushareClient):
         raise RuntimeError("upstream rejected request with secret-token")
 
 
-def test_plan_remote_data_update_is_read_only(tmp_path) -> None:
+def test_run_remote_data_update_fetches_even_when_agent_context_is_dry_run(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    client = RecordingClient()
     wire(
         data_lake=lake,
         settings=Settings(project_root=tmp_path),
-        client_factory=lambda: ExplodingClient(),
+        client_factory=lambda: client,
     )
 
-    result = plan_remote_data_update_tool.run(
-        {"source": "tushare", "start_date": "20240101", "end_date": "20240103"},
-        ToolContext(run_id="r-plan", dry_run=True),
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240102",
+            "end_date": "20240102",
+            "include_basics": False,
+        },
+        ToolContext(run_id="r-live-agent", dry_run=True),
     )
 
-    assert result["status"] == "planned"
-    assert result["source"] == "tushare"
-    assert result["missing_ranges"] == [{"start_date": "20240101", "end_date": "20240103"}]
-    assert not lake.dataset_path("raw", "tushare_daily").exists()
+    assert result["status"] == "updated"
+    assert "daily" in client.seen
+    assert lake.dataset_path("raw", "tushare_daily").exists()
 
 
-def test_run_remote_data_update_dry_run_does_not_require_token_or_fetch(tmp_path) -> None:
+def test_run_remote_data_update_supports_explicit_dry_run_plan(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     wire(
         data_lake=lake,
@@ -58,7 +91,12 @@ def test_run_remote_data_update_dry_run_does_not_require_token_or_fetch(tmp_path
     )
 
     result = run_remote_data_update_tool.run(
-        {"source": "tushare", "start_date": "20240101", "end_date": "20240103"},
+        {
+            "source": "tushare",
+            "start_date": "20240101",
+            "end_date": "20240103",
+            "dry_run": True,
+        },
         ToolContext(run_id="r-dry", dry_run=True),
     )
 

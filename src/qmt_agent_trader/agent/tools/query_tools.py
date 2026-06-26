@@ -12,6 +12,7 @@ from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.data.bars import load_daily_bars
+from qmt_agent_trader.data.catalog import visible_dataset_names
 from qmt_agent_trader.data.storage import DataLake
 
 _lake: DataLake | None = None
@@ -35,7 +36,8 @@ def _list_data_catalog(_input: dict[str, Any], _context: ToolContext) -> dict[st
         return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
     try:
         layers = {
-            layer: lake.list_dataset_names(layer) for layer in ("raw", "bronze", "silver", "gold")
+            layer: visible_dataset_names(layer, lake.list_dataset_names(layer))
+            for layer in ("raw", "bronze", "silver", "gold")
         }
         return {"status": "ok", "layers": layers}
     except Exception as exc:

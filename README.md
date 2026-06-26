@@ -59,6 +59,8 @@ to `.env` locally and keep `.env` untracked.
 
 Remote data updates use the local `TushareDataUpdateService` and write stable
 incremental datasets such as `raw/tushare_daily.parquet`. The Agent-facing
-tools are `plan_remote_data_update` and `run_remote_data_update`; dry-run calls
-only return a plan, while live calls require `TUSHARE_TOKEN` and use the local
-rate limiter, update lock, and DuckDB fetch-state tables.
+tool is `run_remote_data_update`; it fetches through the local rate limiter,
+update lock, and DuckDB fetch-state tables. Pass `dry_run: true` only when a
+local gap plan is needed without contacting Tushare. Legacy batch files such as
+`raw/tushare_daily_20240101_20240131.parquet` should be migrated with
+`qmt-agent data migrate-legacy` and are not used by Agent queries.

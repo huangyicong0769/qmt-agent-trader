@@ -64,15 +64,15 @@ def load_daily_bars(
     start: str | date | None = None,
     end: str | date | None = None,
 ) -> pd.DataFrame:
-    raw = _read_stable_and_legacy(lake, "raw", "tushare_daily", "tushare_daily_")
+    raw = _read_optional_dataset(lake, "raw", "tushare_daily")
     bars = normalize_tushare_daily(raw)
     if bars.empty:
         return bars
 
     bars = enrich_trade_states(
         bars,
-        suspend=_read_stable_and_legacy(lake, "raw", "tushare_suspend", "tushare_suspend_"),
-        stk_limit=_read_stable_and_legacy(lake, "raw", "tushare_stk_limit", "tushare_stk_limit_"),
+        suspend=_read_optional_dataset(lake, "raw", "tushare_suspend"),
+        stk_limit=_read_optional_dataset(lake, "raw", "tushare_stk_limit"),
         namechange=_read_optional_dataset(lake, "raw", "tushare_namechange"),
         stock_basic=_read_optional_dataset(lake, "raw", "tushare_stock_basic"),
     )
@@ -123,24 +123,6 @@ def _read_optional_dataset(lake: DataLake, layer: str, name: str) -> pd.DataFram
     if not lake.dataset_path(layer, name).exists():
         return pd.DataFrame()
     return lake.read_parquet(layer, name)
-
-
-def _read_stable_and_legacy(
-    lake: DataLake,
-    layer: str,
-    stable_name: str,
-    legacy_prefix: str,
-) -> pd.DataFrame:
-    frames: list[pd.DataFrame] = []
-    legacy = lake.read_layer_prefix(layer, legacy_prefix)
-    if not legacy.empty:
-        frames.append(legacy)
-    stable = _read_optional_dataset(lake, layer, stable_name)
-    if not stable.empty:
-        frames.append(stable)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
 
 
 def _state_key_frame(frame: pd.DataFrame) -> pd.DataFrame:

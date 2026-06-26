@@ -24,7 +24,6 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
     assert {
         "list_tools",
         "query_bars",
-        "plan_remote_data_update",
         "run_remote_data_update",
         "create_factor_spec",
         "generate_factor_code",
@@ -34,14 +33,15 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
         "generate_tool_tests",
         "run_tool_sandbox_tests",
     }.issubset(registered_names)
+    assert "plan_remote_data_update" not in registered_names
     assert {
         "query_bars",
-        "plan_remote_data_update",
         "run_remote_data_update",
         "create_factor_spec",
         "generate_factor_code",
         "detect_tool_gap",
     }.issubset(llm_names)
+    assert "plan_remote_data_update" not in llm_names
     assert "propose_tool_registration" in registered_names
     assert "propose_tool_registration" not in llm_names
     assert len(llm_names) > 14

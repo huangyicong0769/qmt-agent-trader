@@ -44,13 +44,29 @@ def test_default_runtime_lists_and_summarizes_data_lake(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily_fixture",
+        "tushare_daily",
+    )
+    runtime.lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000002.SZ",
+                    "trade_date": "20240102",
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare_daily_20240101_20240103",
     )
 
     datasets = runtime.call_tool("list_datasets", layer="raw")
     summary = runtime.call_tool("summarize_daily_bars")
 
-    assert datasets["layers"]["raw"] == ["tushare_daily_fixture"]
+    assert datasets["layers"]["raw"] == ["tushare_daily"]
     assert summary["rows"] == 2
     assert summary["trade_state_counts"]["limit_up"] == 1
     assert summary["trade_state_counts"]["limit_down"] == 1
@@ -77,7 +93,7 @@ def test_default_runtime_can_compute_factor_tool(tmp_path) -> None:
         }
         for offset in range(21)
     ]
-    runtime.lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily_fixture")
+    runtime.lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
 
     result = runtime.call_tool("compute_factor", name="momentum_20d", date="20240121")
 
@@ -148,7 +164,7 @@ def test_default_runtime_runs_factor_rank_sensitivity(tmp_path) -> None:
                 "close": 20.0 + offset * 0.1,
             }
         )
-    runtime.lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily_fixture")
+    runtime.lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
 
     result = runtime.call_tool(
         "run_factor_rank_sensitivity",
@@ -199,7 +215,7 @@ def test_default_runtime_persists_factor_rank_research_report(tmp_path) -> None:
                 "close": 20.0 + offset * 0.1,
             }
         )
-    runtime.lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily_fixture")
+    runtime.lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
 
     receipt = runtime.call_tool(
         "run_factor_rank_sensitivity_report",

@@ -32,13 +32,8 @@ def test_normalize_tushare_daily_ignores_empty_marker_column() -> None:
     assert "turnover" in bars.columns
 
 
-def test_load_daily_bars_reads_all_daily_datasets(tmp_path) -> None:
+def test_load_daily_bars_ignores_legacy_daily_batches(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
-    lake.write_parquet(
-        pd.DataFrame({"_empty": pd.Series(dtype="bool")}),
-        "raw",
-        "tushare_daily_empty",
-    )
     lake.write_parquet(
         pd.DataFrame(
             [
@@ -53,16 +48,15 @@ def test_load_daily_bars_reads_all_daily_datasets(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily_real",
+        "tushare_daily_20240101_20240103",
     )
 
     bars = load_daily_bars(lake)
 
-    assert len(bars) == 1
-    assert bars.iloc[0]["symbol"] == "000001.SZ"
+    assert bars.empty
 
 
-def test_load_daily_bars_prefers_stable_dataset_over_legacy_batches(tmp_path) -> None:
+def test_load_daily_bars_reads_stable_daily_dataset_only(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     legacy = {
         "ts_code": "000001.SZ",
@@ -181,12 +175,12 @@ def test_load_daily_bars_enriches_trade_states_from_lake(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily_real",
+        "tushare_daily",
     )
     lake.write_parquet(
         pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102", "suspend_type": "S"}]),
         "raw",
-        "tushare_suspend_fixture",
+        "tushare_suspend",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -200,7 +194,7 @@ def test_load_daily_bars_enriches_trade_states_from_lake(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_stk_limit_fixture",
+        "tushare_stk_limit",
     )
 
     bars = load_daily_bars(lake)
