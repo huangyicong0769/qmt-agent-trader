@@ -4,7 +4,7 @@ import pandas as pd
 
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.tushare_client import TushareClient, TushareRequest
-from qmt_agent_trader.services.data_update_service import TushareDataUpdateService
+from qmt_agent_trader.services.data_update_service import RequestLimiter, TushareDataUpdateService
 
 
 class FakeTushareClient(TushareClient):
@@ -96,11 +96,25 @@ def test_tushare_data_update_writes_lake(tmp_path) -> None:
         "tushare_stock_basic",
         "tushare_etf_basic",
         "tushare_namechange",
-        "tushare_daily_20260609_20260610",
-        "tushare_suspend_20260609_20260610",
-        "tushare_stk_limit_20260609_20260610",
+        "tushare_daily",
+        "tushare_suspend",
+        "tushare_stk_limit",
     }
-    assert lake.dataset_path("raw", "tushare_daily_20260609_20260610").exists()
+    assert lake.dataset_path("raw", "tushare_daily").exists()
+    assert lake.fetch_state("tushare", "tushare_daily")[0]["status"] == "success"
+
+
+def test_tushare_data_update_is_idempotent_for_overlapping_ranges(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    client = FakeTushareClient()
+    service = TushareDataUpdateService(client, lake)
+
+    service.update("20260609", "20260610")
+    service.update("20260609", "20260610")
+
+    daily = lake.read_parquet("raw", "tushare_daily")
+    assert daily.drop_duplicates(["ts_code", "trade_date"]).shape[0] == len(daily)
+    assert not lake.dataset_path("raw", "tushare_daily_20260609_20260610").exists()
 
 
 def test_tushare_data_update_falls_back_when_calendar_empty(tmp_path) -> None:
@@ -121,3 +135,22 @@ def test_tushare_namechange_uses_pagination(tmp_path) -> None:
 
     assert len(frame) == 3
     assert client.offsets == [0, 2]
+
+
+def test_request_limiter_enforces_minimum_interval() -> None:
+    now = [100.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    limiter = RequestLimiter(min_interval_seconds=0.5, clock=clock, sleep=sleep)
+
+    limiter.wait()
+    limiter.wait()
+
+    assert sleeps == [0.5]

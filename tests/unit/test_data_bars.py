@@ -62,6 +62,28 @@ def test_load_daily_bars_reads_all_daily_datasets(tmp_path) -> None:
     assert bars.iloc[0]["symbol"] == "000001.SZ"
 
 
+def test_load_daily_bars_prefers_stable_dataset_over_legacy_batches(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = {
+        "ts_code": "000001.SZ",
+        "trade_date": "20240102",
+        "open": 10.0,
+        "high": 11.0,
+        "low": 9.0,
+        "close": 10.0,
+    }
+    stable = dict(legacy)
+    stable["close"] = 10.5
+
+    lake.write_parquet(pd.DataFrame([legacy]), "raw", "tushare_daily_20240101_20240103")
+    lake.write_parquet(pd.DataFrame([stable]), "raw", "tushare_daily")
+
+    bars = load_daily_bars(lake)
+
+    assert len(bars) == 1
+    assert bars.iloc[0]["close"] == 10.5
+
+
 def test_enrich_trade_states_uses_suspend_limit_and_st_sources() -> None:
     bars = normalize_tushare_daily(
         pd.DataFrame(

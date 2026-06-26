@@ -35,6 +35,7 @@ from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.tushare_client import TushareClient
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
 from qmt_agent_trader.services.data_update_service import (
+    RequestLimiter,
     TushareDataUpdateService,
     build_data_update_plan,
 )
@@ -140,7 +141,15 @@ def data_update(
         plan = build_data_update_plan(client, from_date, to_date)
         print_json({"status": "planned", "requests": plan})
         return
-    result = TushareDataUpdateService(client, _data_lake()).update(
+    settings = _settings()
+    result = TushareDataUpdateService(
+        client,
+        _data_lake(),
+        limiter=RequestLimiter(
+            min_interval_seconds=settings.remote_data_min_interval_seconds
+        ),
+        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+    ).update(
         from_date,
         to_date,
         include_daily=not skip_daily,
@@ -289,6 +298,7 @@ def _agent_registry() -> AgentToolRegistry:
         data_lake=lake,
         audit_path=settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
         experiment_root=settings.resolved_data_dir / "experiments",
+        settings=settings,
         sandbox=CodeSandbox(),
     )
 

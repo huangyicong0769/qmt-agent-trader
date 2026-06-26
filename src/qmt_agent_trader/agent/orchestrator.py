@@ -99,6 +99,7 @@ class AgentOrchestrator:
             data_lake=self._lake,
             audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
             experiment_root=self.settings.resolved_data_dir / "experiments",
+            settings=self.settings,
             sandbox=CodeSandbox(),
         )
 
@@ -720,4 +721,3 @@ def _preview(result: Any, max_len: int = 200) -> str:
         return j[:max_len] + ("..." if len(j) > max_len else "")
     except Exception:
         return str(s)[:max_len] + "..."
-
