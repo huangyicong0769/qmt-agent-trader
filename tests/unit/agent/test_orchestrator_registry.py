@@ -25,6 +25,7 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
         "list_tools",
         "query_bars",
         "run_remote_data_update",
+        "run_shell_command",
         "create_factor_spec",
         "generate_factor_code",
         "run_factor_static_checks",
@@ -35,6 +36,7 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
         "run_tool_sandbox_tests",
     }.issubset(registered_names)
     assert "plan_remote_data_update" not in registered_names
+    assert "run_shell_command" not in llm_names
     assert {
         "query_bars",
         "run_remote_data_update",

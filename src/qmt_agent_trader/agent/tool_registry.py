@@ -138,7 +138,7 @@ class AgentToolRegistry:
                     "output_schema": spec.output_schema,
                     "side_effect_level": spec.side_effect_level,
                     "deterministic": spec.deterministic,
-                    "llm_callable": can_llm_call(spec.permission),
+                    "llm_callable": spec.llm_callable and can_llm_call(spec.permission),
                 }
             )
         return result
@@ -220,6 +220,8 @@ class AgentToolRegistry:
         for name, tool in sorted(self.tools.items()):
             spec = tool.spec
             if llm_callable_only and not can_llm_call(spec.permission):
+                continue
+            if llm_callable_only and not spec.llm_callable:
                 continue
             capability = to_capability(spec.permission)
 

@@ -213,6 +213,17 @@ def test_agent_registry_legacy_bridge_exports_llm_callable_tools_only() -> None:
     reg.register(_echo_tool("backtest", permission=PermissionLevel.BACKTEST_EXECUTE))
     reg.register(_echo_tool("approval", permission=PermissionLevel.APPROVAL_REQUIRED))
     reg.register(_echo_tool("forbidden", permission=PermissionLevel.FORBIDDEN_TO_LLM))
+    reg.register(
+        tool(
+            ToolSpec(
+                name="hidden_read",
+                description="registered but hidden from LLM",
+                permission=PermissionLevel.READ_ONLY,
+                llm_callable=False,
+            ),
+            fn=lambda data, context: {"ok": True},
+        )
+    )
 
     legacy = reg.to_legacy_registry()
     names = set(legacy.tools)
@@ -220,6 +231,7 @@ def test_agent_registry_legacy_bridge_exports_llm_callable_tools_only() -> None:
     assert {"read", "code", "backtest"}.issubset(names)
     assert "approval" not in names
     assert "forbidden" not in names
+    assert "hidden_read" not in names
     deepseek_tools = legacy.deepseek_tools_for_llm()
     assert {item.name for item in deepseek_tools} == names
     assert all(item.parameters.get("type") == "object" for item in deepseek_tools)

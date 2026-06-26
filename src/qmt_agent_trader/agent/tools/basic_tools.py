@@ -197,6 +197,7 @@ run_shell_command_tool: AgentTool = tool(
         },
         timeout_seconds=30,
         deterministic=False,
+        llm_callable=False,
     ),
     fn=_run_shell_command,
 )

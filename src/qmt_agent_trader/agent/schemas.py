@@ -59,6 +59,7 @@ class ToolSpec(BaseModel):
     timeout_seconds: int = 60
     audit_required: bool = True
     deterministic: bool = False
+    llm_callable: bool = True
 
 
 class ToolContext(BaseModel):
