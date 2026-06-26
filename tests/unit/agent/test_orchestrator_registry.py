@@ -28,6 +28,7 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
         "create_factor_spec",
         "generate_factor_code",
         "run_factor_static_checks",
+        "save_factor",
         "evaluate_factor_candidate",
         "detect_tool_gap",
         "generate_tool_tests",
@@ -39,6 +40,7 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
         "run_remote_data_update",
         "create_factor_spec",
         "generate_factor_code",
+        "save_factor",
         "detect_tool_gap",
     }.issubset(llm_names)
     assert "plan_remote_data_update" not in llm_names

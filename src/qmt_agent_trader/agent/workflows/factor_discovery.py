@@ -133,6 +133,7 @@ class FactorDiscoveryWorkflow:
                 _ctx(),
             )
             code_path = code_result.get("code_path", "")
+            spec_path = code_result.get("spec_path", "")
             if code_path:
                 self.store.add_artifact(exp.experiment_id, code_path)
 
@@ -154,7 +155,21 @@ class FactorDiscoveryWorkflow:
                 )
                 return self.store.get_experiment(exp.experiment_id)
 
-            # Step 4: evaluate_factor_candidate
+            # Step 4: save_factor
+            save_result = self.registry.run_tool(
+                "save_factor",
+                {
+                    "factor_id": factor_id,
+                    "code_path": code_path,
+                    "spec_path": spec_path,
+                },
+                _ctx(),
+            )
+            registry_path = save_result.get("registry_path", "")
+            if registry_path:
+                self.store.add_artifact(exp.experiment_id, registry_path)
+
+            # Step 5: evaluate_factor_candidate
             eval_result = self.registry.run_tool(
                 "evaluate_factor_candidate",
                 {
@@ -169,7 +184,7 @@ class FactorDiscoveryWorkflow:
             if report_path:
                 self.store.add_artifact(exp.experiment_id, report_path)
 
-            # Step 5: generate_research_report
+            # Step 6: generate_research_report
             report_result = self.registry.run_tool(
                 "generate_research_report",
                 {

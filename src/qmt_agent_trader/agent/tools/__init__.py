@@ -27,6 +27,7 @@ from qmt_agent_trader.agent.tools.factor_tools import (
     evaluate_factor_candidate_tool,
     generate_factor_code_tool,
     run_factor_static_checks_tool,
+    save_factor_tool,
 )
 from qmt_agent_trader.agent.tools.meta_tools import (
     create_tool_spec_tool,
@@ -159,6 +160,7 @@ def build_agent_registry(
         create_factor_spec_tool,
         generate_factor_code_tool,
         run_factor_static_checks_tool,
+        save_factor_tool,
         evaluate_factor_candidate_tool,
         # Strategy tools
         create_strategy_spec_tool,

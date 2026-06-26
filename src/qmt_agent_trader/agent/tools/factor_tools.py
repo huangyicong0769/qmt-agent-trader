@@ -1,8 +1,8 @@
-"""Factor tools: create_factor_spec, generate_factor_code, run_factor_static_checks,
-evaluate_factor_candidate."""
+"""Factor tools for factor specs, drafts, saved registry entries, and evaluation."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ from qmt_agent_trader.agent.schemas import FactorSpec, ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import (
     validate_factor,
 )
@@ -33,12 +34,15 @@ def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
 
 
 def _create_factor_spec(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
-    hypothesis = input_data.get("hypothesis", {})
+    hypothesis = input_data.get("hypothesis")
+    if not isinstance(hypothesis, dict):
+        hypothesis = input_data
     name = hypothesis.get("name", "unnamed")
-    hypothesis.get("intuition", "")
+    name = hypothesis.get("factor_name", name)
     required_data = hypothesis.get("required_data", ["daily_bars"])
     formula_sketch = hypothesis.get("formula_sketch", "")
-    lookback = hypothesis.get("expected_holding_period", "20")
+    formula_sketch = hypothesis.get("factor_description", formula_sketch)
+    lookback = hypothesis.get("lookback", hypothesis.get("expected_holding_period", "20"))
     try:
         lookback = int(str(lookback).replace("d", "").strip())
     except ValueError:
@@ -80,17 +84,27 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
 
     factor_code = _render_factor_code(name, lookback, formula)
     test_code = _render_factor_test_code(name)
+    spec_code = json.dumps(spec_data, ensure_ascii=False, indent=2, default=str)
 
     sb = _sandbox
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
 
     try:
-        code_path = sb.write_candidate_file(f"factors/{factor_id}.py", factor_code)
-        tests_path = sb.write_candidate_file(f"factors/test_{factor_id}.py", test_code)
+        code_path = sb.write_candidate_file(f"factors/drafts/{factor_id}/factor.py", factor_code)
+        tests_path = sb.write_candidate_file(
+            f"factors/drafts/{factor_id}/test_factor.py",
+            test_code,
+        )
+        spec_path = sb.write_candidate_file(
+            f"factors/drafts/{factor_id}/factor_spec.json",
+            spec_code,
+        )
         return {
+            "factor_id": factor_id,
             "code_path": str(code_path),
             "tests_path": str(tests_path),
+            "spec_path": str(spec_path),
             "status": "generated",
             "warnings": warnings,
         }
@@ -134,6 +148,74 @@ run_factor_static_checks_tool: AgentTool = tool(
     fn=_run_factor_static_checks,
 )
 
+# ── save_factor ──────────────────────────────────────────────────────────────
+
+
+def _save_factor(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    sb = _sandbox
+    lake = _lake
+    if sb is None:
+        return {"status": "error", "message": "sandbox not wired"}
+    if lake is None:
+        return {"status": "error", "message": "data lake not wired"}
+
+    factor_id = str(input_data.get("factor_id") or "").strip()
+    code_path_raw = str(input_data.get("code_path") or "").strip()
+    spec_path_raw = str(input_data.get("spec_path") or "").strip()
+    if not factor_id:
+        return {"status": "INVALID_REQUEST", "message": "factor_id is required"}
+    if not code_path_raw:
+        return {"status": "INVALID_REQUEST", "message": "code_path is required"}
+
+    try:
+        code_path = sb.validate_path(code_path_raw)
+    except Exception as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+    if not code_path.exists():
+        return {"status": "INVALID_REQUEST", "message": f"file not found: {code_path}"}
+
+    issues = sb.static_scan_code(code_path.read_text(encoding="utf-8"))
+    if issues:
+        return {"status": "FAILED", "issues": issues}
+
+    spec_data = _load_factor_spec(spec_path_raw, sb) if spec_path_raw else {}
+    if spec_data.get("factor_id") and spec_data["factor_id"] != factor_id:
+        return {
+            "status": "INVALID_REQUEST",
+            "message": "factor_id does not match factor_spec",
+        }
+    registry = FactorRegistry(_factor_registry_root(lake))
+    saved = registry.save_factor(
+        factor_id=factor_id,
+        name=str(spec_data.get("name") or factor_id),
+        version=str(spec_data.get("version") or "0.1.0"),
+        implementation_ref=f"file:{code_path}",
+        required_columns=_required_columns_for_spec(spec_data),
+        lookback=int(spec_data.get("lookback") or 20),
+        params={"lookback": int(spec_data.get("lookback") or 20)},
+        created_by=str(input_data.get("created_by") or "agent"),
+    )
+    return {
+        "status": saved.status,
+        "factor_id": saved.factor_id,
+        "registry_path": str(registry.registry_path),
+        "implementation_ref": saved.implementation_ref,
+    }
+
+
+save_factor_tool: AgentTool = tool(
+    ToolSpec(
+        name="save_factor",
+        description=(
+            "将通过静态检查的候选因子保存到统一 Factor Registry。保存后才可评估或回测。"
+        ),
+        permission=PermissionLevel.RESEARCH_WRITE,
+        side_effect_level="write_generated",
+        deterministic=False,
+    ),
+    fn=_save_factor,
+)
+
 # ── evaluate_factor_candidate ────────────────────────────────────────────────
 
 
@@ -146,12 +228,13 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
     if lake is None:
         return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
 
-    # Map factor_id to built-in name or stub
-    factor_name = _map_factor_name(factor_id)
-    if factor_name is None:
+    factor_name = str(factor_id).strip()
+    registry_root = _factor_registry_root(lake)
+    registry = FactorRegistry(registry_root)
+    if registry.get_factor(factor_name) is None:
         return {
-            "status": "NOT_IMPLEMENTED",
-            "message": f"factor '{factor_id}' not in built-in set; use generate_factor_code first",
+            "status": "FACTOR_NOT_SAVED",
+            "message": f"factor '{factor_name}' is a draft or unknown; save_factor first",
         }
 
     # ── Dedup: check cache first ──
@@ -165,12 +248,22 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
         return cached
 
     try:
-        result = validate_factor(lake, name=factor_name, start=start, end=end).as_dict()
+        result = validate_factor(
+            lake,
+            name=factor_name,
+            start=start,
+            end=end,
+            registry_root=str(registry_root),
+        ).as_dict()
         # Compute quantile returns via walk-forward
         from qmt_agent_trader.factors.service import walk_forward_factor_validation
 
         wf = walk_forward_factor_validation(
-            lake, name=factor_name, start=start, end=end
+            lake,
+            name=factor_name,
+            start=start,
+            end=end,
+            registry_root=str(registry_root),
         ).as_dict()
         slices_raw = wf.get("walk_forward", [])
         if not isinstance(slices_raw, list):
@@ -210,50 +303,69 @@ evaluate_factor_candidate_tool: AgentTool = tool(
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-_BUILTIN_FACTORS = {
-    "momentum_20d": "momentum_20d",
-    "momentum_60d": "momentum_60d",
-    "reversal_5d": "reversal_5d",
-    "volatility_20d": "volatility_20d",
-    "turnover_20d": "turnover_20d",
-    "amount_zscore_20d": "amount_zscore_20d",
-}
+
+def _factor_registry_root(lake: DataLake) -> Path:
+    return lake.root.parent / "factors"
 
 
-def _map_factor_name(factor_id: str) -> str | None:
-    if factor_id in _BUILTIN_FACTORS:
-        return _BUILTIN_FACTORS[factor_id]
-    for key, value in _BUILTIN_FACTORS.items():
-        if key in factor_id or factor_id in key:
-            return value
-    return None
+def _load_factor_spec(spec_path_raw: str, sb: CodeSandbox) -> dict[str, Any]:
+    try:
+        spec_path = sb.validate_path(spec_path_raw)
+    except Exception:
+        return {}
+    if not spec_path.exists():
+        return {}
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
+    formula = json.dumps(spec_data, ensure_ascii=False).lower()
+    columns = ["symbol", "trade_date", "close"]
+    for candidate in ("open", "high", "low", "volume", "amount", "turnover"):
+        if candidate in formula and candidate not in columns:
+            columns.append(candidate)
+    return tuple(columns)
 
 
 def _render_factor_code(name: str, lookback: int, formula: str) -> str:
     name.replace(" ", "_").replace("-", "_").lower()
     return f'''"""Candidate factor: {name}.
-Auto-generated by Agent — REVIEW_REQUIRED before promotion.
+Auto-generated by Agent. REVIEW_REQUIRED before promotion.
 """
+
+from typing import Any
 
 import pandas as pd
 
 
-def compute(bars: pd.DataFrame) -> pd.Series:
+def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Series:
     """{formula}
 
     Lookback: {lookback} days.
     """
-    return bars.groupby("symbol")["close"].pct_change({lookback})
+    if bars.empty:
+        return pd.Series(dtype="float64")
+    lookback = int((params or {{}}).get("lookback", {lookback}))
+    return bars.groupby("symbol")["close"].pct_change(lookback)
 '''
 
 
 def _render_factor_test_code(name: str) -> str:
-    safe_name = name.replace(" ", "_").replace("-", "_").lower()
     return f'''"""Tests for candidate factor: {name}."""
+
+import importlib.util
+from pathlib import Path
 
 import pandas as pd
 
-from generated.factors.{safe_name} import compute
+
+MODULE_PATH = Path(__file__).with_name("factor.py")
+SPEC = importlib.util.spec_from_file_location("candidate_factor", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+compute = MODULE.compute
 
 
 def test_compute_returns_series():
