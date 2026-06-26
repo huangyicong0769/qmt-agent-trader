@@ -228,6 +228,10 @@ async def execute_stream(session_id: str, request: Request) -> StreamingResponse
                 message=message,
                 routing=decision,
                 run_id=run_id,
+                history=[
+                    {"role": m.role, "content": m.content}
+                    for m in session.messages
+                ],
             ):
                 sse = event.to_sse()
                 yield f"event: {event.type}\n"

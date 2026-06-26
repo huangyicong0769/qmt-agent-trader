@@ -110,6 +110,7 @@ class AgentOrchestrator:
         routing: RoutingDecision | None = None,
         *,
         run_id: str | None = None,
+        history: list[dict[str, Any]] | None = None,
         max_rounds: int = 100,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncGenerator[OrchestratorEvent, None]:
@@ -201,10 +202,9 @@ class AgentOrchestrator:
         )
         tools = legacy_registry.deepseek_tools_for_llm()
 
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": message},
-        ]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_msg}]
+        messages.extend(_conversation_history(history or [], current_message=message))
+        messages.append({"role": "user", "content": message})
 
         yield OrchestratorEvent(
             type="progress",
@@ -376,6 +376,31 @@ def _stream_to_events(
         ]
 
     return []
+
+
+def _conversation_history(
+    history: list[dict[str, Any]],
+    *,
+    current_message: str,
+    max_turns: int = 12,
+) -> list[dict[str, str]]:
+    natural_messages: list[dict[str, str]] = []
+    for raw in history:
+        role = str(raw.get("role", ""))
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(raw.get("content", "")).strip()
+        if not content:
+            continue
+        natural_messages.append({"role": role, "content": content})
+
+    if natural_messages and natural_messages[-1] == {
+        "role": "user",
+        "content": current_message.strip(),
+    }:
+        natural_messages = natural_messages[:-1]
+
+    return natural_messages[-max_turns * 2 :]
 
 
 # ── Tool registry builder (forked from AgentRuntime for v1 compatibility) ──

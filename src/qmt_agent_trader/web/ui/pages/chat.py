@@ -278,6 +278,10 @@ async def _send(
     try:
         async for evt in session.orchestrator.execute_stream(
             message=content, routing=decision, run_id=run_id,
+            history=[
+                {"role": msg.role, "content": msg.content}
+                for msg in session.messages
+            ],
             cancel_event=cancel_event,
         ):
             # Check for cancellation
