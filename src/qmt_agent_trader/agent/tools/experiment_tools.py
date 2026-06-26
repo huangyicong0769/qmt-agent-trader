@@ -29,13 +29,13 @@ def _get_store() -> ExperimentStore:
 
 def _log_experiment_event(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     store = _get_store()
-    exp_id: str = str(input_data.get("experiment_id", ""))
+    exp_id: str = str(input_data.get("experiment_id") or context.experiment_id or "")
     event_type = input_data.get("event_type", "observation")
     message = input_data.get("message", "")
     input_data.get("metadata", {})
 
     if not exp_id:
-        return {"status": "error", "message": "experiment_id is required"}
+        return {"status": "error", "message": "experiment_id or context experiment_id is required"}
 
     try:
         store.get_experiment(exp_id)

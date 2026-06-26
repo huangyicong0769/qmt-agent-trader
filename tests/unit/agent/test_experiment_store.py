@@ -6,7 +6,11 @@ import pytest
 
 from qmt_agent_trader.agent.errors import ExperimentNotFoundError
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
-from qmt_agent_trader.agent.schemas import ExperimentStatus
+from qmt_agent_trader.agent.schemas import ExperimentStatus, ToolContext
+from qmt_agent_trader.agent.tools.experiment_tools import (
+    log_experiment_event_tool,
+    set_experiment_store,
+)
 
 
 @pytest.fixture
@@ -19,6 +23,13 @@ def test_create_experiment(store: ExperimentStore) -> None:
     assert exp.kind == "factor_discovery"
     assert exp.status == ExperimentStatus.CREATED
     assert exp.tags == ["mom"]
+
+
+def test_create_experiment_with_explicit_id(store: ExperimentStore) -> None:
+    exp = store.create_experiment("factor_discovery", experiment_id="exp_context")
+
+    assert exp.experiment_id == "exp_context"
+    assert store.get_experiment("exp_context").kind == "factor_discovery"
 
 
 def test_get_experiment(store: ExperimentStore) -> None:
@@ -45,6 +56,19 @@ def test_add_lesson(store: ExperimentStore) -> None:
     store.add_lesson(exp.experiment_id, "failed due to NaN coverage")
     fetched = store.get_experiment(exp.experiment_id)
     assert "failed due to NaN coverage" in fetched.lessons
+
+
+def test_log_experiment_event_uses_context_id(store: ExperimentStore) -> None:
+    set_experiment_store(store)
+    store.create_experiment("factor_discovery", experiment_id="exp_context")
+
+    result = log_experiment_event_tool.run(
+        {"event_type": "observation", "message": "context works"},
+        ToolContext(run_id="run_context", experiment_id="exp_context"),
+    )
+
+    assert result["status"] == "logged"
+    assert "[observation] context works" in store.get_experiment("exp_context").lessons
 
 
 def test_add_artifact(store: ExperimentStore) -> None:

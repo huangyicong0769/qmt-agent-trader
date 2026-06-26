@@ -29,10 +29,11 @@ class ExperimentStore:
         self,
         kind: str,
         *,
+        experiment_id: str | None = None,
         hypothesis: dict[str, Any] | None = None,
         tags: list[str] | None = None,
     ) -> ExperimentRecord:
-        experiment_id = new_id("exp")
+        experiment_id = experiment_id or new_id("exp")
         record = ExperimentRecord(
             experiment_id=experiment_id,
             kind=kind,

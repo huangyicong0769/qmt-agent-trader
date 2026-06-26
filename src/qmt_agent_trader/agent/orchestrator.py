@@ -16,6 +16,7 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.llm_client import (
     DeepSeekClient,
 )
@@ -122,6 +123,15 @@ class AgentOrchestrator:
         """
         rid = run_id or new_id("run")
         experiment_id = new_id("exp")
+        ExperimentStore(self.settings.resolved_data_dir / "experiments").create_experiment(
+            "chat_research",
+            experiment_id=experiment_id,
+            hypothesis={
+                "message": message,
+                "intent": routing.intent.value if routing else "GENERAL_RESEARCH",
+            },
+            tags=["chat_research"],
+        )
 
         # ── Emit start ──
         yield OrchestratorEvent(
@@ -184,7 +194,7 @@ class AgentOrchestrator:
             "different relevant tool or report the blocker clearly. Always respond in "
             "Chinese. Typical factor loop: list_data_catalog, query_universe/query_bars, "
             "create_factor_spec, generate_factor_code, run_factor_static_checks, "
-            "evaluate_factor_candidate, generate_research_report. Typical strategy "
+            "save_factor, evaluate_factor_candidate, generate_research_report. Typical strategy "
             "loop: search_experiments, create_strategy_spec, generate_strategy_code, "
             "run_backtest, generate_research_report. Typical self-bootstrap loop: "
             "search_experiments, detect_tool_gap, create_tool_spec, generate_tool_code, "
