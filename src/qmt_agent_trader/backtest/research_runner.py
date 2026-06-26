@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pandas as pd
 
@@ -10,12 +11,14 @@ from qmt_agent_trader.backtest.commission import CostConfig, calculate_cost
 from qmt_agent_trader.backtest.sensitivity import SensitivityMetrics, SensitivityScenario
 from qmt_agent_trader.backtest.slippage import fixed_bps_slippage
 from qmt_agent_trader.core.types import Side
+from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import compute_factor_frame
 
 
 @dataclass(frozen=True)
 class FactorRankResearchConfig:
     factor_name: str
+    factor_registry_root: Path | None = None
     top_n: int = 20
     max_single_position_pct: float = 0.10
     initial_cash: float = 1_000_000.0
@@ -59,7 +62,12 @@ class FactorRankResearchRunner:
     def __init__(self, bars: pd.DataFrame, config: FactorRankResearchConfig) -> None:
         self.bars = _prepare_bars(bars)
         self.config = config
-        self.factor_frame = compute_factor_frame(self.bars, config.factor_name)
+        registry = (
+            FactorRegistry(config.factor_registry_root)
+            if config.factor_registry_root is not None
+            else None
+        )
+        self.factor_frame = compute_factor_frame(self.bars, config.factor_name, registry=registry)
 
     def run(self, scenario: SensitivityScenario) -> FactorRankResearchResult:
         top_n = scenario.top_n or self.config.top_n

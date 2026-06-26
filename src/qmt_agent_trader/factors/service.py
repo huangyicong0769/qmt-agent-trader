@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import mean
 
 import pandas as pd
 
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.factors.library.price_volume import (
-    amount_zscore_20d,
-    momentum,
-    reversal_5d,
-    turnover_20d,
-    volatility_20d,
-)
+from qmt_agent_trader.factors.registry import FactorRegistry
 
 
 @dataclass(frozen=True)
@@ -112,22 +107,15 @@ class FactorWalkForwardResult:
         }
 
 
-def compute_factor_frame(bars: pd.DataFrame, name: str) -> pd.DataFrame:
+def compute_factor_frame(
+    bars: pd.DataFrame,
+    name: str,
+    *,
+    registry: FactorRegistry | None = None,
+) -> pd.DataFrame:
     data = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True).copy()
-    if name == "momentum_20d":
-        values = momentum(data, 20)
-    elif name == "momentum_60d":
-        values = momentum(data, 60)
-    elif name == "reversal_5d":
-        values = reversal_5d(data)
-    elif name == "volatility_20d":
-        values = volatility_20d(data)
-    elif name == "turnover_20d":
-        values = turnover_20d(data)
-    elif name == "amount_zscore_20d":
-        values = amount_zscore_20d(data)
-    else:
-        raise ValueError(f"unsupported factor for current data set: {name}")
+    factor_registry = registry or FactorRegistry()
+    values = factor_registry.compute(name, data)
 
     return pd.DataFrame(
         {
@@ -139,13 +127,20 @@ def compute_factor_frame(bars: pd.DataFrame, name: str) -> pd.DataFrame:
     )
 
 
-def compute_factor_to_lake(lake: DataLake, *, name: str, date: str) -> FactorComputeResult:
+def compute_factor_to_lake(
+    lake: DataLake,
+    *,
+    name: str,
+    date: str,
+    registry_root: str | None = None,
+) -> FactorComputeResult:
     target_date = pd.to_datetime(date).date()
     bars = load_daily_bars(lake, end=target_date)
     if bars.empty:
         raise ValueError("no daily bars found in data lake; run data update first")
 
-    factor_frame = compute_factor_frame(bars, name)
+    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
+    factor_frame = compute_factor_frame(bars, name, registry=registry)
     output = factor_frame[factor_frame["trade_date"] == target_date].reset_index(drop=True)
     if output.empty:
         raise ValueError(f"no factor rows for {target_date}")
@@ -168,6 +163,7 @@ def validate_factor(
     name: str,
     start: str,
     end: str,
+    registry_root: str | None = None,
 ) -> FactorValidationResult:
     start_date = pd.to_datetime(start).date()
     end_date = pd.to_datetime(end).date()
@@ -175,7 +171,8 @@ def validate_factor(
     if bars.empty:
         raise ValueError("no daily bars found in data lake; run data update first")
 
-    factor_frame = compute_factor_frame(bars, name)
+    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
+    factor_frame = compute_factor_frame(bars, name, registry=registry)
     returns = _forward_returns(bars)
     validation = factor_frame.merge(returns, on=["symbol", "trade_date"], how="inner")
     validation = validation[
@@ -217,6 +214,7 @@ def walk_forward_factor_validation(
     window_days: int = 63,
     step_days: int = 63,
     quantile: float = 0.20,
+    registry_root: str | None = None,
 ) -> FactorWalkForwardResult:
     if window_days <= 1:
         raise ValueError("window_days must be greater than 1")
@@ -231,7 +229,8 @@ def walk_forward_factor_validation(
     if bars.empty:
         raise ValueError("no daily bars found in data lake; run data update first")
 
-    factor_frame = compute_factor_frame(bars, name)
+    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
+    factor_frame = compute_factor_frame(bars, name, registry=registry)
     validation = factor_frame.merge(
         _forward_returns(bars),
         on=["symbol", "trade_date"],

@@ -7,6 +7,7 @@ from qmt_agent_trader.backtest.research_runner import (
     FactorRankResearchRunner,
 )
 from qmt_agent_trader.backtest.sensitivity import SensitivityAnalyzer, SensitivityGrid
+from qmt_agent_trader.factors.registry import FactorRegistry
 
 
 def _bars() -> pd.DataFrame:
@@ -87,3 +88,42 @@ def test_sensitivity_analyzer_can_use_factor_rank_runner() -> None:
     assert report.summary.return_degradation >= 0
     assert report.summary.pass_ratio == 1.0
 
+
+def test_factor_rank_runner_uses_saved_file_factor(tmp_path) -> None:
+    factor_file = tmp_path / "factor.py"
+    factor_file.write_text(
+        """
+from typing import Any
+
+import pandas as pd
+
+
+def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Series:
+    return bars.groupby("symbol")["close"].pct_change(3)
+""",
+        encoding="utf-8",
+    )
+    registry_root = tmp_path / "factors"
+    FactorRegistry(registry_root).save_factor(
+        factor_id="agent_momentum_3d",
+        name="Agent momentum 3d",
+        version="0.1.0",
+        implementation_ref=f"file:{factor_file}",
+        required_columns=("symbol", "trade_date", "close"),
+        lookback=3,
+        created_by="agent",
+    )
+    runner = FactorRankResearchRunner(
+        _bars(),
+        FactorRankResearchConfig(
+            factor_name="agent_momentum_3d",
+            factor_registry_root=registry_root,
+            top_n=1,
+            max_single_position_pct=0.5,
+            initial_cash=100000,
+        ),
+    )
+
+    result = runner.run(SensitivityGrid(top_n=(1,)).scenarios()[0])
+
+    assert result.trades
