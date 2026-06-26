@@ -69,11 +69,11 @@ def build_agent_registry(
     """Assemble the full AgentToolRegistry with all 16+ MVP tools wired."""
     from qmt_agent_trader.agent.tool_registry import AgentToolRegistry as _ATR
     from qmt_agent_trader.agent.tools import (
+        basic_tools,
         experiment_tools,
         factor_tools,
         meta_tools,
         query_tools,
-        basic_tools,
         remote_data_tools,
         strategy_tools,
     )

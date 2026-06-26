@@ -93,7 +93,10 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
         if source != "tushare":
             return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
         if asset_type not in {"stock", "etf", "auto"}:
-            return {"status": "INVALID_REQUEST", "message": "asset_type must be stock, etf, or auto"}
+            return {
+                "status": "INVALID_REQUEST",
+                "message": "asset_type must be stock, etf, or auto",
+            }
         if ts_code is None:
             _validate_span(start, end, settings.remote_data_max_days_per_call)
     except ValueError as exc:
@@ -239,7 +242,10 @@ _UPDATE_INPUT_SCHEMA = {
         "ts_code": {"type": "string", "description": "Optional security code, e.g. 159259.SZ."},
         "asset_type": {
             "type": "string",
-            "description": "stock, etf, or auto. auto uses local/remote fund_basic when ts_code is an ETF.",
+            "description": (
+                "stock, etf, or auto. auto uses local/remote fund_basic when "
+                "ts_code is an ETF."
+            ),
         },
         "dry_run": {
             "type": "boolean",

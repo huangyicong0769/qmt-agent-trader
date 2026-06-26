@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 import anyio
 from pydantic import SecretStr
 
@@ -9,7 +11,7 @@ from qmt_agent_trader.data.storage import DataLake
 
 
 class CapturingDeepSeekClient:
-    seen_messages: list[dict] = []
+    seen_messages: ClassVar[list[dict]] = []
 
     def __init__(self, **_kwargs: object) -> None:
         pass

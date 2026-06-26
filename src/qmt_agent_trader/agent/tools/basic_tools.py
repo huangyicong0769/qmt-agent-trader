@@ -127,7 +127,11 @@ def _first_escaping_path(args: list[str], root: Path, cwd: Path) -> str | None:
         candidate = Path(arg)
         if not candidate.is_absolute() and ".." not in candidate.parts:
             continue
-        resolved = (cwd / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        resolved = (
+            (cwd / candidate).resolve()
+            if not candidate.is_absolute()
+            else candidate.resolve()
+        )
         if not _is_under(resolved, root):
             return arg
     return None
