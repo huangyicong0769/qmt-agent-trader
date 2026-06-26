@@ -113,26 +113,60 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
     if lake is None:
         return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
 
-    symbols = input_data.get("symbols", [])
+    symbols = _requested_symbols(input_data)
     start = input_data.get("start_date", "20200101")
     end = input_data.get("end_date", "20260624")
-    fields = input_data.get("fields", ["trade_date", "open", "high", "low", "close", "volume"])
+    fields = input_data.get(
+        "fields",
+        ["symbol", "trade_date", "open", "high", "low", "close", "volume"],
+    )
 
     try:
-        bars = load_daily_bars(lake, start=start, end=end)
+        bars = load_daily_bars(lake, start=start, end=end, symbols=symbols or None)
         if bars.empty:
-            return {"rows": [], "metadata": {"status": "empty"}}
-        if symbols:
-            bars = bars[bars["symbol"].isin(symbols)]
+            metadata: dict[str, Any] = {"returned": 0}
+            if symbols:
+                metadata["requested_symbols"] = symbols
+                metadata["reason"] = "no matching bars"
+            else:
+                metadata["status"] = "empty"
+            return {"rows": [], "metadata": metadata}
         cols = [c for c in fields if c in bars.columns]
         # Limit rows for agent safety
         output = bars[cols].head(2000).to_dict(orient="records")
         return {
             "rows": output,
-            "metadata": {"requested": len(symbols), "returned": len(output)},
+            "metadata": {
+                "requested_symbols": symbols,
+                "requested": len(symbols),
+                "returned": len(output),
+            },
         }
     except Exception as exc:
         return {"rows": [], "metadata": {"error": str(exc)}}
+
+
+def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
+    raw_symbols: list[Any] = []
+    symbols_value = input_data.get("symbols", [])
+    if isinstance(symbols_value, list):
+        raw_symbols.extend(symbols_value)
+    elif symbols_value:
+        raw_symbols.append(symbols_value)
+    for alias in ("symbol", "code"):
+        if input_data.get(alias):
+            raw_symbols.append(input_data[alias])
+
+    normalized: list[str] = []
+    for raw in raw_symbols:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if "." not in text and text.isdigit() and len(text) == 6:
+            text = f"{text}.SZ" if text.startswith(("0", "1", "2", "3")) else f"{text}.SH"
+        if text not in normalized:
+            normalized.append(text)
+    return normalized
 
 
 query_bars_tool: AgentTool = tool(
@@ -140,6 +174,17 @@ query_bars_tool: AgentTool = tool(
         name="query_bars",
         description="查询历史行情数据。",
         permission=PermissionLevel.READ_ONLY,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "symbols": {"type": "array", "items": {"type": "string"}},
+                "symbol": {"type": "string"},
+                "code": {"type": "string"},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+            },
+        },
         deterministic=False,
     ),
     fn=_query_bars,

@@ -13,3 +13,18 @@ def test_tushare_daily_request_params() -> None:
         "end_date": "20200131",
         "ts_code": "000001.SZ",
     }
+
+
+def test_tushare_fund_daily_request_params() -> None:
+    request = TushareClient(token="token").build_fund_daily_request(
+        ts_code="159259.SZ",
+        start_date="20250828",
+        end_date="20250829",
+    )
+
+    assert request.api_name == "fund_daily"
+    assert request.params == {
+        "ts_code": "159259.SZ",
+        "start_date": "20250828",
+        "end_date": "20250829",
+    }

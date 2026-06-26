@@ -52,6 +52,7 @@ class DataUpdateResult:
     end: str
     writes: list[DatasetWrite]
     open_dates: list[str]
+    metadata: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -59,6 +60,7 @@ class DataUpdateResult:
             "start": self.start,
             "end": self.end,
             "open_dates": self.open_dates,
+            "metadata": self.metadata or {},
             "writes": [
                 {
                     "name": write.name,
@@ -151,12 +153,57 @@ class TushareDataUpdateService:
         *,
         include_daily: bool = True,
         include_basics: bool = True,
+        ts_code: str | None = None,
+        asset_type: str = "stock",
     ) -> DataUpdateResult:
         with DataUpdateLock(
             self.lake.root / "_locks" / "remote_data.lock",
             timeout_seconds=self.lock_timeout_seconds,
         ):
             writes: list[DatasetWrite] = []
+            if ts_code and asset_type in {"auto", "etf"}:
+                etf_basic = self._execute(self.client.build_etf_basic_request())
+                etf_row = _find_ts_code(etf_basic, ts_code)
+                if asset_type == "etf" or etf_row is not None:
+                    if include_basics:
+                        writes.append(
+                            self._write("tushare_etf_basic", etf_basic, start=start, end=end)
+                        )
+                    effective_start = start
+                    list_date = _row_value(etf_row, "list_date") if etf_row is not None else None
+                    if list_date and str(list_date) > effective_start:
+                        effective_start = str(list_date)
+                    if include_daily:
+                        fund_daily = self._execute(
+                            self.client.build_fund_daily_request(
+                                ts_code=ts_code,
+                                start_date=effective_start,
+                                end_date=end,
+                            )
+                        )
+                        writes.append(
+                            self._write_incremental(
+                                "tushare_fund_daily",
+                                fund_daily,
+                                start=effective_start,
+                                end=end,
+                                key_columns=["ts_code", "trade_date"],
+                            )
+                        )
+                    return DataUpdateResult(
+                        start=effective_start,
+                        end=end,
+                        writes=writes,
+                        open_dates=[],
+                        metadata={
+                            "asset_type": "etf",
+                            "ts_code": ts_code,
+                            "requested_start": start,
+                            "list_date": list_date,
+                            "start_adjusted": effective_start != start,
+                        },
+                    )
+
             calendar = self._execute(
                 self.client.build_trade_calendar_request(start_date=start, end_date=end)
             )
@@ -336,6 +383,28 @@ def _format_trade_date(value: object) -> str:
     if "-" in text:
         return datetime.fromisoformat(text).strftime("%Y%m%d")
     return text
+
+
+def _find_ts_code(frame: pd.DataFrame, ts_code: str) -> object | None:
+    if frame.empty or "ts_code" not in frame.columns:
+        return None
+    matches = frame[frame["ts_code"].astype(str) == ts_code]
+    if matches.empty:
+        return None
+    return matches.iloc[0]
+
+
+def _row_value(row: object | None, column: str) -> str | None:
+    if row is None:
+        return None
+    try:
+        value = row[column]  # type: ignore[index]
+    except Exception:
+        return None
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _checksum_frame(frame: pd.DataFrame) -> str:

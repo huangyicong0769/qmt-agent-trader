@@ -47,7 +47,10 @@ def _build_client(settings: Settings) -> TushareClient:
     if _client_factory is not None:
         return _client_factory()
     token = settings.tushare_token.get_secret_value() if settings.tushare_token else None
-    return TushareClient(token=token)
+    return TushareClient(
+        token=token,
+        timeout_seconds=settings.remote_data_http_timeout_seconds,
+    )
 
 
 def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
@@ -58,12 +61,18 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
         source, start, end = _parse_request(input_data)
         if source != "tushare":
             return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
+        ts_code = _normalize_ts_code(input_data.get("ts_code"))
+        asset_type = str(input_data.get("asset_type", "stock")).lower()
+        effective_start, metadata = _effective_start_from_local_basics(
+            lake, start, ts_code=ts_code, asset_type=asset_type
+        )
         missing_ranges = _missing_ranges(lake, start, end)
         return {
             "status": "planned",
             "source": source,
-            "start_date": start,
+            "start_date": effective_start,
             "end_date": end,
+            "metadata": metadata,
             "missing_ranges": missing_ranges,
             "requests": build_data_update_plan(TushareClient(token=None), start, end),
         }
@@ -79,9 +88,14 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
     settings = _get_settings()
     try:
         source, start, end = _parse_request(input_data)
+        ts_code = _normalize_ts_code(input_data.get("ts_code"))
+        asset_type = str(input_data.get("asset_type", "stock")).lower()
         if source != "tushare":
             return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
-        _validate_span(start, end, settings.remote_data_max_days_per_call)
+        if asset_type not in {"stock", "etf", "auto"}:
+            return {"status": "INVALID_REQUEST", "message": "asset_type must be stock, etf, or auto"}
+        if ts_code is None:
+            _validate_span(start, end, settings.remote_data_max_days_per_call)
     except ValueError as exc:
         return {"status": "INVALID_REQUEST", "message": str(exc)}
 
@@ -111,6 +125,8 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
             end,
             include_daily=bool(input_data.get("include_daily", True)),
             include_basics=bool(input_data.get("include_basics", True)),
+            ts_code=ts_code,
+            asset_type=asset_type,
         )
         return result.as_dict()
     except Exception as exc:
@@ -218,6 +234,11 @@ _UPDATE_INPUT_SCHEMA = {
         "end_date": {"type": "string", "description": "YYYYMMDD or YYYY-MM-DD."},
         "include_daily": {"type": "boolean"},
         "include_basics": {"type": "boolean"},
+        "ts_code": {"type": "string", "description": "Optional security code, e.g. 159259.SZ."},
+        "asset_type": {
+            "type": "string",
+            "description": "stock, etf, or auto. auto uses local/remote fund_basic when ts_code is an ETF.",
+        },
         "dry_run": {
             "type": "boolean",
             "description": "When true, return the local gap plan without contacting Tushare.",
@@ -226,6 +247,47 @@ _UPDATE_INPUT_SCHEMA = {
     "required": ["start_date", "end_date"],
     "additionalProperties": False,
 }
+
+
+def _normalize_ts_code(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "." not in text and text.isdigit() and len(text) == 6:
+        text = f"{text}.SZ" if text.startswith(("0", "1", "2", "3")) else f"{text}.SH"
+    return text
+
+
+def _effective_start_from_local_basics(
+    lake: DataLake,
+    start: str,
+    *,
+    ts_code: str | None,
+    asset_type: str,
+) -> tuple[str, dict[str, Any]]:
+    metadata: dict[str, Any] = {"asset_type": asset_type}
+    if not ts_code or asset_type not in {"auto", "etf"}:
+        return start, metadata
+    metadata["ts_code"] = ts_code
+    if not lake.dataset_path("raw", "tushare_etf_basic").exists():
+        return start, metadata
+    frame = lake.read_parquet("raw", "tushare_etf_basic")
+    if frame.empty or "ts_code" not in frame.columns or "list_date" not in frame.columns:
+        return start, metadata
+    matches = frame[frame["ts_code"].astype(str) == ts_code]
+    if matches.empty:
+        return start, metadata
+    list_date = str(matches.iloc[0]["list_date"])
+    metadata["asset_type"] = "etf"
+    metadata["list_date"] = list_date
+    if list_date > start:
+        metadata["requested_start"] = start
+        metadata["start_adjusted"] = True
+        return list_date, metadata
+    metadata["start_adjusted"] = False
+    return start, metadata
 
 
 run_remote_data_update_tool: AgentTool = tool(

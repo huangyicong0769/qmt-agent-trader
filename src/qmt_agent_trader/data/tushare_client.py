@@ -22,8 +22,9 @@ class TushareRequest:
 
 
 class TushareClient:
-    def __init__(self, token: str | None) -> None:
+    def __init__(self, token: str | None, *, timeout_seconds: float = 300.0) -> None:
         self.token = token
+        self.timeout_seconds = timeout_seconds
         self._pro: Any | None = None
 
     def build_daily_request(
@@ -36,6 +37,14 @@ class TushareClient:
 
     def build_daily_by_trade_date_request(self, trade_date: str) -> TushareRequest:
         return TushareRequest(api_name="daily", params={"trade_date": trade_date})
+
+    def build_fund_daily_request(
+        self, *, ts_code: str, start_date: str, end_date: str
+    ) -> TushareRequest:
+        return TushareRequest(
+            api_name="fund_daily",
+            params={"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
+        )
 
     def build_trade_calendar_request(self, *, start_date: str, end_date: str) -> TushareRequest:
         return TushareRequest(
@@ -92,7 +101,7 @@ class TushareClient:
             import tushare as ts
 
             ts.set_token(self.token)
-            self._pro = ts.pro_api(self.token)
+            self._pro = ts.pro_api(self.token, timeout=self.timeout_seconds)
         return self._pro
 
     def execute(self, request: TushareRequest) -> pd.DataFrame:

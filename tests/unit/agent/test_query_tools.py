@@ -3,7 +3,11 @@ from __future__ import annotations
 import pandas as pd
 
 from qmt_agent_trader.agent.schemas import ToolContext
-from qmt_agent_trader.agent.tools.query_tools import list_data_catalog_tool, set_data_lake
+from qmt_agent_trader.agent.tools.query_tools import (
+    list_data_catalog_tool,
+    query_bars_tool,
+    set_data_lake,
+)
 from qmt_agent_trader.data.storage import DataLake
 
 
@@ -27,3 +31,84 @@ def test_list_data_catalog_hides_legacy_tushare_batches(tmp_path) -> None:
     assert "tushare_daily_20240101_20240103" not in result["layers"]["raw"]
     assert "tushare_suspend_20240101_20240103" not in result["layers"]["raw"]
     assert "tushare_stk_limit_20240101_20240103" not in result["layers"]["raw"]
+
+
+def test_query_bars_filters_symbol_alias_and_includes_symbol(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "159259.SZ",
+                    "trade_date": "20250828",
+                    "open": 1.0,
+                    "high": 1.1,
+                    "low": 0.9,
+                    "close": 1.05,
+                    "vol": 100,
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20250828",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "vol": 200,
+                },
+            ]
+        ),
+        "raw",
+        "tushare_fund_daily",
+    )
+    set_data_lake(lake)
+
+    result = query_bars_tool.run(
+        {"symbol": "159259", "start_date": "20250801", "end_date": "20250831"},
+        ToolContext(run_id="bars"),
+    )
+
+    assert result["metadata"]["requested_symbols"] == ["159259.SZ"]
+    assert result["metadata"]["returned"] == 1
+    assert result["rows"] == [
+        {
+            "symbol": "159259.SZ",
+            "trade_date": pd.Timestamp("2025-08-28").date(),
+            "open": 1.0,
+            "high": 1.1,
+            "low": 0.9,
+            "close": 1.05,
+            "volume": 100,
+        }
+    ]
+
+
+def test_query_bars_filters_code_alias_without_returning_market_head(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "vol": 200,
+                }
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    set_data_lake(lake)
+
+    result = query_bars_tool.run(
+        {"code": "159259.SZ", "start_date": "20240101", "end_date": "20240131"},
+        ToolContext(run_id="bars-empty"),
+    )
+
+    assert result["rows"] == []
+    assert result["metadata"]["returned"] == 0
+    assert result["metadata"]["reason"] == "no matching bars"

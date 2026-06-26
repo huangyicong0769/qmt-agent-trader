@@ -26,7 +26,12 @@ class FakeTushareClient(TushareClient):
         if request.api_name == "stock_basic":
             return pd.DataFrame([{"ts_code": "000001.SZ", "name": "Ping An Bank"}])
         if request.api_name == "fund_basic":
-            return pd.DataFrame([{"ts_code": "510300.SH", "name": "ETF"}])
+            return pd.DataFrame(
+                [
+                    {"ts_code": "510300.SH", "name": "ETF", "list_date": "20120528"},
+                    {"ts_code": "159259.SZ", "name": "New ETF", "list_date": "20250828"},
+                ]
+            )
         if request.api_name == "namechange":
             return pd.DataFrame(
                 [
@@ -46,6 +51,21 @@ class FakeTushareClient(TushareClient):
                         "ts_code": "000001.SZ",
                         "trade_date": trade_date,
                         "close": 10.0,
+                    }
+                ]
+            )
+        if request.api_name == "fund_daily":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": request.params["ts_code"],
+                        "trade_date": request.params["start_date"],
+                        "open": 1.0,
+                        "high": 1.1,
+                        "low": 0.9,
+                        "close": 1.05,
+                        "vol": 100.0,
+                        "amount": 1000.0,
                     }
                 ]
             )
@@ -154,3 +174,23 @@ def test_request_limiter_enforces_minimum_interval() -> None:
     limiter.wait()
 
     assert sleeps == [0.5]
+
+
+def test_tushare_data_update_fetches_etf_daily_from_list_date(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    client = FakeTushareClient()
+
+    result = TushareDataUpdateService(client, lake).update(
+        "20240101",
+        "20250829",
+        ts_code="159259.SZ",
+        asset_type="auto",
+    )
+
+    assert "daily" not in client.seen
+    assert "fund_daily" in client.seen
+    assert result.start == "20250828"
+    assert lake.dataset_path("raw", "tushare_fund_daily").exists()
+    fund_daily = lake.read_parquet("raw", "tushare_fund_daily")
+    assert fund_daily["ts_code"].tolist() == ["159259.SZ"]
+    assert fund_daily["trade_date"].tolist() == ["20250828"]

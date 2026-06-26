@@ -63,11 +63,31 @@ def load_daily_bars(
     *,
     start: str | date | None = None,
     end: str | date | None = None,
+    symbols: list[str] | None = None,
 ) -> pd.DataFrame:
-    raw = _read_optional_dataset(lake, "raw", "tushare_daily")
-    bars = normalize_tushare_daily(raw)
+    raw_frames = [
+        _read_optional_dataset(lake, "raw", "tushare_daily"),
+        _read_optional_dataset(lake, "raw", "tushare_fund_daily"),
+    ]
+    normalized = [normalize_tushare_daily(frame) for frame in raw_frames if not frame.empty]
+    bars = (
+        pd.concat(normalized, ignore_index=True)
+        if normalized
+        else pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+    )
     if bars.empty:
         return bars
+
+    start_date = _parse_date(start) if start is not None else None
+    end_date = _parse_date(end) if end is not None else None
+    if start_date is not None:
+        bars = bars[bars["trade_date"] >= start_date]
+    if end_date is not None:
+        bars = bars[bars["trade_date"] <= end_date]
+    if symbols:
+        bars = bars[bars["symbol"].isin(symbols)]
+    if bars.empty:
+        return bars.reset_index(drop=True)
 
     bars = enrich_trade_states(
         bars,
@@ -77,12 +97,6 @@ def load_daily_bars(
         stock_basic=_read_optional_dataset(lake, "raw", "tushare_stock_basic"),
     )
 
-    start_date = _parse_date(start) if start is not None else None
-    end_date = _parse_date(end) if end is not None else None
-    if start_date is not None:
-        bars = bars[bars["trade_date"] >= start_date]
-    if end_date is not None:
-        bars = bars[bars["trade_date"] <= end_date]
     return bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
 
