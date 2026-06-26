@@ -50,6 +50,12 @@ def _run_shell_command(input_data: dict[str, Any], _context: ToolContext) -> dic
     denied = _first_forbidden_token(argv)
     if denied is not None:
         return {"status": "DENIED", "message": f"forbidden shell token: {denied}"}
+    mutating_arg = _first_mutating_argument(argv)
+    if mutating_arg is not None:
+        return {
+            "status": "DENIED",
+            "message": f"mutating option is not allowed for read-only command: {mutating_arg}",
+        }
 
     settings = _get_settings()
     root = settings.project_root.resolve()
@@ -134,6 +140,29 @@ def _first_escaping_path(args: list[str], root: Path, cwd: Path) -> str | None:
         )
         if not _is_under(resolved, root):
             return arg
+    return None
+
+
+def _first_mutating_argument(argv: list[str]) -> str | None:
+    command = argv[0] if argv else ""
+    if command == "sed":
+        for arg in argv[1:]:
+            if arg == "-i" or arg.startswith("-i"):
+                return arg
+    if command == "find":
+        mutating_actions = {
+            "-delete",
+            "-exec",
+            "-execdir",
+            "-ok",
+            "-okdir",
+            "-fprint",
+            "-fprintf",
+            "-fls",
+        }
+        for arg in argv[1:]:
+            if arg in mutating_actions:
+                return arg
     return None
 
 

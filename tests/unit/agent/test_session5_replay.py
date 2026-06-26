@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -61,6 +62,55 @@ def test_session5_factor_spec_direct_args_are_preserved(tmp_path) -> None:
     assert spec["name"] == "momentum_20d"
     assert spec["inputs"] == ["tushare_fund_daily"]
     assert "20日动量" in spec["formula"]
+
+
+def test_session5_factor_spec_merges_top_level_fields_with_hypothesis(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    registry = _registry(tmp_path, lake)
+
+    result = registry.run_tool(
+        "create_factor_spec",
+        {
+            "factor_name": "ma_cross_5_20",
+            "factor_description": "均线交叉因子：5日均线 / 20日均线 - 1。",
+            "formula_sketch": "ma5 = mean(close, 5); ma20 = mean(close, 20); factor = ma5/ma20 - 1",
+            "lookback": 25,
+            "data_sources": ["tushare_daily"],
+            "hypothesis": {
+                "direction": "positive",
+                "rationale": "短期均线上穿长期均线是趋势跟踪信号。",
+            },
+        },
+        ToolContext(run_id="s5"),
+    )
+
+    spec = result["factor_spec"]
+    assert spec["name"] == "ma_cross_5_20"
+    assert spec["lookback"] == 25
+    assert "ma5" in spec["formula"]
+
+
+def test_session5_generated_factor_code_uses_known_formula_templates(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    registry = _registry(tmp_path, lake)
+
+    code_result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_spec": {
+                "factor_id": "factor_ma_cross",
+                "name": "ma_cross_5_20",
+                "lookback": 25,
+                "formula": "ma5 = mean(close, 5); ma20 = mean(close, 20); factor = ma5/ma20 - 1",
+            }
+        },
+        ToolContext(run_id="s5"),
+    )
+
+    code = Path(code_result["code_path"]).read_text(encoding="utf-8")
+    assert "pct_change" not in code
+    assert "rolling(5)" in code
+    assert "rolling(20)" in code
 
 
 def test_session5_empty_factor_tool_args_return_structured_errors(tmp_path) -> None:

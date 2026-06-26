@@ -278,6 +278,14 @@ class AgentOrchestrator:
                 )
                 return
 
+            terminal_errors = [
+                evt
+                for evt in stream_buffer
+                if evt.__class__.__name__ in {"SafetyCapHit", "LoopError"}
+            ]
+            if terminal_errors:
+                return
+
         # ── Count tool calls ──
         tcount = sum(
             1 for e in stream_buffer if e.__class__.__name__ == "ToolResult"
@@ -381,10 +389,10 @@ def _stream_to_events(
     if cls_name == "SafetyCapHit":
         return [
             OrchestratorEvent(
-                type="progress",
+                type="error",
                 run_id=run_id,
-                message=f"🛑 {evt.message}",
-                data={"warning": evt.message},
+                message=evt.message,
+                data={"error": evt.message},
             )
         ]
 

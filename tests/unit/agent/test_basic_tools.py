@@ -66,6 +66,29 @@ def test_run_shell_command_rejects_tail_follow_path_outside_project(tmp_path) ->
     assert result["status"] == "DENIED"
 
 
+def test_run_shell_command_rejects_sed_in_place_edit(tmp_path) -> None:
+    (tmp_path / "sample.txt").write_text("hello\n", encoding="utf-8")
+    wire(settings=Settings(project_root=tmp_path))
+
+    result = run_shell_command_tool.run(
+        {"argv": ["sed", "-i.bak", "s/hello/bye/", "sample.txt"]},
+        ToolContext(run_id="shell"),
+    )
+
+    assert result["status"] == "DENIED"
+
+
+def test_run_shell_command_rejects_find_mutating_actions(tmp_path) -> None:
+    wire(settings=Settings(project_root=tmp_path))
+
+    result = run_shell_command_tool.run(
+        {"argv": ["find", ".", "-type", "f", "-delete"]},
+        ToolContext(run_id="shell"),
+    )
+
+    assert result["status"] == "DENIED"
+
+
 def test_run_shell_command_times_out(tmp_path) -> None:
     (tmp_path / "sample.txt").write_text("hello\n", encoding="utf-8")
     wire(settings=Settings(project_root=tmp_path))
