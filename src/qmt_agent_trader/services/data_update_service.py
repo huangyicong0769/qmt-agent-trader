@@ -402,21 +402,20 @@ def _format_trade_date(value: object) -> str:
     return text
 
 
-def _find_ts_code(frame: pd.DataFrame, ts_code: str) -> object | None:
+def _find_ts_code(frame: pd.DataFrame, ts_code: str) -> dict[str, object] | None:
     if frame.empty or "ts_code" not in frame.columns:
         return None
     matches = frame[frame["ts_code"].astype(str) == ts_code]
     if matches.empty:
         return None
-    return matches.iloc[0]
+    return dict(matches.iloc[0].to_dict())
 
 
-def _row_value(row: object | None, column: str) -> str | None:
+def _row_value(row: dict[str, object] | None, column: str) -> str | None:
     if row is None:
         return None
-    try:
-        value = row[column]  # type: ignore[index]
-    except Exception:
+    value = row.get(column)
+    if value is None:
         return None
     if pd.isna(value):
         return None
