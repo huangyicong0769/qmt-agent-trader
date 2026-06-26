@@ -61,6 +61,7 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = ["src/qmt_agent_trader/agent/generated"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "RUF"]
@@ -72,6 +73,7 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 plugins = ["pydantic.mypy"]
+exclude = ["src/qmt_agent_trader/agent/generated"]
 
 [[tool.mypy.overrides]]
 module = ["duckdb", "pandas", "tushare", "yaml"]
