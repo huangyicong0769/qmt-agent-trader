@@ -1,25 +1,59 @@
+# Local environment and secrets
 .env
+.env.*
+!.env.example
 .venv/
+venv/
+env/
+
+# Python bytecode and interpreter caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.mypy_cache/
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
-__pycache__/
-*.pyc
-.DS_Store
+.hypothesis/
+.nox/
+.tox/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
-dist/
+
+# Packaging and build outputs
 build/
+dist/
 *.egg-info/
-/data/
+.eggs/
+pip-wheel-metadata/
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+
+# Runtime logs and local process state
+*.log
 /logs/
 /runs/
+
+# Local market data and generated trading artifacts
+/data/
 /order_plans/
 /approvals/
 /reports/
-gateway/windows_qmt_gateway/.env
-gateway/windows_qmt_gateway/.venv/
-sessions/
-reports/cache/
-src/qmt_agent_trader/agent/generated
-configs/mcp.servers.json
+/sessions/
+
+# Agent-generated source and report artifacts
+/src/qmt_agent_trader/agent/generated/
+
+# Local MCP configuration
+/configs/mcp.servers.json
+
+# Windows QMT gateway local environment
+/gateway/windows_qmt_gateway/.env
+/gateway/windows_qmt_gateway/.env.*
+!/gateway/windows_qmt_gateway/.env.example
+/gateway/windows_qmt_gateway/.venv/
