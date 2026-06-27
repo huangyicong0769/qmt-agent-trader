@@ -1,11 +1,7 @@
-"""Tool registry with capability and permission checks.
+"""Agent tool registry and DeepSeek function-tool adapter.
 
-This module provides two registries:
-1.  `ToolRegistry` (original): DeepSeek-tool-compatible, based on `ToolCapability`.
-2.  `AgentToolRegistry` (new): based on `AgentTool` protocol and `PermissionLevel`.
-
-Both coexist; `AgentToolRegistry` delegates LLM-tool generation to the original
-registry when needed.
+`AgentToolRegistry` is the runtime registry. `ToolRegistry` is retained as a
+small adapter that converts runtime tools into the DeepSeek client tool shape.
 """
 
 from __future__ import annotations

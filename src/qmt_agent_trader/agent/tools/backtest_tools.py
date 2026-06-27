@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qmt_agent_trader.agent.permissions import ToolCapability
 from qmt_agent_trader.backtest.research_runner import (
     FactorRankResearchConfig,
     FactorRankResearchRunner,
@@ -13,8 +12,6 @@ from qmt_agent_trader.backtest.sensitivity import SensitivityAnalyzer, Sensitivi
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.services.research_report_service import save_research_report
-
-CAPABILITY = ToolCapability.RUN_BACKTEST
 
 
 def run_simulated_backtest(strategy_id: str) -> dict[str, object]:

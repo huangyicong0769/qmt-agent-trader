@@ -1,11 +1,8 @@
-"""Permission model for LLM tools and Agent operations.
+"""Permission policy for the unified Agent runtime.
 
-This module defines two permission systems that coexist:
-1.  `ToolCapability` (original): used by the existing tool registry and agent runtime.
-2.  `PermissionLevel` (new): richer six-level system for the expanded Agent subsystem.
-
-The two are bridged so that the original `assert_llm_tool_allowed` still works,
-while new tools can use the finer-grained `PermissionLevel`.
+`PermissionLevel` is the business permission model for registered Agent tools.
+`ToolCapability` remains only as the compatibility shape used by the DeepSeek
+function-tool adapter.
 """
 
 from __future__ import annotations
@@ -33,15 +30,6 @@ LLM_ALLOWED_CAPABILITIES: frozenset[ToolCapability] = frozenset(
         ToolCapability.RUN_BACKTEST,
     }
 )
-
-APPROVED_STRATEGY_CAPABILITIES: frozenset[ToolCapability] = frozenset(
-    {
-        ToolCapability.READ_DATA,
-        ToolCapability.RUN_BACKTEST,
-        ToolCapability.GENERATE_ORDER_PLAN,
-    }
-)
-
 
 def assert_llm_tool_allowed(capability: ToolCapability) -> None:
     if capability not in LLM_ALLOWED_CAPABILITIES:
