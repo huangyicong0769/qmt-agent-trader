@@ -70,6 +70,11 @@ def test_query_bars_filters_symbol_alias_and_includes_symbol(tmp_path) -> None:
 
     assert result["metadata"]["requested_symbols"] == ["159259.SZ"]
     assert result["metadata"]["returned"] == 1
+    assert result["metadata"]["requested_start_date"] == "20250801"
+    assert result["metadata"]["requested_end_date"] == "20250831"
+    assert result["metadata"]["actual_start_date"] == "2025-08-28"
+    assert result["metadata"]["actual_end_date"] == "2025-08-28"
+    assert result["metadata"]["data_freshness"] == "stale_vs_requested_end"
     assert result["rows"] == [
         {
             "symbol": "159259.SZ",
@@ -78,6 +83,49 @@ def test_query_bars_filters_symbol_alias_and_includes_symbol(tmp_path) -> None:
             "high": 1.1,
             "low": 0.9,
             "close": 1.05,
+            "volume": 100,
+        }
+    ]
+
+
+def test_query_bars_keeps_identity_fields_when_fields_are_requested(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "159259.SZ",
+                    "trade_date": "20260626",
+                    "open": 1.7,
+                    "high": 1.8,
+                    "low": 1.69,
+                    "close": 1.739,
+                    "vol": 100,
+                    "amount": 173900,
+                }
+            ]
+        ),
+        "raw",
+        "tushare_fund_daily",
+    )
+    set_data_lake(lake)
+
+    result = query_bars_tool.run(
+        {
+            "symbol": "159259",
+            "start_date": "20260601",
+            "end_date": "20260626",
+            "fields": ["close", "volume"],
+        },
+        ToolContext(run_id="bars-fields"),
+    )
+
+    assert result["metadata"]["identity_fields_forced"] is True
+    assert result["rows"] == [
+        {
+            "symbol": "159259.SZ",
+            "trade_date": pd.Timestamp("2026-06-26").date(),
+            "close": 1.739,
             "volume": 100,
         }
     ]

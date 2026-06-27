@@ -38,6 +38,9 @@ class FactorValidationResult:
     name: str
     start: str
     end: str
+    actual_data_start: str
+    actual_data_end: str
+    data_freshness: str
     observations: int
     non_null: int
     coverage: float
@@ -53,6 +56,9 @@ class FactorValidationResult:
             "name": self.name,
             "start": self.start,
             "end": self.end,
+            "actual_data_start": self.actual_data_start,
+            "actual_data_end": self.actual_data_end,
+            "data_freshness": self.data_freshness,
             "observations": self.observations,
             "non_null": self.non_null,
             "coverage": self.coverage,
@@ -190,6 +196,13 @@ def validate_factor(
     ]
     if validation.empty:
         raise ValueError(f"no validation rows between {start_date} and {end_date}")
+    actual_start = min(validation["trade_date"])
+    actual_end = max(validation["trade_date"])
+    data_freshness = (
+        "stale_vs_requested_end"
+        if actual_end < end_date
+        else "covers_requested_end"
+    )
 
     usable = validation.dropna(subset=["factor_value", "forward_return_1d"])
     evaluated_symbols = tuple(sorted(validation["symbol"].astype(str).unique()))
@@ -214,6 +227,9 @@ def validate_factor(
         name=name,
         start=f"{start_date:%Y%m%d}",
         end=f"{end_date:%Y%m%d}",
+        actual_data_start=f"{actual_start:%Y%m%d}",
+        actual_data_end=f"{actual_end:%Y%m%d}",
+        data_freshness=data_freshness,
         observations=observations,
         non_null=non_null,
         coverage=non_null / observations if observations else 0.0,

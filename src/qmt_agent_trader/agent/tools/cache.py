@@ -13,6 +13,11 @@ from typing import Any
 
 CACHE_ROOT = Path("reports/cache")
 CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+_REQUIRED_VALIDATION_FIELDS = {
+    "actual_data_start",
+    "actual_data_end",
+    "data_freshness",
+}
 
 
 def _cache_key(factor_name: str, start: str, end: str) -> str:
@@ -31,8 +36,15 @@ def get_cached_validation(
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
         if isinstance(data, dict) and isinstance(data.get("result"), dict):
-            return dict(data["result"])
-        return dict(data)
+            result = dict(data["result"])
+        else:
+            result = dict(data)
+        if result.get("status") == "validated" and not _REQUIRED_VALIDATION_FIELDS.issubset(
+            result
+        ):
+            cache_path.unlink(missing_ok=True)
+            return None
+        return result
     except Exception:
         cache_path.unlink(missing_ok=True)
         return None

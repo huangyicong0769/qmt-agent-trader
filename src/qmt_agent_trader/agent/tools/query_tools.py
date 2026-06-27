@@ -6,11 +6,13 @@ return `NOT_AVAILABLE` rather than crashing the Agent loop.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
+from qmt_agent_trader.core.ids import SHANGHAI_TZ
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.catalog import visible_dataset_names
 from qmt_agent_trader.data.storage import DataLake
@@ -115,16 +117,21 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
 
     symbols = _requested_symbols(input_data)
     start = input_data.get("start_date", "20200101")
-    end = input_data.get("end_date", "20260624")
-    fields = input_data.get(
+    end = input_data.get("end_date", _today_yyyymmdd())
+    requested_fields = input_data.get(
         "fields",
         ["symbol", "trade_date", "open", "high", "low", "close", "volume"],
     )
+    fields = _bar_output_fields(requested_fields)
 
     try:
         bars = load_daily_bars(lake, start=start, end=end, symbols=symbols or None)
         if bars.empty:
-            metadata: dict[str, Any] = {"returned": 0}
+            metadata: dict[str, Any] = {
+                "requested_start_date": str(start),
+                "requested_end_date": str(end),
+                "returned": 0,
+            }
             if symbols:
                 metadata["requested_symbols"] = symbols
                 metadata["reason"] = "no matching bars"
@@ -139,11 +146,27 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
             "metadata": {
                 "requested_symbols": symbols,
                 "requested": len(symbols),
+                "requested_start_date": str(start),
+                "requested_end_date": str(end),
+                "actual_start_date": str(bars["trade_date"].min()),
+                "actual_end_date": str(bars["trade_date"].max()),
+                "data_freshness": _freshness(str(bars["trade_date"].max()), str(end)),
                 "returned": len(output),
+                "total_rows": len(bars),
+                "identity_fields_forced": True,
             },
         }
     except Exception as exc:
         return {"rows": [], "metadata": {"error": str(exc)}}
+
+
+def _bar_output_fields(requested_fields: Any) -> list[str]:
+    raw_fields = requested_fields if isinstance(requested_fields, list) else []
+    fields: list[str] = []
+    for field in ["symbol", "trade_date", *[str(field) for field in raw_fields]]:
+        if field not in fields:
+            fields.append(field)
+    return fields
 
 
 def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
@@ -167,6 +190,27 @@ def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
         if text not in normalized:
             normalized.append(text)
     return normalized
+
+
+def _today_yyyymmdd() -> str:
+    return datetime.now(tz=SHANGHAI_TZ).strftime("%Y%m%d")
+
+
+def _freshness(actual_end: str, requested_end: str) -> str:
+    return (
+        "stale_vs_requested_end"
+        if datetime.fromisoformat(actual_end).date() < _parse_date(str(requested_end))
+        else "covers_requested_end"
+    )
+
+
+def _parse_date(value: str) -> date:
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return datetime.fromisoformat(value).date()
 
 
 query_bars_tool: AgentTool = tool(

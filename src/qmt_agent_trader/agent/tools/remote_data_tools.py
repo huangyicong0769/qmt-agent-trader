@@ -66,15 +66,68 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
         effective_start, metadata = _effective_start_from_local_basics(
             lake, start, ts_code=ts_code, asset_type=asset_type
         )
-        missing_ranges = _missing_ranges(lake, start, end)
+        if _parse_date(effective_start) > _parse_date(end):
+            metadata["reason"] = "requested_end_before_listing"
+            metadata["plan_meaning"] = "no_data_expected_before_security_listing"
+            return {
+                "status": "NO_DATA_EXPECTED",
+                "source": source,
+                "start_date": effective_start,
+                "end_date": end,
+                "data_update_needed": False,
+                "metadata": metadata,
+                "missing_ranges": [],
+                "requests": [],
+            }
+        expected_dates, calendar_source = _expected_coverage_dates(
+            lake,
+            effective_start,
+            end,
+        )
+        uses_date_calendar = calendar_source in {
+            "tushare_trade_calendar",
+            "observed_market_daily_dates",
+        }
+        missing_ranges = _missing_ranges(lake, expected_dates)
+        metadata["plan_meaning"] = "dry_run_only_no_remote_fetch_performed"
+        metadata["calendar_source"] = calendar_source
+        metadata["missing_ranges_are_calendar_days"] = not uses_date_calendar
+        metadata["requires_trade_calendar_validation"] = not uses_date_calendar
+        if not uses_date_calendar:
+            metadata["warning"] = (
+                "missing_ranges are calendar-day gaps; do not claim they are "
+                "weekends or holidays without trade-calendar validation"
+            )
+        actual_coverage = _actual_data_coverage(lake, ts_code=ts_code)
+        data_freshness = (
+            "covers_expected_trading_dates"
+            if not missing_ranges
+            else "missing_expected_trading_dates"
+        )
+        coverage_end = actual_coverage.get("actual_data_end")
+        status = (
+            "CALENDAR_VALIDATION_REQUIRED"
+            if missing_ranges and not uses_date_calendar
+            else "planned"
+        )
+        metadata.update(actual_coverage)
+        metadata["data_freshness"] = data_freshness
         return {
-            "status": "planned",
+            "status": status,
             "source": source,
             "start_date": effective_start,
             "end_date": end,
+            "requested_start_date": start,
+            "requested_end_date": end,
+            "actual_data_start": actual_coverage.get("actual_data_start"),
+            "actual_data_end": coverage_end,
+            "coverage_start_date": actual_coverage.get("actual_data_start"),
+            "coverage_end_date": coverage_end,
+            "data_freshness": data_freshness,
+            "data_update_needed": bool(missing_ranges),
             "metadata": metadata,
             "missing_ranges": missing_ranges,
-            "requests": build_data_update_plan(TushareClient(token=None), start, end),
+            "requests": build_data_update_plan(TushareClient(token=None), effective_start, end),
         }
     except ValueError as exc:
         return {"status": "INVALID_REQUEST", "message": str(exc)}
@@ -133,7 +186,22 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
             ts_code=ts_code,
             asset_type=asset_type,
         )
-        return result.as_dict()
+        payload = result.as_dict()
+        actual_coverage = _actual_data_coverage(lake, ts_code=ts_code)
+        payload.update(
+            {
+                "requested_start_date": start,
+                "requested_end_date": end,
+                "actual_data_start": actual_coverage.get("actual_data_start"),
+                "actual_data_end": actual_coverage.get("actual_data_end"),
+                "coverage_start_date": actual_coverage.get("actual_data_start"),
+                "coverage_end_date": actual_coverage.get("actual_data_end"),
+            }
+        )
+        metadata = payload.setdefault("metadata", {})
+        if isinstance(metadata, dict):
+            metadata.update(actual_coverage)
+        return payload
     except Exception as exc:
         message = _sanitize_error(str(exc), settings)
         lake.record_fetch_result(
@@ -170,19 +238,89 @@ def _validate_span(start: str, end: str, max_days: int) -> None:
         )
 
 
-def _missing_ranges(lake: DataLake, start: str, end: str) -> list[dict[str, str]]:
-    if not lake.dataset_path("raw", "tushare_daily").exists():
-        return [{"start_date": start, "end_date": end}]
-    frame = lake.read_parquet("raw", "tushare_daily")
-    if "trade_date" not in frame.columns:
-        return [{"start_date": start, "end_date": end}]
-    covered = {_format_date(item) for item in frame["trade_date"].dropna().tolist()}
-    missing = [
+def _missing_ranges(lake: DataLake, expected_dates: list[str]) -> list[dict[str, str]]:
+    covered: set[str] = set()
+    for dataset in ("tushare_daily", "tushare_fund_daily"):
+        if not lake.dataset_path("raw", dataset).exists():
+            continue
+        frame = lake.read_parquet("raw", dataset)
+        if "trade_date" not in frame.columns:
+            continue
+        covered.update(_format_date(item) for item in frame["trade_date"].dropna().tolist())
+    if not covered:
+        return _coalesce_dates(expected_dates)
+    missing = [item for item in expected_dates if item not in covered]
+    return _coalesce_dates(missing)
+
+
+def _actual_data_coverage(lake: DataLake, *, ts_code: str | None) -> dict[str, Any]:
+    observed: list[str] = []
+    for dataset in ("tushare_daily", "tushare_fund_daily"):
+        if not lake.dataset_path("raw", dataset).exists():
+            continue
+        frame = lake.read_parquet("raw", dataset)
+        if frame.empty or "trade_date" not in frame.columns:
+            continue
+        if ts_code and "ts_code" in frame.columns:
+            frame = frame[frame["ts_code"].astype(str) == ts_code]
+        if frame.empty:
+            continue
+        observed.extend(_format_date(item) for item in frame["trade_date"].dropna().tolist())
+    if not observed:
+        return {"actual_data_start": None, "actual_data_end": None, "actual_rows": 0}
+    dates = sorted(observed)
+    return {
+        "actual_data_start": dates[0],
+        "actual_data_end": dates[-1],
+        "actual_rows": len(dates),
+    }
+
+
+def _expected_coverage_dates(
+    lake: DataLake,
+    start: str,
+    end: str,
+) -> tuple[list[str], str]:
+    calendar_path = lake.dataset_path("raw", "tushare_trade_calendar")
+    if calendar_path.exists():
+        frame = lake.read_parquet("raw", "tushare_trade_calendar")
+        if not frame.empty and "cal_date" in frame.columns:
+            data = frame.copy()
+            if "is_open" in data.columns:
+                data = data[data["is_open"].astype(int) == 1]
+            start_date = _parse_date(start)
+            end_date = _parse_date(end)
+            dates = [
+                _format_date(item)
+                for item in data["cal_date"].dropna().tolist()
+                if start_date <= _parse_date(_format_date(item)) <= end_date
+            ]
+            return sorted(set(dates)), "tushare_trade_calendar"
+    observed_dates = _observed_market_dates(lake, start, end)
+    if observed_dates:
+        return observed_dates, "observed_market_daily_dates"
+    return [
         current.strftime("%Y%m%d")
         for current in _date_range(_parse_date(start), _parse_date(end))
-        if current.strftime("%Y%m%d") not in covered
-    ]
-    return _coalesce_dates(missing)
+    ], "calendar_days"
+
+
+def _observed_market_dates(lake: DataLake, start: str, end: str) -> list[str]:
+    start_date = _parse_date(start)
+    end_date = _parse_date(end)
+    dates: set[str] = set()
+    for dataset in ("tushare_daily", "tushare_fund_daily"):
+        if not lake.dataset_path("raw", dataset).exists():
+            continue
+        frame = lake.read_parquet("raw", dataset)
+        if frame.empty or "trade_date" not in frame.columns:
+            continue
+        for item in frame["trade_date"].dropna().tolist():
+            text = _format_date(item)
+            parsed = _parse_date(text)
+            if start_date <= parsed <= end_date:
+                dates.add(text)
+    return sorted(dates)
 
 
 def _coalesce_dates(dates: list[str]) -> list[dict[str, str]]:

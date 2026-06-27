@@ -143,9 +143,131 @@ def test_run_remote_data_update_supports_explicit_dry_run_plan(tmp_path) -> None
         ToolContext(run_id="r-dry", dry_run=True),
     )
 
-    assert result["status"] == "planned"
+    assert result["status"] == "CALENDAR_VALIDATION_REQUIRED"
+    assert result["dry_run"] is True
+    assert result["data_update_needed"] is True
+    assert result["metadata"]["plan_meaning"] == "dry_run_only_no_remote_fetch_performed"
+    assert result["metadata"]["requires_trade_calendar_validation"] is True
     assert "requests" in result
     assert not lake.dataset_path("raw", "tushare_daily").exists()
+
+
+def test_run_remote_data_update_dry_run_uses_trade_calendar_when_available(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"cal_date": "20240101", "is_open": 0},
+                {"cal_date": "20240102", "is_open": 1},
+                {"cal_date": "20240103", "is_open": 1},
+            ]
+        ),
+        "raw",
+        "tushare_trade_calendar",
+    )
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102"}]),
+        "raw",
+        "tushare_daily",
+    )
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240101",
+            "end_date": "20240103",
+            "dry_run": True,
+        },
+        ToolContext(run_id="r-calendar-dry", dry_run=True),
+    )
+
+    assert result["metadata"]["missing_ranges_are_calendar_days"] is False
+    assert result["metadata"]["requires_trade_calendar_validation"] is False
+    assert result["missing_ranges"] == [{"start_date": "20240103", "end_date": "20240103"}]
+    assert result["requested_end_date"] == "20240103"
+    assert result["actual_data_end"] == "20240102"
+    assert result["coverage_end_date"] == "20240102"
+    assert result["data_freshness"] == "missing_expected_trading_dates"
+
+
+def test_run_remote_data_update_dry_run_uses_observed_market_dates_without_calendar(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "159259.SZ", "trade_date": "20260626"},
+                {"ts_code": "159259.SZ", "trade_date": "20260629"},
+            ]
+        ),
+        "raw",
+        "tushare_fund_daily",
+    )
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20260626",
+            "end_date": "20260630",
+            "dry_run": True,
+        },
+        ToolContext(run_id="r-observed-calendar", dry_run=True),
+    )
+
+    assert result["status"] == "planned"
+    assert result["metadata"]["calendar_source"] == "observed_market_daily_dates"
+    assert result["metadata"]["missing_ranges_are_calendar_days"] is False
+    assert result["missing_ranges"] == []
+    assert result["requested_end_date"] == "20260630"
+    assert result["actual_data_end"] == "20260629"
+    assert result["coverage_end_date"] == "20260629"
+    assert result["data_freshness"] == "covers_expected_trading_dates"
+
+
+def test_run_remote_data_update_reports_no_data_before_etf_listing(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [{"ts_code": "159259.SZ", "name": "ETF", "list_date": "20250828"}]
+        ),
+        "raw",
+        "tushare_etf_basic",
+    )
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240101",
+            "end_date": "2025-07-10",
+            "ts_code": "159259.SZ",
+            "asset_type": "etf",
+            "dry_run": True,
+        },
+        ToolContext(run_id="r-pre-listing", dry_run=True),
+    )
+
+    assert result["status"] == "NO_DATA_EXPECTED"
+    assert result["data_update_needed"] is False
+    assert result["metadata"]["reason"] == "requested_end_before_listing"
+    assert result["metadata"]["list_date"] == "20250828"
 
 
 def test_run_remote_data_update_rejects_missing_token_for_live_fetch(tmp_path) -> None:
