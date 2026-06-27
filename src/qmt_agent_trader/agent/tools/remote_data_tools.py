@@ -88,7 +88,12 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
             "tushare_trade_calendar",
             "observed_market_daily_dates",
         }
-        missing_ranges = _missing_ranges(lake, expected_dates)
+        missing_ranges = _missing_ranges(
+            lake,
+            expected_dates,
+            ts_code=ts_code,
+            asset_type=asset_type,
+        )
         metadata["plan_meaning"] = "dry_run_only_no_remote_fetch_performed"
         metadata["calendar_source"] = calendar_source
         metadata["missing_ranges_are_calendar_days"] = not uses_date_calendar
@@ -238,19 +243,37 @@ def _validate_span(start: str, end: str, max_days: int) -> None:
         )
 
 
-def _missing_ranges(lake: DataLake, expected_dates: list[str]) -> list[dict[str, str]]:
+def _missing_ranges(
+    lake: DataLake,
+    expected_dates: list[str],
+    *,
+    ts_code: str | None,
+    asset_type: str,
+) -> list[dict[str, str]]:
     covered: set[str] = set()
-    for dataset in ("tushare_daily", "tushare_fund_daily"):
+    for dataset in _datasets_for_asset_type(asset_type, scoped=ts_code is not None):
         if not lake.dataset_path("raw", dataset).exists():
             continue
         frame = lake.read_parquet("raw", dataset)
         if "trade_date" not in frame.columns:
             continue
+        if ts_code and "ts_code" in frame.columns:
+            frame = frame[frame["ts_code"].astype(str) == ts_code]
         covered.update(_format_date(item) for item in frame["trade_date"].dropna().tolist())
     if not covered:
         return _coalesce_dates(expected_dates)
     missing = [item for item in expected_dates if item not in covered]
     return _coalesce_dates(missing)
+
+
+def _datasets_for_asset_type(asset_type: str, *, scoped: bool) -> tuple[str, ...]:
+    if not scoped:
+        return ("tushare_daily", "tushare_fund_daily")
+    if asset_type == "stock":
+        return ("tushare_daily",)
+    if asset_type == "etf":
+        return ("tushare_fund_daily",)
+    return ("tushare_daily", "tushare_fund_daily")
 
 
 def _actual_data_coverage(lake: DataLake, *, ts_code: str | None) -> dict[str, Any]:

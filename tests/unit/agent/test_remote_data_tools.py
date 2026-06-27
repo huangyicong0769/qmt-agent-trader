@@ -197,6 +197,52 @@ def test_run_remote_data_update_dry_run_uses_trade_calendar_when_available(
     assert result["data_freshness"] == "missing_expected_trading_dates"
 
 
+def test_run_remote_data_update_dry_run_detects_symbol_specific_gaps(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"cal_date": "20240102", "is_open": 1},
+                {"cal_date": "20240103", "is_open": 1},
+            ]
+        ),
+        "raw",
+        "tushare_trade_calendar",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240102"},
+                {"ts_code": "000002.SZ", "trade_date": "20240103"},
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240102",
+            "end_date": "20240103",
+            "ts_code": "000001.SZ",
+            "asset_type": "stock",
+            "dry_run": True,
+        },
+        ToolContext(run_id="r-symbol-calendar-dry", dry_run=True),
+    )
+
+    assert result["data_update_needed"] is True
+    assert result["missing_ranges"] == [{"start_date": "20240103", "end_date": "20240103"}]
+    assert result["actual_data_end"] == "20240102"
+    assert result["data_freshness"] == "missing_expected_trading_dates"
+
+
 def test_run_remote_data_update_dry_run_uses_observed_market_dates_without_calendar(
     tmp_path,
 ) -> None:
