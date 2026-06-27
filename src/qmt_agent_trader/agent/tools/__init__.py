@@ -178,4 +178,17 @@ def build_agent_registry(
         score_tool_candidate_tool,
         propose_tool_registration_tool,
     )
+    if resolved_settings.mcp_enabled:
+        from qmt_agent_trader.agent.mcp_client import build_mcp_tools
+
+        mcp_config_path = resolved_settings.mcp_config_path
+        if not mcp_config_path.is_absolute():
+            mcp_config_path = resolved_settings.project_root / mcp_config_path
+        registry.register_all(
+            *build_mcp_tools(
+                config_path=mcp_config_path,
+                tool_prefix=resolved_settings.mcp_tool_prefix,
+                default_timeout_seconds=resolved_settings.mcp_default_timeout_seconds,
+            )
+        )
     return registry

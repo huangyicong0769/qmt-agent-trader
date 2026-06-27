@@ -1,0 +1,15 @@
+{
+  "servers": [
+    {
+      "name": "tavily",
+      "transport": "streamable_http",
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}",
+      "headers": {},
+      "enabled": true,
+      "permission": "READ_ONLY",
+      "timeout_seconds": 60,
+      "sse_read_timeout_seconds": 300,
+      "llm_callable": true
+    }
+  ]
+}

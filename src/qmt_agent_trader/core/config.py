@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     remote_data_retry_attempts: int = 3
     remote_data_retry_backoff_seconds: float = 2.0
 
+    mcp_enabled: bool = False
+    mcp_config_path: Path = Path("configs/mcp.servers.json")
+    mcp_tool_prefix: str = "mcp"
+    mcp_default_timeout_seconds: int = 60
+
     @property
     def resolved_data_dir(self) -> Path:
         return self.project_root / self.data_dir

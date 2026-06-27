@@ -85,7 +85,9 @@ class AgentRuntime:
                         "multi-step research loops. You may read data, write generated "
                         "research artifacts, generate candidate code in the sandbox, and run "
                         "simulated backtests. You must not submit live orders, modify live "
-                        "config, or bypass approvals. Always respond in Chinese."
+                        "config, or bypass approvals. External MCP tools may appear with "
+                        "the configured prefix and follow the same permission, audit, and "
+                        "evidence rules as native tools. Always respond in Chinese."
                     ),
                 },
                 {"role": "user", "content": prompt},

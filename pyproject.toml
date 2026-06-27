@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.28.1",
     "hypothesis>=6.141.1",
     "loguru>=0.7.3",
+    "mcp>=1.28,<2",
     "mypy>=1.19.1",
     "nicegui>=3.13.0",
     "numpy>=2.0.2",

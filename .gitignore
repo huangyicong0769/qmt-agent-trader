@@ -21,3 +21,5 @@ gateway/windows_qmt_gateway/.env
 gateway/windows_qmt_gateway/.venv/
 sessions/
 reports/cache/
+src/qmt_agent_trader/agent/generated
+configs/mcp.servers.json
