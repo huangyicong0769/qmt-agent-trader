@@ -116,7 +116,7 @@ def test_generated_factor_must_be_saved_before_evaluation(registry) -> None:
         context,
     )
 
-    assert unsaved["status"] == "FACTOR_NOT_SAVED"
+    assert unsaved["status"] == "FACTOR_NOT_FOUND"
 
     static_result = registry.run_tool(
         "run_factor_static_checks",
@@ -143,3 +143,61 @@ def test_generated_factor_must_be_saved_before_evaluation(registry) -> None:
     )
     assert evaluated["status"] == "validated"
     assert evaluated["non_null"] > 0
+
+
+def test_agent_can_list_saved_factors_and_duplicate_saves_are_rejected(registry) -> None:
+    context = ToolContext(run_id="run_test", experiment_id="exp_test")
+    spec_result = registry.run_tool(
+        "create_factor_spec",
+        {
+            "factor_name": "agent_unique_momentum",
+            "factor_description": "short horizon momentum",
+            "formula_sketch": "pct_change",
+            "lookback": 3,
+        },
+        context,
+    )
+    factor_spec = spec_result["factor_spec"]
+    code_result = registry.run_tool("generate_factor_code", {"factor_spec": factor_spec}, context)
+    factor_id = factor_spec["factor_id"]
+
+    saved = registry.run_tool(
+        "save_factor",
+        {
+            "factor_id": factor_id,
+            "code_path": code_result["code_path"],
+            "spec_path": code_result["spec_path"],
+        },
+        context,
+    )
+    assert saved["status"] == "saved"
+
+    listed = registry.run_tool(
+        "list_saved_factors",
+        {"query": "agent_unique_momentum", "include_builtins": False},
+        context,
+    )
+    assert listed["status"] == "ok"
+    assert listed["count"] == 1
+    assert listed["factors"][0]["factor_id"] == factor_id
+
+    duplicate_spec = {
+        **factor_spec,
+        "factor_id": "factor_duplicate_name",
+    }
+    duplicate_code = registry.run_tool(
+        "generate_factor_code",
+        {"factor_spec": duplicate_spec},
+        context,
+    )
+    duplicate = registry.run_tool(
+        "save_factor",
+        {
+            "factor_id": duplicate_spec["factor_id"],
+            "code_path": duplicate_code["code_path"],
+            "spec_path": duplicate_code["spec_path"],
+        },
+        context,
+    )
+    assert duplicate["status"] == "DUPLICATE_FACTOR_NAME"
+    assert duplicate["existing_factors"][0]["factor_id"] == factor_id

@@ -130,6 +130,69 @@ generate_strategy_code_tool: AgentTool = tool(
     fn=_generate_strategy_code,
 )
 
+# ── list_strategy_candidates ────────────────────────────────────────────────
+
+
+def _list_strategy_candidates(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    sb = _sandbox
+    if sb is None:
+        return {"status": "NOT_IMPLEMENTED", "message": "sandbox not wired"}
+
+    query = str(input_data.get("query") or "").strip()
+    root = sb.generated_root / "strategies"
+    candidates: list[dict[str, Any]] = []
+    for path in sorted(root.glob("**/strategy.py")):
+        strategy_id = path.parent.name
+        tests_path = path.with_name("test_strategy.py")
+        if query and query not in strategy_id and query not in str(path):
+            continue
+        candidates.append(
+            {
+                "strategy_id": strategy_id,
+                "status": "draft",
+                "code_path": str(path),
+                "tests_path": str(tests_path) if tests_path.exists() else None,
+                "saved": False,
+            }
+        )
+    for path in sorted(root.glob("*.py")):
+        if path.name.startswith("test_"):
+            continue
+        strategy_id = path.stem
+        tests_path = path.with_name(f"test_{path.name}")
+        if query and query not in strategy_id and query not in str(path):
+            continue
+        candidates.append(
+            {
+                "strategy_id": strategy_id,
+                "status": "draft",
+                "code_path": str(path),
+                "tests_path": str(tests_path) if tests_path.exists() else None,
+                "saved": False,
+            }
+        )
+    return {
+        "status": "ok",
+        "query": query or None,
+        "count": len(candidates),
+        "strategies": candidates,
+    }
+
+
+list_strategy_candidates_tool: AgentTool = tool(
+    ToolSpec(
+        name="list_strategy_candidates",
+        description="查询 Agent 已生成的策略候选、代码路径和草稿状态。",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+        },
+        permission=PermissionLevel.READ_ONLY,
+        deterministic=False,
+    ),
+    fn=_list_strategy_candidates,
+)
+
 # ── run_backtest ────────────────────────────────────────────────────────────
 
 
@@ -168,8 +231,21 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     saved = factor_registry.get_factor(factor_name)
     if saved is None:
         return {
-            "status": "FACTOR_NOT_SAVED",
-            "message": f"factor '{factor_name}' is a draft or unknown; save_factor first",
+            "status": "FACTOR_NOT_FOUND",
+            "message": (
+                f"factor '{factor_name}' is not an exact saved factor_id/name. "
+                "Call list_saved_factors and use an exact factor_id."
+            ),
+            "candidates": [
+                {
+                    "factor_id": item.factor_id,
+                    "name": item.name,
+                    "status": item.status,
+                    "created_by": item.created_by,
+                    "created_at": item.created_at,
+                }
+                for item in factor_registry.find_factors(factor_name, include_builtins=True)
+            ],
         }
     factor_name = saved.factor_id
 
@@ -189,6 +265,15 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             "status": "error",
             "message": f"no bars in range {start_date}–{end_date}",
         }
+    actual_start_date = bars["trade_date"].min()
+    actual_end_date = bars["trade_date"].max()
+    actual_start_text = f"{actual_start_date:%Y%m%d}"
+    actual_end_text = f"{actual_end_date:%Y%m%d}"
+    data_freshness = (
+        "stale_vs_requested_end"
+        if actual_end_date < end_bound
+        else "covers_requested_end"
+    )
 
     config = FactorRankResearchConfig(
         factor_name=factor_name,
@@ -226,6 +311,9 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             "initial_cash": initial_cash,
             "start_date": start_date,
             "end_date": end_date,
+            "actual_data_start": actual_start_text,
+            "actual_data_end": actual_end_text,
+            "data_freshness": data_freshness,
         },
         "summary": {
             "baseline_total_return": result.metrics.total_return,
@@ -269,6 +357,9 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         "symbols": symbols,
         "start_date": start_date,
         "end_date": end_date,
+        "actual_data_start": actual_start_text,
+        "actual_data_end": actual_end_text,
+        "data_freshness": data_freshness,
         "metrics": {
             "total_return": round(result.metrics.total_return, 4),
             "sharpe": round(result.metrics.sharpe, 4),

@@ -6,7 +6,7 @@ import pytest
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.sandbox import CodeSandbox
-from qmt_agent_trader.agent.schemas import ExperimentStatus
+from qmt_agent_trader.agent.schemas import ExperimentStatus, ToolContext
 from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.workflows.strategy_engineering import (
     StrategyEngineeringWorkflow,
@@ -84,3 +84,50 @@ def test_strategy_workflow_does_not_call_broker(registry, store):
     assert not any("broker" in a for a in artifacts)
     assert not any("gateway" in a for a in artifacts)
     assert not any("submit_order" in a for a in artifacts)
+
+
+def test_agent_can_list_generated_strategy_candidates(registry):
+    context = ToolContext(run_id="strategy-list")
+    spec = registry.run_tool(
+        "create_strategy_spec",
+        {
+            "strategy_idea": "基于动量的候选策略",
+            "selected_factors": ["momentum_20d"],
+        },
+        context,
+    )["strategy_spec"]
+    generated = registry.run_tool("generate_strategy_code", {"strategy_spec": spec}, context)
+
+    listed = registry.run_tool(
+        "list_strategy_candidates",
+        {"query": spec["strategy_id"]},
+        context,
+    )
+
+    assert generated["status"] == "generated"
+    assert listed["status"] == "ok"
+    assert listed["count"] == 1
+    assert listed["strategies"][0]["strategy_id"] == spec["strategy_id"]
+    assert listed["strategies"][0]["status"] == "draft"
+
+
+def test_agent_can_list_legacy_flat_strategy_candidates(registry, tmp_path):
+    context = ToolContext(run_id="strategy-list-flat")
+    generated = tmp_path / "generated" / "strategies" / "strat_legacy.py"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_text("def generate_signals(data):\n    return data\n", encoding="utf-8")
+    generated.with_name("test_strat_legacy.py").write_text(
+        "def test_placeholder():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    listed = registry.run_tool(
+        "list_strategy_candidates",
+        {"query": "strat_legacy"},
+        context,
+    )
+
+    assert listed["status"] == "ok"
+    assert listed["count"] == 1
+    assert listed["strategies"][0]["strategy_id"] == "strat_legacy"
+    assert listed["strategies"][0]["tests_path"].endswith("test_strat_legacy.py")

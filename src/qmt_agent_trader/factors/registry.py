@@ -81,9 +81,39 @@ class FactorRegistry:
         if saved is not None:
             return saved
         matches = [item for item in self._saved.values() if item.name == factor_id]
-        if len(matches) == 1:
-            return matches[0]
-        return None
+        return matches[0] if len(matches) == 1 else None
+
+    def find_factors(
+        self,
+        query: str | None = None,
+        *,
+        include_builtins: bool = True,
+    ) -> list[SavedFactor]:
+        factors = self.list_factors()
+        if not include_builtins:
+            factors = [
+                item
+                for item in factors
+                if not item.implementation_ref.startswith("builtin:")
+            ]
+        needle = str(query or "").strip()
+        if not needle:
+            return factors
+        return [
+            item
+            for item in factors
+            if needle in item.factor_id or needle in item.name
+        ]
+
+    def duplicate_names(self) -> dict[str, list[SavedFactor]]:
+        by_name: dict[str, list[SavedFactor]] = {}
+        for item in self.list_factors():
+            by_name.setdefault(item.name, []).append(item)
+        return {
+            name: factors
+            for name, factors in by_name.items()
+            if len(factors) > 1
+        }
 
     def resolve_factor_id(self, factor_id_or_name: str) -> str | None:
         saved = self.get_factor(factor_id_or_name)
@@ -103,6 +133,16 @@ class FactorRegistry:
     ) -> SavedFactor:
         if implementation_ref.startswith("builtin:"):
             raise ValueError("built-in factors are managed by code")
+        duplicate_names = [
+            item.factor_id
+            for item in self._saved.values()
+            if item.name == name and item.factor_id != factor_id
+        ]
+        if duplicate_names:
+            raise ValueError(
+                f"factor name already exists: {name}; use an existing factor_id "
+                f"or choose a unique name. Conflicts: {duplicate_names}"
+            )
         record = SavedFactor(
             factor_id=factor_id,
             name=name,
@@ -194,7 +234,6 @@ def _builtin_saved_factors() -> dict[str, SavedFactor]:
         )
         for factor_id, (lookback, columns) in builtins.items()
     }
-
 
 def _compute_builtin(name: str, bars: pd.DataFrame) -> pd.Series:
     if name == "momentum_20d":

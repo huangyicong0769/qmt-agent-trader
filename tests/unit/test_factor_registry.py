@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
 
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import compute_factor_frame
@@ -112,6 +113,71 @@ def compute(bars: pd.DataFrame) -> pd.Series:
     frame = compute_factor_frame(_bars(), "agent_momentum_3d", registry=registry)
     assert frame["factor_name"].unique().tolist() == ["agent_momentum_3d"]
     assert frame["factor_value"].notna().sum() == 42
+
+
+def test_duplicate_saved_names_are_rejected(tmp_path) -> None:
+    factor_file = tmp_path / "factor.py"
+    factor_file.write_text(
+        """
+import pandas as pd
+
+
+def compute(bars: pd.DataFrame) -> pd.Series:
+    return bars.groupby("symbol")["close"].pct_change(3)
+""",
+        encoding="utf-8",
+    )
+    registry = FactorRegistry(tmp_path / "registry")
+    registry.save_factor(
+        factor_id="factor_old",
+        name="rsi_14d",
+        version="0.1.0",
+        implementation_ref=f"file:{factor_file}",
+        required_columns=("symbol", "trade_date", "close"),
+        lookback=14,
+        params={},
+        created_by="agent",
+    )
+
+    with pytest.raises(ValueError, match="factor name already exists"):
+        registry.save_factor(
+            factor_id="factor_new",
+            name="rsi_14d",
+            version="0.1.0",
+            implementation_ref=f"file:{factor_file}",
+            required_columns=("symbol", "trade_date", "close"),
+            lookback=14,
+            params={},
+            created_by="agent",
+        )
+
+
+def test_find_factors_supports_query_without_prefix_alias_resolution(tmp_path) -> None:
+    factor_file = tmp_path / "factor.py"
+    factor_file.write_text(
+        """
+import pandas as pd
+
+
+def compute(bars: pd.DataFrame) -> pd.Series:
+    return bars.groupby("symbol")["close"].pct_change(3)
+""",
+        encoding="utf-8",
+    )
+    registry = FactorRegistry(tmp_path / "registry")
+    saved = registry.save_factor(
+        factor_id="factor_hl_vol",
+        name="hl_volatility_5d_159259",
+        version="0.1.0",
+        implementation_ref=f"file:{factor_file}",
+        required_columns=("symbol", "trade_date", "close"),
+        lookback=5,
+        params={},
+        created_by="agent",
+    )
+
+    assert registry.get_factor("hl_volatility_5d") is None
+    assert registry.find_factors("hl_volatility_5d", include_builtins=False) == [saved]
 
 
 def test_file_factor_object_output_is_coerced_to_numeric(tmp_path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -154,18 +155,28 @@ generate_factor_code_tool: AgentTool = tool(
 
 def _run_factor_static_checks(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     code_path_str = input_data.get("code_path", "")
-    if not code_path_str:
-        return {"status": "INVALID_REQUEST", "issues": ["code_path is required"]}
-    code_path = Path(code_path_str)
+    factor_id = str(input_data.get("factor_id") or "").strip()
+    if not code_path_str and not factor_id:
+        return {"status": "INVALID_REQUEST", "issues": ["code_path or factor_id is required"]}
+    sb = _sandbox
+    if sb is None:
+        return {"status": "FAILED", "issues": ["sandbox not wired"]}
+    code_path, recovered = _resolve_factor_code_path(
+        str(code_path_str),
+        factor_id=factor_id or None,
+        sandbox=sb,
+    )
     if not code_path.exists():
         return {"status": "FAILED", "issues": [f"file not found: {code_path_str}"]}
     if not code_path.is_file():
         return {"status": "INVALID_REQUEST", "issues": [f"not a file: {code_path_str}"]}
-    sb = _sandbox
-    if sb is None:
-        return {"status": "FAILED", "issues": ["sandbox not wired"]}
     issues = sb.static_scan_code(code_path.read_text(encoding="utf-8"))
-    return {"status": "PASSED" if not issues else "FAILED", "issues": issues}
+    return {
+        "status": "PASSED" if not issues else "FAILED",
+        "issues": issues,
+        "code_path": str(code_path),
+        "path_recovered": recovered,
+    }
 
 
 run_factor_static_checks_tool: AgentTool = tool(
@@ -174,8 +185,10 @@ run_factor_static_checks_tool: AgentTool = tool(
         description="检查候选因子是否存在未来函数或危险行为。",
         input_schema={
             "type": "object",
-            "properties": {"code_path": {"type": "string"}},
-            "required": ["code_path"],
+            "properties": {
+                "code_path": {"type": "string"},
+                "factor_id": {"type": "string"},
+            },
         },
         permission=PermissionLevel.BACKTEST_EXECUTE,
         deterministic=True,
@@ -223,16 +236,24 @@ def _save_factor(input_data: dict[str, Any], context: ToolContext) -> dict[str, 
             "message": "factor_id does not match factor_spec",
         }
     registry = FactorRegistry(_factor_registry_root(lake))
-    saved = registry.save_factor(
-        factor_id=factor_id,
-        name=str(spec_data.get("name") or factor_id),
-        version=str(spec_data.get("version") or "0.1.0"),
-        implementation_ref=f"file:{code_path}",
-        required_columns=_required_columns_for_spec(spec_data),
-        lookback=int(spec_data.get("lookback") or 20),
-        params={"lookback": int(spec_data.get("lookback") or 20)},
-        created_by=str(input_data.get("created_by") or "agent"),
-    )
+    try:
+        saved = registry.save_factor(
+            factor_id=factor_id,
+            name=str(spec_data.get("name") or factor_id),
+            version=str(spec_data.get("version") or "0.1.0"),
+            implementation_ref=f"file:{code_path}",
+            required_columns=_required_columns_for_spec(spec_data),
+            lookback=int(spec_data.get("lookback") or 20),
+            params={"lookback": int(spec_data.get("lookback") or 20)},
+            created_by=str(input_data.get("created_by") or "agent"),
+        )
+    except ValueError as exc:
+        return {
+            "status": "DUPLICATE_FACTOR_NAME",
+            "message": str(exc),
+            "factor_id": factor_id,
+            "existing_factors": _factor_matches(registry, str(spec_data.get("name") or factor_id)),
+        }
     return {
         "status": saved.status,
         "factor_id": saved.factor_id,
@@ -265,6 +286,55 @@ save_factor_tool: AgentTool = tool(
     fn=_save_factor,
 )
 
+# ── list_saved_factors ───────────────────────────────────────────────────────
+
+
+def _list_saved_factors(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    lake = _lake
+    if lake is None:
+        return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
+
+    registry = FactorRegistry(_factor_registry_root(lake))
+    query = str(input_data.get("query") or "").strip()
+    include_builtins = bool(input_data.get("include_builtins", True))
+    factors = registry.find_factors(query or None, include_builtins=include_builtins)
+    duplicates = {
+        name: [_saved_factor_payload(item) for item in items]
+        for name, items in registry.duplicate_names().items()
+        if include_builtins or not any(
+            item.implementation_ref.startswith("builtin:") for item in items
+        )
+    }
+    return {
+        "status": "ok",
+        "query": query or None,
+        "include_builtins": include_builtins,
+        "count": len(factors),
+        "factors": [_saved_factor_payload(item) for item in factors],
+        "duplicate_names": duplicates,
+    }
+
+
+list_saved_factors_tool: AgentTool = tool(
+    ToolSpec(
+        name="list_saved_factors",
+        description=(
+            "查询统一 Factor Registry 中已保存的因子、状态和重复名称。"
+            "在创建、评估或回测新因子前先用它确认已有 factor_id/name。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "include_builtins": {"type": "boolean"},
+            },
+        },
+        permission=PermissionLevel.READ_ONLY,
+        deterministic=False,
+    ),
+    fn=_list_saved_factors,
+)
+
 # ── evaluate_factor_candidate ────────────────────────────────────────────────
 
 
@@ -286,8 +356,12 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
     saved = registry.get_factor(factor_name)
     if saved is None:
         return {
-            "status": "FACTOR_NOT_SAVED",
-            "message": f"factor '{factor_name}' is a draft or unknown; save_factor first",
+            "status": "FACTOR_NOT_FOUND",
+            "message": (
+                f"factor '{factor_name}' is not an exact saved factor_id/name. "
+                "Call list_saved_factors and use an exact factor_id."
+            ),
+            "candidates": _factor_matches(registry, factor_name),
         }
     factor_name = saved.factor_id
 
@@ -375,6 +449,53 @@ evaluate_factor_candidate_tool: AgentTool = tool(
 
 def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
+
+
+def _saved_factor_payload(saved: Any) -> dict[str, Any]:
+    implementation_type = (
+        "builtin"
+        if str(saved.implementation_ref).startswith("builtin:")
+        else "file"
+    )
+    return {
+        "factor_id": saved.factor_id,
+        "name": saved.name,
+        "status": saved.status,
+        "version": saved.version,
+        "created_by": saved.created_by,
+        "created_at": saved.created_at,
+        "implementation_type": implementation_type,
+        "required_columns": list(saved.required_columns),
+        "lookback": saved.lookback,
+    }
+
+
+def _factor_matches(registry: FactorRegistry, query: str) -> list[dict[str, Any]]:
+    return [
+        _saved_factor_payload(item)
+        for item in registry.find_factors(query, include_builtins=True)
+    ]
+
+
+def _resolve_factor_code_path(
+    code_path_raw: str,
+    *,
+    factor_id: str | None,
+    sandbox: CodeSandbox,
+) -> tuple[Path, bool]:
+    if factor_id:
+        candidate = sandbox.generated_root / "factors" / "drafts" / factor_id / "factor.py"
+        if candidate.exists():
+            return candidate, not code_path_raw or str(candidate) != code_path_raw
+    code_path = Path(code_path_raw)
+    if code_path.exists():
+        return code_path, False
+    match = re.search(r"(factor_[A-Za-z0-9_]+)", code_path_raw)
+    if match:
+        candidate = sandbox.generated_root / "factors" / "drafts" / match.group(1) / "factor.py"
+        if candidate.exists():
+            return candidate, True
+    return code_path, False
 
 
 def _load_factor_spec(spec_path_raw: str, sb: CodeSandbox) -> dict[str, Any]:

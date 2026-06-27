@@ -26,6 +26,7 @@ from qmt_agent_trader.agent.tools.factor_tools import (
     create_factor_spec_tool,
     evaluate_factor_candidate_tool,
     generate_factor_code_tool,
+    list_saved_factors_tool,
     run_factor_static_checks_tool,
     save_factor_tool,
 )
@@ -41,7 +42,6 @@ from qmt_agent_trader.agent.tools.meta_tools import (
 from qmt_agent_trader.agent.tools.query_tools import (
     list_data_catalog_tool,
     query_bars_tool,
-    query_fundamentals_pit_tool,
     query_universe_tool,
 )
 from qmt_agent_trader.agent.tools.remote_data_tools import (
@@ -51,6 +51,7 @@ from qmt_agent_trader.agent.tools.strategy_tools import (
     create_strategy_spec_tool,
     generate_research_report_tool,
     generate_strategy_code_tool,
+    list_strategy_candidates_tool,
     run_backtest_tool,
 )
 from qmt_agent_trader.core.config import Settings, get_settings
@@ -152,11 +153,11 @@ def build_agent_registry(
         list_data_catalog_tool,
         query_universe_tool,
         query_bars_tool,
-        query_fundamentals_pit_tool,
         run_remote_data_update_tool,
         run_shell_command_tool,
         get_current_time_tool,
         # Factor tools
+        list_saved_factors_tool,
         create_factor_spec_tool,
         generate_factor_code_tool,
         run_factor_static_checks_tool,
@@ -165,6 +166,7 @@ def build_agent_registry(
         # Strategy tools
         create_strategy_spec_tool,
         generate_strategy_code_tool,
+        list_strategy_candidates_tool,
         run_backtest_tool,
         generate_research_report_tool,
         # Meta tools

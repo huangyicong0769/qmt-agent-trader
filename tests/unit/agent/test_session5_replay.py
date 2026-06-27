@@ -114,6 +114,37 @@ def test_session5_generated_factor_code_uses_known_formula_templates(tmp_path) -
     assert "rolling(20)" in code
 
 
+def test_session5_static_checks_recover_from_copied_path_typo(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    registry = _registry(tmp_path, lake)
+
+    code_result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_spec": {
+                "factor_id": "factor_typo_recovery",
+                "name": "momentum_10d",
+                "lookback": 10,
+                "formula": "close / close.shift(10) - 1",
+            }
+        },
+        ToolContext(run_id="s5"),
+    )
+    typo_path = (
+        f"/tmp/not-the-project/factors/drafts/{code_result['factor_id']}/factor.py"
+    )
+
+    static = registry.run_tool(
+        "run_factor_static_checks",
+        {"code_path": typo_path},
+        ToolContext(run_id="s5"),
+    )
+
+    assert static["status"] == "PASSED"
+    assert static["code_path"] == code_result["code_path"]
+    assert static["path_recovered"] is True
+
+
 def test_session5_trend_persistence_does_not_match_rsi_substring(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     registry = _registry(tmp_path, lake)
@@ -264,7 +295,6 @@ def test_session5_factor_tool_descriptions_expose_required_inputs(tmp_path) -> N
 
     expected_required = {
         "generate_factor_code": ["factor_spec"],
-        "run_factor_static_checks": ["code_path"],
         "save_factor": ["factor_id", "code_path"],
         "evaluate_factor_candidate": ["factor_id"],
         "run_backtest": ["factor_name"],
@@ -276,6 +306,13 @@ def test_session5_factor_tool_descriptions_expose_required_inputs(tmp_path) -> N
         for field in required:
             assert field in schema["properties"]
             assert field in schema.get("required", [])
+    static_schema = registry.run_tool(
+        "describe_tool",
+        {"name": "run_factor_static_checks"},
+        context,
+    )["tool_spec"]["input_schema"]
+    assert "code_path" in static_schema["properties"]
+    assert "factor_id" in static_schema["properties"]
 
 
 def test_session5_single_etf_factor_evaluation_uses_time_series_mode(tmp_path) -> None:
@@ -364,5 +401,9 @@ def test_session5_factor_tools_default_to_current_end_date(tmp_path) -> None:
 
     assert evaluated["status"] == "validated"
     assert evaluated["end"] == today
+    assert evaluated["actual_data_end"] == "20251125"
+    assert evaluated["data_freshness"] == "stale_vs_requested_end"
     assert backtest["status"] == "completed"
     assert backtest["end_date"] == today
+    assert backtest["actual_data_end"] == "20251125"
+    assert backtest["data_freshness"] == "stale_vs_requested_end"
