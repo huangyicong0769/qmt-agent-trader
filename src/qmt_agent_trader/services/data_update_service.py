@@ -229,13 +229,23 @@ class TushareDataUpdateService:
 
             open_dates = self._open_dates(calendar)
             if include_daily:
-                missing_daily_dates = self._missing_trade_dates("tushare_daily", open_dates)
-                if open_dates:
-                    daily = self._fetch_daily_by_open_dates(missing_daily_dates)
-                else:
+                scoped_stock_update = bool(ts_code and asset_type in {"auto", "stock"})
+                if scoped_stock_update:
                     daily = self._execute(
-                        self.client.build_daily_request(start_date=start, end_date=end)
+                        self.client.build_daily_request(
+                            start_date=start,
+                            end_date=end,
+                            ts_code=ts_code,
+                        )
                     )
+                else:
+                    missing_daily_dates = self._missing_trade_dates("tushare_daily", open_dates)
+                    if open_dates:
+                        daily = self._fetch_daily_by_open_dates(missing_daily_dates)
+                    else:
+                        daily = self._execute(
+                            self.client.build_daily_request(start_date=start, end_date=end)
+                        )
                 if not daily.empty or not open_dates:
                     writes.append(
                         self._write_incremental(
@@ -245,6 +255,19 @@ class TushareDataUpdateService:
                             end=end,
                             key_columns=["ts_code", "trade_date"],
                         )
+                    )
+
+                if scoped_stock_update:
+                    return DataUpdateResult(
+                        start=start,
+                        end=end,
+                        writes=writes,
+                        open_dates=open_dates,
+                        metadata={
+                            "asset_type": "stock",
+                            "ts_code": ts_code,
+                            "scoped_update": True,
+                        },
                     )
 
                 missing_suspend_dates = self._missing_trade_dates("tushare_suspend", open_dates)

@@ -11,9 +11,11 @@ class FakeTushareClient(TushareClient):
     def __init__(self) -> None:
         super().__init__(token="fake")
         self.seen: list[str] = []
+        self.requests: list[TushareRequest] = []
 
     def execute(self, request: TushareRequest) -> pd.DataFrame:
         self.seen.append(request.api_name)
+        self.requests.append(request)
         if request.api_name == "trade_cal":
             if request.params["start_date"] == "EMPTY":
                 return pd.DataFrame()
@@ -158,6 +160,27 @@ def test_tushare_data_update_falls_back_when_calendar_empty(tmp_path) -> None:
     daily_write = next(write for write in result.writes if write.name.startswith("tushare_daily"))
     assert result.open_dates == []
     assert daily_write.rows == 1
+
+
+def test_tushare_data_update_fetches_single_stock_by_ts_code_range(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    client = FakeTushareClient()
+
+    TushareDataUpdateService(client, lake).update(
+        "20260609",
+        "20260610",
+        include_basics=False,
+        ts_code="000001.SZ",
+        asset_type="stock",
+    )
+
+    daily_requests = [request for request in client.requests if request.api_name == "daily"]
+    assert len(daily_requests) == 1
+    assert daily_requests[0].params == {
+        "start_date": "20260609",
+        "end_date": "20260610",
+        "ts_code": "000001.SZ",
+    }
 
 
 def test_tushare_namechange_uses_pagination(tmp_path) -> None:
