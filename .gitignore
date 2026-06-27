@@ -52,6 +52,10 @@ Thumbs.db
 # Local MCP configuration
 /configs/mcp.servers.json
 
+# Local-only regression tests
+/tests/unit/agent/test_session5_replay.py
+/tests/unit/agent/test_mcp_client.py
+
 # Windows QMT gateway local environment
 /gateway/windows_qmt_gateway/.env
 /gateway/windows_qmt_gateway/.env.*
