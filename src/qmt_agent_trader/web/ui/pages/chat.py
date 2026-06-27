@@ -271,6 +271,7 @@ async def _send(
     assistant_card: ui.card | None = None
     assistant_md: ui.markdown | None = None
     token_buf: list[str] = []
+    final_text: str = ""
     lbl_ref: list[ui.label | None] = [None]
     need_new_card: bool = False
     cancelled = False
@@ -328,6 +329,25 @@ async def _send(
                 if len(token_buf) <= 8:
                     refresh_sidebar()
 
+            elif et == "final_message":
+                final_text = em
+                if assistant_card is None or need_new_card:
+                    assistant_card = ui.card().classes(
+                        "w-full bg-blue-50 border p-3"
+                    )
+                    with assistant_card:
+                        ui.markdown("**🤖 Assistant**").classes(
+                            "text-sm font-semibold text-blue-800"
+                        )
+                        assistant_md = ui.markdown("").classes(
+                            "text-sm text-blue-900"
+                        )
+                    assistant_card.move(session.transcript)
+                    need_new_card = False
+                token_buf = [final_text]
+                if assistant_md is not None:
+                    assistant_md.set_content(final_text)
+
             elif et == "tool_start":
                 tn = ed.get("tool_name", "")
                 progress_card.clear()
@@ -379,7 +399,7 @@ async def _send(
                 with c2:
                     ui.markdown(f"**✅ Done** — {tc} tool call(s).")
                 c2.move(session.transcript)
-                full_text = "".join(token_buf)
+                full_text = final_text or "".join(token_buf)
                 if full_text:
                     session.add_message("assistant", full_text)
                 session.add_message("done", f"{tc} tool call(s) completed.")

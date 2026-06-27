@@ -317,7 +317,25 @@ def _stream_to_events(
                 type="token",
                 run_id=run_id,
                 message=evt.content,
-                data={"token": evt.content, "experiment_id": experiment_id},
+                data={
+                    "token": evt.content,
+                    "phase": getattr(evt, "phase", "draft"),
+                    "experiment_id": experiment_id,
+                },
+            )
+        ]
+
+    if cls_name == "FinalMessage":
+        return [
+            OrchestratorEvent(
+                type="final_message",
+                run_id=run_id,
+                message=evt.content,
+                data={
+                    "content": evt.content,
+                    "phase": "final",
+                    "experiment_id": experiment_id,
+                },
             )
         ]
 

@@ -62,6 +62,13 @@ class StreamEvent:
 class TextDelta(StreamEvent):
     """A chunk of LLM text output."""
     content: str
+    phase: str = "draft"
+
+
+@dataclass(frozen=True)
+class FinalMessage(StreamEvent):
+    """The final assistant message for the current tool loop."""
+    content: str
 
 
 @dataclass(frozen=True)
@@ -281,7 +288,7 @@ class DeepSeekClient:
                 # ── Text content ──
                 if delta.content:
                     content_parts.append(delta.content)
-                    yield TextDelta(content=delta.content)
+                    yield TextDelta(content=delta.content, phase="draft")
 
                 # ── Tool calls (streamed as deltas) ──
                 tc_deltas = list(getattr(delta, "tool_calls", None) or [])
@@ -393,6 +400,8 @@ class DeepSeekClient:
             # ── No tool calls? Append final assistant message and done ──
             if not finished_tool_calls:
                 final_content = "".join(content_parts) if content_parts else None
+                if final_content:
+                    yield FinalMessage(content=final_content)
                 final_msg: dict[str, Any] = {"role": "assistant"}
                 if final_content:
                     final_msg["content"] = final_content
