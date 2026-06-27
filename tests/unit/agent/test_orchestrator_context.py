@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from qmt_agent_trader.agent.llm_client import FinalMessage, SafetyCapHit, TextDelta, ToolResult
 from qmt_agent_trader.agent.orchestrator import (
     AgentOrchestrator,
+    _is_data_acquisition_request,
     _requires_fresh_evidence,
 )
 from qmt_agent_trader.core.config import Settings
@@ -68,6 +69,9 @@ def test_execute_stream_includes_recent_natural_session_history(monkeypatch, tmp
     assert "list_saved_factors" in system_prompt
     assert "requires_trade_calendar_validation" in system_prompt
     assert "CALENDAR_VALIDATION_REQUIRED" in system_prompt
+    assert "For data acquisition or coverage-check requests" in system_prompt
+    assert "do not stop after a dry_run plan or ask whether to fetch" in system_prompt
+    assert "loop over each requested symbol" in system_prompt
 
 
 class SafetyCapDeepSeekClient:
@@ -195,3 +199,11 @@ def test_requires_fresh_evidence_detects_session5_retry_and_trade_prompts() -> N
     assert _requires_fresh_evidence("可能是tool出错了，检查并修复后再试试")
     assert _requires_fresh_evidence("基于这些因子和当前行情，下个交易日应该买还是卖")
     assert not _requires_fresh_evidence("继续回答")
+
+
+def test_data_acquisition_detection_covers_combo_coverage_prompts() -> None:
+    assert _is_data_acquisition_request(
+        "检查一下你现在是否能正常获取这个标的组合自上市以来的数据"
+    )
+    assert _is_data_acquisition_request("补齐 600519.SH 和 000858.SZ 的远程数据")
+    assert not _is_data_acquisition_request("在这个组合上寻找有效因子")

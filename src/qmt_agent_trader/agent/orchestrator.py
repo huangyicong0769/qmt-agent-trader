@@ -198,6 +198,20 @@ class AgentOrchestrator:
                 "hold, reduce, or add-position view, state clearly that it is a "
                 "research-only judgement and not a live trading instruction."
             )
+        if _is_data_acquisition_request(message):
+            routing_hint += (
+                "\nFor data acquisition or coverage-check requests, missing local bars "
+                "are not by themselves a blocker. Use run_remote_data_update to fetch "
+                "remote data when the local lake is stale or incomplete. Start with "
+                "dry_run=true to identify gaps, then call dry_run=false for the bounded "
+                "missing ranges that fit the tool limits. For a combination or basket, "
+                "loop over each requested symbol instead of treating another symbol's "
+                "coverage as sufficient. Do not stop after a dry_run plan or ask "
+                "whether to fetch when the user has asked you to get, check, retry, "
+                "or verify the data. If a requested history is too long for one call, "
+                "split it into allowed windows or clearly state the remaining bounded "
+                "range that was not fetched."
+            )
 
         system_msg = (
             "You are the QMT research agent. Use tools for local facts and for "
@@ -248,6 +262,10 @@ class AgentOrchestrator:
             "weekends or holidays unless another tool result proves that. Treat "
             "CALENDAR_VALIDATION_REQUIRED as an explicit blocker for any claim that "
             "data gaps are harmless."
+            " For data acquisition or coverage-check requests, do not stop after a "
+            "dry_run plan or ask whether to fetch when local data is stale or missing; "
+            "perform the bounded remote update yourself with dry_run=false, and for "
+            "baskets loop over each requested symbol."
             + routing_hint
         )
 
@@ -516,6 +534,22 @@ def _is_trade_decision_request(message: str) -> bool:
         for pattern in [
             r"(买|卖|减仓|加仓|清仓|持有|持仓|仓位|下个交易日|交易决策)",
             r"(buy|sell|hold|reduce|add position|position|trade decision)",
+        ]
+    )
+
+
+def _is_data_acquisition_request(message: str) -> bool:
+    normalized = message.strip().lower()
+    if not normalized:
+        return False
+    return any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in [
+            r"(获取|拉取|同步|补齐|更新|下载).{0,40}(数据|行情|日线)",
+            r"(检查|确认|验证|看看).{0,40}(获取|数据|行情|覆盖|缺口|新鲜)",
+            r"(自上市以来|上市以来|发行以来)",
+            r"(fetch|sync|update|download|get).{0,40}(data|bars|quotes)",
+            r"(coverage|freshness|missing|gap).{0,40}(data|bars|quotes)",
         ]
     )
 
