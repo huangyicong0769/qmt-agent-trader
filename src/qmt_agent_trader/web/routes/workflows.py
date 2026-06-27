@@ -17,7 +17,7 @@ from qmt_agent_trader.agent.workflows.strategy_engineering import StrategyEngine
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.web.event_bus import AgentEvent, AgentEventType, event_bus
-from qmt_agent_trader.web.routes.tools import get_registry
+from qmt_agent_trader.web.runtime import get_agent_runtime
 from qmt_agent_trader.web.schemas import WorkflowRunRequest, WorkflowRunResponse
 
 router = APIRouter()
@@ -29,6 +29,10 @@ _workflow_runs: dict[str, WorkflowRunResponse] = {}
 def get_experiment_store() -> ExperimentStore:
     settings = get_settings()
     return ExperimentStore(settings.resolved_data_dir / "experiments")
+
+
+def get_registry() -> AgentToolRegistry:
+    return get_agent_runtime().agent_registry()
 
 
 @router.post("/factor-discovery", response_model=WorkflowRunResponse)
@@ -108,7 +112,11 @@ async def _run_workflow(
         )
     )
     try:
-        record = await asyncio.to_thread(runner, get_registry(), get_experiment_store())
+        record = await asyncio.to_thread(
+            runner,
+            get_registry(),
+            get_experiment_store(),
+        )
     except Exception as exc:
         failed = WorkflowRunResponse(
             run_id=run_id,

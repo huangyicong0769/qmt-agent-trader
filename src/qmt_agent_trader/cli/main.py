@@ -10,11 +10,10 @@ import typer
 from rich import print
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
-from qmt_agent_trader.agent.runtime import build_default_runtime
-from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.agent.permissions import ToolCallMode
+from qmt_agent_trader.agent.runtime import AgentRuntime, build_default_runtime
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
-from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.workflows.factor_discovery import (
     FactorDiscoveryWorkflow,
     run_factor_discovery,
@@ -290,7 +289,7 @@ def discover_strategies(universe: Annotated[str, typer.Option("--universe")]) ->
 @agent_app.command("tools")
 def agent_tools() -> None:
     runtime = build_default_runtime(_settings())
-    print_json({"tools": runtime.registry().list_tools()})
+    print_json({"tools": runtime.list_tools(agent_callable_only=True)})
 
 
 @agent_app.command("call-tool")
@@ -301,11 +300,16 @@ def agent_call_tool(
     payload = _parse_json_params(params)
     if not isinstance(payload, dict):
         raise typer.BadParameter("--params must be a JSON object")
-    registry = _agent_registry()
-    result = registry.run_tool(
+    runtime = _agent_runtime()
+    result = runtime.run_tool(
         name,
         payload,
-        ToolContext(run_id="cli-call-tool", requested_by_llm=False, dry_run=False),
+        ToolContext(
+            run_id="cli-call-tool",
+            requested_by_llm=True,
+            call_mode=ToolCallMode.AUTONOMOUS_AGENT,
+            dry_run=False,
+        ),
     )
     print_json({"tool": name, "result": result})
 
@@ -336,15 +340,12 @@ def agent_ask(
 
 
 def _agent_registry() -> AgentToolRegistry:
+    return _agent_runtime().agent_registry()
+
+
+def _agent_runtime() -> AgentRuntime:
     settings = _settings()
-    lake = _data_lake()
-    return build_agent_registry(
-        data_lake=lake,
-        audit_path=settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
-        experiment_root=settings.resolved_data_dir / "experiments",
-        settings=settings,
-        sandbox=CodeSandbox(),
-    )
+    return build_default_runtime(settings)
 
 
 def _agent_store() -> ExperimentStore:

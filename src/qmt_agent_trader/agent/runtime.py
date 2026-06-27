@@ -1,40 +1,18 @@
-"""Default safe tool runtime for the research agent."""
+"""Unified runtime facade for Agent tool execution."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import pandas as pd
-
-from qmt_agent_trader.agent.llm_client import DeepSeekClient, DeepSeekToolLoopResult
-from qmt_agent_trader.agent.permissions import ToolCapability
-from qmt_agent_trader.agent.schemas import ToolContext
-from qmt_agent_trader.agent.tool_registry import ToolDefinition, ToolRegistry
-from qmt_agent_trader.agent.tools.backtest_tools import (
-    plan_sensitivity_analysis,
-    run_factor_rank_sensitivity,
-    run_factor_rank_sensitivity_report,
-)
-from qmt_agent_trader.agent.tools.research_context import get_research_context
-from qmt_agent_trader.backtest.service import (
-    compare_backtest_reports,
-    run_backtest_report,
-)
+from qmt_agent_trader.agent.llm_client import DeepSeekClient, DeepSeekTool, DeepSeekToolLoopResult
+from qmt_agent_trader.agent.permissions import ToolCallMode
+from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.broker.remote_client import RemoteQMTBrokerClient
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.ids import new_id
-from qmt_agent_trader.data.bars import load_daily_bars
-from qmt_agent_trader.data.catalog import visible_dataset_names
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.factors.service import (
-    compute_factor_to_lake,
-    validate_factor,
-    walk_forward_factor_validation,
-)
-from qmt_agent_trader.services.research_report_service import compare_research_reports
-from qmt_agent_trader.strategy.approval import read_approval_file
 
 if TYPE_CHECKING:
     from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
@@ -42,29 +20,82 @@ if TYPE_CHECKING:
 
 @dataclass
 class AgentRuntime:
+    """Single facade shared by Web, CLI, workflows, and LLM tool loops."""
+
     settings: Settings
     lake: DataLake
     reports_dir: Path
     research_reports_dir: Path
     approvals_dir: Path
     broker_client: RemoteQMTBrokerClient | None = None
-
-    def registry(self) -> ToolRegistry:
-        return build_default_tool_registry(self)
-
-    def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
-        return self.registry().call_as_llm(tool_name, **kwargs)
+    _agent_registry: AgentToolRegistry | None = field(default=None, init=False, repr=False)
 
     def agent_registry(self) -> AgentToolRegistry:
         from qmt_agent_trader.agent.sandbox import CodeSandbox
         from qmt_agent_trader.agent.tools import build_agent_registry
 
-        return build_agent_registry(
-            data_lake=self.lake,
-            audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
-            experiment_root=self.settings.resolved_data_dir / "experiments",
-            settings=self.settings,
-            sandbox=CodeSandbox(),
+        if self._agent_registry is None:
+            self._agent_registry = build_agent_registry(
+                data_lake=self.lake,
+                audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
+                experiment_root=self.settings.resolved_data_dir / "experiments",
+                settings=self.settings,
+                sandbox=CodeSandbox(),
+            )
+        return self._agent_registry
+
+    def list_tools(
+        self,
+        *,
+        permission: str | None = None,
+        agent_callable_only: bool = True,
+        call_mode: ToolCallMode = ToolCallMode.AUTONOMOUS_AGENT,
+    ) -> list[dict[str, object]]:
+        return self.agent_registry().list_tools(
+            permission=permission,
+            agent_callable_only=agent_callable_only,
+            call_mode=call_mode,
+        )
+
+    def describe_tool(self, name: str) -> ToolSpec:
+        return self.agent_registry().describe_tool(name)
+
+    def run_tool(
+        self,
+        name: str,
+        input_data: dict[str, Any],
+        context: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return self.agent_registry().run_tool(
+            name,
+            input_data,
+            context
+            or ToolContext(
+                run_id="runtime",
+                requested_by_llm=True,
+                call_mode=ToolCallMode.AUTONOMOUS_AGENT,
+                dry_run=False,
+            ),
+        )
+
+    def llm_tools(
+        self,
+        *,
+        run_id: str,
+        experiment_id: str | None = None,
+    ) -> list[DeepSeekTool]:
+        return (
+            self.agent_registry()
+            .to_legacy_registry(
+                context_factory=lambda: ToolContext(
+                    run_id=run_id,
+                    experiment_id=experiment_id,
+                    requested_by_llm=True,
+                    call_mode=ToolCallMode.AUTONOMOUS_AGENT,
+                    dry_run=False,
+                )
+            )
+            .deepseek_tools_for_llm()
         )
 
     def ask(self, prompt: str, *, max_rounds: int = 100) -> DeepSeekToolLoopResult:
@@ -92,17 +123,7 @@ class AgentRuntime:
                 },
                 {"role": "user", "content": prompt},
             ],
-            tools=(
-                self.agent_registry()
-                .to_legacy_registry(
-                    context_factory=lambda: ToolContext(
-                        run_id=run_id,
-                        requested_by_llm=True,
-                        dry_run=False,
-                    )
-                )
-                .deepseek_tools_for_llm()
-            ),
+            tools=self.llm_tools(run_id=run_id),
             max_rounds=max_rounds,
         )
 
@@ -127,448 +148,6 @@ def build_default_runtime(
     )
 
 
-def build_default_tool_registry(runtime: AgentRuntime) -> ToolRegistry:
-    registry = ToolRegistry()
-
-    registry.register(
-        ToolDefinition(
-            name="get_research_context",
-            capability=ToolCapability.READ_DATA,
-            description="Return local research capabilities, constraints, and LLM boundaries.",
-            parameters=_object_schema(
-                {"universe": {"type": "string", "description": "Comma-separated universe names."}},
-                required=["universe"],
-            ),
-            fn=get_research_context,
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="list_datasets",
-            capability=ToolCapability.READ_DATA,
-            description="List datasets in the local DuckDB/Parquet data lake.",
-            parameters=_object_schema(
-                {
-                    "layer": {
-                        "type": "string",
-                        "description": "Optional layer: raw, bronze, silver, or gold.",
-                    },
-                    "prefix": {"type": "string", "description": "Optional dataset prefix."},
-                }
-            ),
-            fn=lambda layer=None, prefix=None: list_datasets(
-                runtime.lake, layer=layer, prefix=prefix
-            ),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="summarize_daily_bars",
-            capability=ToolCapability.READ_DATA,
-            description="Summarize canonical daily bars and trade-state counts.",
-            parameters=_object_schema(
-                {
-                    "start": {"type": "string", "description": "Optional start date."},
-                    "end": {"type": "string", "description": "Optional end date."},
-                }
-            ),
-            fn=lambda start=None, end=None: summarize_daily_bars(
-                runtime.lake, start=start, end=end
-            ),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="list_factors",
-            capability=ToolCapability.READ_DATA,
-            description="List built-in daily factor names currently implemented.",
-            parameters=_object_schema({}),
-            fn=list_factors,
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="compute_factor",
-            capability=ToolCapability.WRITE_RESEARCH,
-            description="Compute a built-in factor for one date and write it to the gold layer.",
-            parameters=_object_schema(
-                {
-                    "name": {"type": "string", "description": "Factor name."},
-                    "date": {"type": "string", "description": "Target date."},
-                },
-                required=["name", "date"],
-            ),
-            fn=lambda name, date: compute_factor_to_lake(
-                runtime.lake, name=name, date=date
-            ).as_dict(),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="validate_factor",
-            capability=ToolCapability.RUN_BACKTEST,
-            description="Validate a built-in factor over a date range.",
-            parameters=_object_schema(
-                {
-                    "name": {"type": "string", "description": "Factor name."},
-                    "start": {"type": "string", "description": "Start date."},
-                    "end": {"type": "string", "description": "End date."},
-                },
-                required=["name", "start", "end"],
-            ),
-            fn=lambda name, start, end: validate_factor(
-                runtime.lake, name=name, start=start, end=end
-            ).as_dict(),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="walk_forward_factor_validation",
-            capability=ToolCapability.RUN_BACKTEST,
-            description=(
-                "Validate a built-in factor across rolling walk-forward windows using "
-                "daily IC and long-short spread. Research-only."
-            ),
-            parameters=_object_schema(
-                {
-                    "name": {"type": "string", "description": "Factor name."},
-                    "start": {"type": "string", "description": "Start date."},
-                    "end": {"type": "string", "description": "End date."},
-                    "window_days": {
-                        "type": "integer",
-                        "description": "Trading-day window length.",
-                    },
-                    "step_days": {
-                        "type": "integer",
-                        "description": "Trading-day step between windows.",
-                    },
-                    "quantile": {
-                        "type": "number",
-                        "description": "Top/bottom quantile for long-short spread.",
-                    },
-                },
-                required=["name", "start", "end"],
-            ),
-            fn=lambda name, start, end, window_days=63, step_days=63, quantile=0.20: (
-                walk_forward_factor_validation(
-                    runtime.lake,
-                    name=name,
-                    start=start,
-                    end=end,
-                    window_days=window_days,
-                    step_days=step_days,
-                    quantile=quantile,
-                ).as_dict()
-            ),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="run_backtest",
-            capability=ToolCapability.RUN_BACKTEST,
-            description="Run a daily T+1 single-symbol simulated backtest and persist a report.",
-            parameters=_object_schema(
-                {
-                    "symbol": {"type": "string", "description": "Optional symbol."},
-                    "signal_date": {"type": "string", "description": "Optional signal date."},
-                    "quantity": {"type": "integer", "description": "Order quantity."},
-                }
-            ),
-            fn=lambda symbol=None, signal_date=None, quantity=100: run_backtest_report(
-                runtime.lake,
-                reports_dir=runtime.reports_dir,
-                symbol=symbol,
-                signal_date=signal_date,
-                quantity=quantity,
-            ).as_dict(),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="compare_backtests",
-            capability=ToolCapability.RUN_BACKTEST,
-            description="Compare recent persisted backtest reports.",
-            parameters=_object_schema(
-                {"limit": {"type": "integer", "description": "Maximum number of runs."}}
-            ),
-            fn=lambda limit=10: compare_backtest_reports(runtime.reports_dir, limit=limit),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="plan_sensitivity_analysis",
-            capability=ToolCapability.RUN_BACKTEST,
-            description=(
-                "Build a robustness scenario matrix for cost, slippage, delay, top_n, "
-                "and position-cap sensitivity. This plans scenarios but does not approve "
-                "or execute live trading."
-            ),
-            parameters=_object_schema(
-                {
-                    "cost_multipliers": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Optional cost multipliers, e.g. [1, 2, 3].",
-                    },
-                    "slippage_bps": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Optional slippage assumptions in basis points.",
-                    },
-                    "execution_delay_days": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Optional execution delay values in trading days.",
-                    },
-                    "top_n": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Optional Top-N strategy parameter values.",
-                    },
-                    "max_single_position_pct": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Optional max single position caps.",
-                    },
-                }
-            ),
-            fn=plan_sensitivity_analysis,
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="run_factor_rank_sensitivity",
-            capability=ToolCapability.RUN_BACKTEST,
-            description=(
-                "Run a data-lake factor-rank robustness simulation across cost, slippage, "
-                "execution-delay, top_n, and max-position scenarios. This is research-only "
-                "and never creates approvals or order plans."
-            ),
-            parameters=_object_schema(
-                {
-                    "factor_name": {
-                        "type": "string",
-                        "description": "Built-in factor name such as momentum_20d.",
-                    },
-                    "cost_multipliers": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                    },
-                    "slippage_bps": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                    },
-                    "execution_delay_days": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
-                    "top_n": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
-                    "max_single_position_pct": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                    },
-                    "initial_cash": {
-                        "type": "number",
-                        "description": "Initial simulation cash.",
-                    },
-                },
-                required=["factor_name"],
-            ),
-            fn=lambda factor_name, cost_multipliers=None, slippage_bps=None,
-            execution_delay_days=None, top_n=None, max_single_position_pct=None,
-            initial_cash=1_000_000.0: run_factor_rank_sensitivity(
-                runtime.lake,
-                factor_name=factor_name,
-                cost_multipliers=cost_multipliers,
-                slippage_bps=slippage_bps,
-                execution_delay_days=execution_delay_days,
-                top_n=top_n,
-                max_single_position_pct=max_single_position_pct,
-                initial_cash=initial_cash,
-            ),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="run_factor_rank_sensitivity_report",
-            capability=ToolCapability.WRITE_RESEARCH,
-            description=(
-                "Run factor-rank robustness analysis and persist an immutable research "
-                "evidence package under reports/research. The artifact is research-only, "
-                "not an approval and not an order plan."
-            ),
-            parameters=_object_schema(
-                {
-                    "factor_name": {
-                        "type": "string",
-                        "description": "Built-in factor name such as momentum_20d.",
-                    },
-                    "cost_multipliers": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                    },
-                    "slippage_bps": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                    },
-                    "execution_delay_days": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
-                    "top_n": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
-                    "max_single_position_pct": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                    },
-                    "initial_cash": {
-                        "type": "number",
-                        "description": "Initial simulation cash.",
-                    },
-                    "agent_notes": {
-                        "type": "string",
-                        "description": "Optional concise agent interpretation of the result.",
-                    },
-                    "infrastructure_requests": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Optional missing validation infrastructure requested by the agent."
-                        ),
-                    },
-                },
-                required=["factor_name"],
-            ),
-            fn=lambda factor_name, cost_multipliers=None, slippage_bps=None,
-            execution_delay_days=None, top_n=None, max_single_position_pct=None,
-            initial_cash=1_000_000.0, agent_notes=None,
-            infrastructure_requests=None: run_factor_rank_sensitivity_report(
-                runtime.lake,
-                runtime.research_reports_dir,
-                factor_name=factor_name,
-                cost_multipliers=cost_multipliers,
-                slippage_bps=slippage_bps,
-                execution_delay_days=execution_delay_days,
-                top_n=top_n,
-                max_single_position_pct=max_single_position_pct,
-                initial_cash=initial_cash,
-                agent_notes=agent_notes,
-                infrastructure_requests=infrastructure_requests,
-            ),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="compare_research_reports",
-            capability=ToolCapability.READ_DATA,
-            description="Compare recent persisted research evidence packages.",
-            parameters=_object_schema(
-                {"limit": {"type": "integer", "description": "Maximum number of reports."}}
-            ),
-            fn=lambda limit=10: compare_research_reports(
-                runtime.research_reports_dir, limit=limit
-            ),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="list_strategy_approvals",
-            capability=ToolCapability.READ_DATA,
-            description="List local strategy approval files and paper/live flags.",
-            parameters=_object_schema({}),
-            fn=lambda: list_strategy_approvals(runtime.approvals_dir),
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="broker_health",
-            capability=ToolCapability.READ_DATA,
-            description="Check the configured Windows QMT Gateway health endpoint if available.",
-            parameters=_object_schema({}),
-            fn=lambda: broker_health(runtime.broker_client),
-        )
-    )
-    return registry
-
-
-def list_datasets(
-    lake: DataLake, *, layer: str | None = None, prefix: str | None = None
-) -> dict[str, object]:
-    layers = [layer] if layer else ["raw", "bronze", "silver", "gold"]
-    return {
-        "layers": {
-            item: visible_dataset_names(item, lake.list_dataset_names(item, prefix=prefix))
-            for item in layers
-        }
-    }
-
-
-def summarize_daily_bars(
-    lake: DataLake, *, start: str | None = None, end: str | None = None
-) -> dict[str, object]:
-    bars = load_daily_bars(lake, start=start, end=end)
-    if bars.empty:
-        return {"status": "empty", "rows": 0}
-    return {
-        "status": "ok",
-        "rows": len(bars),
-        "symbols": int(bars["symbol"].nunique()),
-        "start": f"{pd.to_datetime(bars['trade_date'].min()).date():%Y%m%d}",
-        "end": f"{pd.to_datetime(bars['trade_date'].max()).date():%Y%m%d}",
-        "trade_state_counts": {
-            "suspended": int(bars["suspended"].sum()),
-            "limit_up": int(bars["limit_up"].sum()),
-            "limit_down": int(bars["limit_down"].sum()),
-            "st": int(bars["st"].sum()),
-        },
-    }
-
-
-def list_factors() -> dict[str, object]:
-    return {
-        "factors": [
-            "momentum_20d",
-            "momentum_60d",
-            "reversal_5d",
-            "volatility_20d",
-            "turnover_20d",
-            "amount_zscore_20d",
-        ]
-    }
-
-
-def list_strategy_approvals(directory: Path) -> dict[str, object]:
-    if not directory.exists():
-        return {"approvals": []}
-    approvals = []
-    for path in sorted(directory.glob("*.approval.yaml")):
-        approval = read_approval_file(path)
-        approvals.append(
-            {
-                "strategy_id": approval.strategy_id,
-                "strategy_version": approval.strategy_version,
-                "paper_trading_allowed": approval.paper_trading_allowed,
-                "live_trading_allowed": approval.live_trading_allowed,
-                "path": str(path),
-            }
-        )
-    return {"approvals": approvals}
-
-
-def broker_health(client: RemoteQMTBrokerClient | None) -> dict[str, object]:
-    if client is None:
-        return {"configured": False, "status": "unavailable"}
-    try:
-        return {"configured": True, "response": client.health()}
-    except Exception as exc:
-        return {"configured": True, "status": "error", "error": str(exc)}
-
-
 def _optional_broker_client(settings: Settings) -> RemoteQMTBrokerClient | None:
     if settings.qmt_gateway_api_key is None or settings.qmt_gateway_hmac_secret is None:
         return None
@@ -577,14 +156,3 @@ def _optional_broker_client(settings: Settings) -> RemoteQMTBrokerClient | None:
         api_key=settings.qmt_gateway_api_key.get_secret_value(),
         hmac_secret=settings.qmt_gateway_hmac_secret.get_secret_value(),
     )
-
-
-def _object_schema(
-    properties: dict[str, dict[str, Any]], *, required: list[str] | None = None
-) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required or [],
-        "additionalProperties": False,
-    }

@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
+from qmt_agent_trader.agent.permissions import ToolCallMode
 from qmt_agent_trader.agent.schemas import ExperimentRecord, ExperimentStatus, ToolContext
 from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
 from qmt_agent_trader.core.ids import new_id
@@ -160,7 +161,8 @@ class SelfBootstrapWorkflow:
                         ToolContext(
                             run_id=run_id,
                             experiment_id=exp.experiment_id,
-                            requested_by_llm=False,  # bypass for workflow
+                            requested_by_llm=False,
+                            call_mode=ToolCallMode.TRUSTED_INTERNAL_WORKFLOW,
                         ),
                     )
                     proposal_path = proposal_result.get("proposal_path", "")

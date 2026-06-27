@@ -10,50 +10,18 @@ if TYPE_CHECKING:
 
 from qmt_agent_trader.agent.audit import AuditLogger
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
-from qmt_agent_trader.agent.permissions import PermissionLevel
+from qmt_agent_trader.agent.permissions import PermissionLevel, ToolCallMode
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import tool
-from qmt_agent_trader.agent.tools.basic_tools import (
-    get_current_time_tool,
-    run_shell_command_tool,
-)
-from qmt_agent_trader.agent.tools.experiment_tools import (
-    log_experiment_event_tool,
-    search_experiments_tool,
-)
-from qmt_agent_trader.agent.tools.factor_tools import (
-    create_factor_spec_tool,
-    evaluate_factor_candidate_tool,
-    generate_factor_code_tool,
-    list_saved_factors_tool,
-    run_factor_static_checks_tool,
-    save_factor_tool,
-)
-from qmt_agent_trader.agent.tools.meta_tools import (
-    create_tool_spec_tool,
-    detect_tool_gap_tool,
-    generate_tool_code_tool,
-    generate_tool_tests_tool,
-    propose_tool_registration_tool,
-    run_tool_sandbox_tests_tool,
-    score_tool_candidate_tool,
-)
-from qmt_agent_trader.agent.tools.query_tools import (
-    list_data_catalog_tool,
-    query_bars_tool,
-    query_universe_tool,
-)
-from qmt_agent_trader.agent.tools.remote_data_tools import (
-    run_remote_data_update_tool,
-)
-from qmt_agent_trader.agent.tools.strategy_tools import (
-    create_strategy_spec_tool,
-    generate_research_report_tool,
-    generate_strategy_code_tool,
-    list_strategy_candidates_tool,
-    run_backtest_tool,
-)
+from qmt_agent_trader.agent.tools.basic_tools import build_basic_tools
+from qmt_agent_trader.agent.tools.experiment_tools import build_experiment_tools
+from qmt_agent_trader.agent.tools.factor_tools import build_factor_tools
+from qmt_agent_trader.agent.tools.meta_tools import build_meta_tools
+from qmt_agent_trader.agent.tools.query_tools import build_query_tools
+from qmt_agent_trader.agent.tools.remote_data_tools import build_remote_data_tools
+from qmt_agent_trader.agent.tools.strategy_tools import build_strategy_tools
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
 
@@ -70,36 +38,31 @@ def build_agent_registry(
 ) -> AgentToolRegistry:
     """Assemble the full AgentToolRegistry with all 16+ MVP tools wired."""
     from qmt_agent_trader.agent.tool_registry import AgentToolRegistry as _ATR
-    from qmt_agent_trader.agent.tools import (
-        basic_tools,
-        experiment_tools,
-        factor_tools,
-        meta_tools,
-        query_tools,
-        remote_data_tools,
-        strategy_tools,
-    )
 
     resolved_settings = settings or get_settings()
     sb = sandbox or CodeSandbox()
     store = ExperimentStore(experiment_root)
     audit = AuditLogger(audit_path)
-
-    # Wire singletons
-    experiment_tools.set_experiment_store(store)
-    query_tools.set_data_lake(data_lake)
-    basic_tools.wire(settings=resolved_settings)
-    remote_data_tools.wire(data_lake=data_lake, settings=resolved_settings)
-    factor_tools.wire(sb, store, data_lake)
-    strategy_tools.wire(sb, store, data_lake)
-    meta_tools.wire(sb, store)
+    deps = AgentToolDependencies(
+        settings=resolved_settings,
+        data_lake=data_lake,
+        sandbox=sb,
+        experiment_store=store,
+        audit_logger=audit,
+    )
 
     registry = _ATR(audit_logger=audit)
 
     # Build list_tools / describe_tools inline (they need the registry ref)
     def _list_tools(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
         permission = input_data.get("permission_level")
-        return {"tools": registry.list_tools(permission=permission)}
+        return {
+            "tools": registry.list_tools(
+                permission=permission,
+                agent_callable_only=True,
+                call_mode=context.call_mode or ToolCallMode.AUTONOMOUS_AGENT,
+            )
+        }
 
     def _describe_tool(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
         name = input_data.get("name", "")
@@ -146,37 +109,13 @@ def build_agent_registry(
     )
 
     registry.register_all(
-        # Experiment tools
-        log_experiment_event_tool,
-        search_experiments_tool,
-        # Data/query tools
-        list_data_catalog_tool,
-        query_universe_tool,
-        query_bars_tool,
-        run_remote_data_update_tool,
-        run_shell_command_tool,
-        get_current_time_tool,
-        # Factor tools
-        list_saved_factors_tool,
-        create_factor_spec_tool,
-        generate_factor_code_tool,
-        run_factor_static_checks_tool,
-        save_factor_tool,
-        evaluate_factor_candidate_tool,
-        # Strategy tools
-        create_strategy_spec_tool,
-        generate_strategy_code_tool,
-        list_strategy_candidates_tool,
-        run_backtest_tool,
-        generate_research_report_tool,
-        # Meta tools
-        detect_tool_gap_tool,
-        create_tool_spec_tool,
-        generate_tool_code_tool,
-        generate_tool_tests_tool,
-        run_tool_sandbox_tests_tool,
-        score_tool_candidate_tool,
-        propose_tool_registration_tool,
+        *build_experiment_tools(deps),
+        *build_query_tools(deps),
+        *build_remote_data_tools(deps),
+        *build_basic_tools(deps),
+        *build_factor_tools(deps),
+        *build_strategy_tools(deps),
+        *build_meta_tools(deps),
     )
     if resolved_settings.mcp_enabled:
         from qmt_agent_trader.agent.mcp_client import build_mcp_tools

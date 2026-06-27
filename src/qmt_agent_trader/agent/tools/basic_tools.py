@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -10,10 +12,12 @@ from zoneinfo import ZoneInfo
 
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import Settings, get_settings
 
 _settings: Settings | None = None
+_settings_var: ContextVar[Settings | None] = ContextVar("basic_tool_settings", default=None)
 
 ALLOWED_COMMANDS = {
     "date",
@@ -37,7 +41,20 @@ def wire(*, settings: Settings | None = None) -> None:
 
 
 def _get_settings() -> Settings:
-    return _settings or get_settings()
+    return _settings_var.get() or _settings or get_settings()
+
+
+def _with_deps(
+    deps: AgentToolDependencies,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    token = _settings_var.set(deps.settings)
+    try:
+        return fn(input_data, context)
+    finally:
+        _settings_var.reset(token)
 
 
 def _run_shell_command(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
@@ -211,3 +228,20 @@ get_current_time_tool: AgentTool = tool(
     ),
     fn=_get_current_time,
 )
+
+
+def build_basic_tools(deps: AgentToolDependencies) -> list[AgentTool]:
+    return [
+        tool(
+            run_shell_command_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _run_shell_command, input_data, context
+            ),
+        ),
+        tool(
+            get_current_time_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _get_current_time, input_data, context
+            ),
+        ),
+    ]

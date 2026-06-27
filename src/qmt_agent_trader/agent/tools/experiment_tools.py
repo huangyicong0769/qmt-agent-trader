@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 from qmt_agent_trader.agent.errors import ExperimentNotFoundError
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 
 _store: ExperimentStore | None = None
+_store_var: ContextVar[ExperimentStore | None] = ContextVar(
+    "experiment_tool_store",
+    default=None,
+)
 
 
 def set_experiment_store(store: ExperimentStore) -> None:
@@ -19,9 +26,23 @@ def set_experiment_store(store: ExperimentStore) -> None:
 
 
 def _get_store() -> ExperimentStore:
-    if _store is None:
+    store = _store_var.get() or _store
+    if store is None:
         raise RuntimeError("experiment store not wired")
-    return _store
+    return store
+
+
+def _with_deps(
+    deps: AgentToolDependencies,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    token = _store_var.set(deps.experiment_store)
+    try:
+        return fn(input_data, context)
+    finally:
+        _store_var.reset(token)
 
 
 # ── log_experiment_event ─────────────────────────────────────────────────────
@@ -90,3 +111,20 @@ search_experiments_tool: AgentTool = tool(
     ),
     fn=_search_experiments,
 )
+
+
+def build_experiment_tools(deps: AgentToolDependencies) -> list[AgentTool]:
+    return [
+        tool(
+            log_experiment_event_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _log_experiment_event, input_data, context
+            ),
+        ),
+        tool(
+            search_experiments_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _search_experiments, input_data, context
+            ),
+        ),
+    ]

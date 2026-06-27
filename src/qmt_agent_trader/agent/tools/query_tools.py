@@ -6,11 +6,14 @@ return `NOT_AVAILABLE` rather than crashing the Agent loop.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import date, datetime
 from typing import Any
 
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ
 from qmt_agent_trader.data.bars import load_daily_bars
@@ -18,6 +21,7 @@ from qmt_agent_trader.data.catalog import visible_dataset_names
 from qmt_agent_trader.data.storage import DataLake
 
 _lake: DataLake | None = None
+_lake_var: ContextVar[DataLake | None] = ContextVar("query_tool_lake", default=None)
 
 
 def set_data_lake(lake: DataLake) -> None:
@@ -26,7 +30,20 @@ def set_data_lake(lake: DataLake) -> None:
 
 
 def _get_lake() -> DataLake | None:
-    return _lake
+    return _lake_var.get() or _lake
+
+
+def _with_deps(
+    deps: AgentToolDependencies,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    token = _lake_var.set(deps.data_lake)
+    try:
+        return fn(input_data, context)
+    finally:
+        _lake_var.reset(token)
 
 
 # ── list_data_catalog ────────────────────────────────────────────────────────
@@ -260,3 +277,26 @@ query_fundamentals_pit_tool: AgentTool = tool(
     ),
     fn=_query_fundamentals_pit,
 )
+
+
+def build_query_tools(deps: AgentToolDependencies) -> list[AgentTool]:
+    return [
+        tool(
+            list_data_catalog_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _list_data_catalog, input_data, context
+            ),
+        ),
+        tool(
+            query_universe_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _query_universe, input_data, context
+            ),
+        ),
+        tool(
+            query_bars_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _query_bars, input_data, context
+            ),
+        ),
+    ]

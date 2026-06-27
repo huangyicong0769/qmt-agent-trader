@@ -8,6 +8,8 @@ directly into the formal registry.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -15,17 +17,39 @@ from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
+_sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("meta_tool_sandbox", default=None)
+_store_var: ContextVar[ExperimentStore | None] = ContextVar("meta_tool_store", default=None)
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore) -> None:
     global _sandbox, _store
     _sandbox = sandbox
     _store = store
+
+
+def _get_sandbox() -> CodeSandbox | None:
+    return _sandbox_var.get() or _sandbox
+
+
+def _with_deps(
+    deps: AgentToolDependencies,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    sandbox_token = _sandbox_var.set(deps.sandbox)
+    store_token = _store_var.set(deps.experiment_store)
+    try:
+        return fn(input_data, context)
+    finally:
+        _store_var.reset(store_token)
+        _sandbox_var.reset(sandbox_token)
 
 
 # ── detect_tool_gap ──────────────────────────────────────────────────────────
@@ -140,7 +164,7 @@ def run(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     return {{"status": "stub", "tool": "{safe_name}"}}
 '''
 
-    sb = _sandbox
+    sb = _get_sandbox()
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
 
@@ -200,7 +224,7 @@ def test_audit_trail():
     assert isinstance(result, dict)
 '''
 
-    sb = _sandbox
+    sb = _get_sandbox()
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
 
@@ -231,7 +255,7 @@ def _run_tool_sandbox_tests(input_data: dict[str, Any], context: ToolContext) ->
     tests_path = input_data.get("tests_path", "")
     test_path = Path(tests_path) if tests_path else Path(code_path)
 
-    sb = _sandbox
+    sb = _get_sandbox()
     if sb is None:
         return {"status": "FAILED", "safety_issues": ["sandbox not wired"]}
 
@@ -315,7 +339,7 @@ def _propose_tool_registration(input_data: dict[str, Any], context: ToolContext)
         }
 
     # Write proposal
-    sb = _sandbox
+    sb = _get_sandbox()
     proposal_root = sb.generated_root / "tools" if sb else Path("proposals")
     proposal_root.mkdir(parents=True, exist_ok=True)
     proposal_path = proposal_root / f"tool_proposal_{candidate_id}.json"
@@ -348,3 +372,29 @@ propose_tool_registration_tool: AgentTool = tool(
     ),
     fn=_propose_tool_registration,
 )
+
+
+def build_meta_tools(deps: AgentToolDependencies) -> list[AgentTool]:
+    definitions: list[
+        tuple[AgentTool, Callable[[dict[str, Any], ToolContext], dict[str, Any]]]
+    ] = [
+        (detect_tool_gap_tool, _detect_tool_gap),
+        (create_tool_spec_tool, _create_tool_spec),
+        (generate_tool_code_tool, _generate_tool_code),
+        (generate_tool_tests_tool, _generate_tool_tests),
+        (run_tool_sandbox_tests_tool, _run_tool_sandbox_tests),
+        (score_tool_candidate_tool, _score_tool_candidate),
+        (propose_tool_registration_tool, _propose_tool_registration),
+    ]
+    return [_bind_tool(deps, existing, fn) for existing, fn in definitions]
+
+
+def _bind_tool(
+    deps: AgentToolDependencies,
+    existing: AgentTool,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+) -> AgentTool:
+    return tool(
+        existing.spec,
+        fn=lambda input_data, context: _with_deps(deps, fn, input_data, context),
+    )
