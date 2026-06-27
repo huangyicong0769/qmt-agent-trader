@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -180,6 +181,23 @@ class AgentOrchestrator:
                 f"Recommended tools: {', '.join(routing.required_tools[:6])}. "
                 f"Rationale: {routing.rationale}"
             )
+        if _requires_fresh_evidence(message):
+            routing_hint += (
+                "\nFresh evidence is likely needed for this request. Prefer existing "
+                "conversation/tool evidence only when it directly answers the current "
+                "question and is still temporally current; otherwise call relevant tools "
+                "and ground the answer in the new tool results."
+            )
+        if _is_trade_decision_request(message):
+            routing_hint += (
+                "\nThis is a trade/risk decision request. Use current market data plus "
+                "factor, backtest, or experiment evidence. If the context already has "
+                "that evidence and it is still current, cite it explicitly; otherwise "
+                "call tools such as query_bars, list_saved_factors, search_experiments, "
+                "run_backtest, or evaluate_factor_candidate. If you give a buy, sell, "
+                "hold, reduce, or add-position view, state clearly that it is a "
+                "research-only judgement and not a live trading instruction."
+            )
 
         system_msg = (
             "You are the QMT research agent. Use tools for local facts and for "
@@ -192,13 +210,42 @@ class AgentOrchestrator:
             "enough evidence to answer; avoid repeating the same tool with the same "
             "arguments. If a tool returns NOT_AVAILABLE or an error, either choose a "
             "different relevant tool or report the blocker clearly. Always respond in "
-            "Chinese. Typical factor loop: list_data_catalog, query_universe/query_bars, "
-            "create_factor_spec, generate_factor_code, run_factor_static_checks, "
+            "Chinese. Typical factor loop: list_saved_factors, list_data_catalog, "
+            "query_universe/query_bars, create_factor_spec, generate_factor_code, "
+            "run_factor_static_checks, "
             "save_factor, evaluate_factor_candidate, generate_research_report. Typical strategy "
-            "loop: search_experiments, create_strategy_spec, generate_strategy_code, "
+            "loop: search_experiments, list_strategy_candidates, create_strategy_spec, "
+            "generate_strategy_code, "
             "run_backtest, generate_research_report. Typical self-bootstrap loop: "
             "search_experiments, detect_tool_gap, create_tool_spec, generate_tool_code, "
-            "generate_tool_tests, run_tool_sandbox_tests, score_tool_candidate."
+            "generate_tool_tests, run_tool_sandbox_tests, score_tool_candidate. "
+            "When a tool returns actual_data_end or data_freshness, distinguish the "
+            "local latest data date from the requested end date and from the latest "
+            "market trading day; do not call data complete through today when "
+            "data_freshness is stale_vs_requested_end. A remote data dry_run with "
+            "status=planned is only a plan and does not mean data was fetched or gaps "
+            "were proven harmless. For current position, buy/sell, next-trading-day, "
+            "or risk-decision questions, make fresh tool calls for latest bars and "
+            "relevant factor/backtest evidence before answering, even if prior "
+            "conversation history contains recent-looking data unless that history already "
+            "contains the exact current evidence you need. When the user asks to retry, "
+            "retest, rerun, verify again, or check whether a previous tool problem was fixed, "
+            "prefer fresh tool calls unless prior tool results already prove the answer. "
+            "For buy, sell, hold, position, and risk-decision answers, do not infer current "
+            "factor signals from memory alone; use or cite fresh market data plus factor, "
+            "backtest, or experiment evidence, and label the conclusion as research-only "
+            "rather than a live order. Do not claim that code or tools were fixed unless "
+            "you actually generated or changed code, or a tool result explicitly reports "
+            "an update. If you only changed tool arguments or reran checks, describe it "
+            "as rerun/verified. For remote data tools, start_date/end_date are request "
+            "bounds; actual_data_end or coverage_end_date is the local data coverage "
+            "date. Do not say local data covers a non-trading requested_end_date unless "
+            "actual_data_end also equals that date. If a remote data plan "
+            "returns requires_trade_calendar_validation=true or "
+            "missing_ranges_are_calendar_days=true, do not describe those ranges as "
+            "weekends or holidays unless another tool result proves that. Treat "
+            "CALENDAR_VALIDATION_REQUIRED as an explicit blocker for any claim that "
+            "data gaps are harmless."
             + routing_hint
         )
 
@@ -440,6 +487,35 @@ def _conversation_history(
         natural_messages = natural_messages[:-1]
 
     return natural_messages[-max_turns * 2 :]
+
+
+def _requires_fresh_evidence(message: str) -> bool:
+    normalized = message.strip().lower()
+    if not normalized:
+        return False
+    patterns = [
+        r"再试试",
+        r"重新(验证|测试|检查|跑|运行|评估)",
+        r"(修复|改完|修好|好了).{0,12}(再|重新|试|验证|测试|检查)",
+        r"(tool|工具).{0,12}(出错|错误|修复|问题)",
+        r"(retry|retest|rerun|run again|try again|verify again|check again)",
+        r"(buy|sell|position|risk|next trading day|today|tomorrow)",
+        r"(买|卖|仓位|持仓|风险|下个交易日|今天|明天)",
+    ]
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_trade_decision_request(message: str) -> bool:
+    normalized = message.strip().lower()
+    if not normalized:
+        return False
+    return any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in [
+            r"(买|卖|减仓|加仓|清仓|持有|持仓|仓位|下个交易日|交易决策)",
+            r"(buy|sell|hold|reduce|add position|position|trade decision)",
+        ]
+    )
 
 
 def _result_id(result: Any) -> str:
