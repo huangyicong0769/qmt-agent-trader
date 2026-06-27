@@ -16,9 +16,9 @@ from fastapi.responses import StreamingResponse
 
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
 from qmt_agent_trader.agent.router import agent_router
-from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.web.event_bus import AgentEvent, AgentEventType, event_bus
+from qmt_agent_trader.web.runtime import get_agent_runtime
 from qmt_agent_trader.web.schemas import (
     ChatMessage,
     ChatSession,
@@ -38,7 +38,7 @@ _orchestrator: AgentOrchestrator | None = None
 def _get_orchestrator() -> AgentOrchestrator:
     global _orchestrator
     if _orchestrator is None:
-        _orchestrator = AgentOrchestrator(settings=get_settings())
+        _orchestrator = AgentOrchestrator(runtime=get_agent_runtime())
     return _orchestrator
 
 

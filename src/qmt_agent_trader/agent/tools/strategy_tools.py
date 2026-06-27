@@ -4,6 +4,8 @@ and report tool: generate_research_report."""
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import StrategySpec, ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.data.storage import DataLake
@@ -22,6 +25,9 @@ from qmt_agent_trader.factors.registry import FactorRegistry
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
 _lake: DataLake | None = None
+_sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("strategy_tool_sandbox", default=None)
+_store_var: ContextVar[ExperimentStore | None] = ContextVar("strategy_tool_store", default=None)
+_lake_var: ContextVar[DataLake | None] = ContextVar("strategy_tool_lake", default=None)
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
@@ -29,6 +35,35 @@ def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
     _sandbox = sandbox
     _store = store
     _lake = lake
+
+
+def _get_sandbox() -> CodeSandbox | None:
+    return _sandbox_var.get() or _sandbox
+
+
+def _get_store() -> ExperimentStore | None:
+    return _store_var.get() or _store
+
+
+def _get_lake() -> DataLake | None:
+    return _lake_var.get() or _lake
+
+
+def _with_deps(
+    deps: AgentToolDependencies,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    sandbox_token = _sandbox_var.set(deps.sandbox)
+    store_token = _store_var.set(deps.experiment_store)
+    lake_token = _lake_var.set(deps.data_lake)
+    try:
+        return fn(input_data, context)
+    finally:
+        _lake_var.reset(lake_token)
+        _store_var.reset(store_token)
+        _sandbox_var.reset(sandbox_token)
 
 
 # ── create_strategy_spec ────────────────────────────────────────────────────
@@ -96,7 +131,7 @@ def _generate_strategy_code(input_data: dict[str, Any], context: ToolContext) ->
     strategy_code = _render_strategy_code(name, factors, top_n)
     test_code = _render_strategy_test_code(name)
 
-    sb = _sandbox
+    sb = _get_sandbox()
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
 
@@ -134,7 +169,7 @@ generate_strategy_code_tool: AgentTool = tool(
 
 
 def _list_strategy_candidates(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
-    sb = _sandbox
+    sb = _get_sandbox()
     if sb is None:
         return {"status": "NOT_IMPLEMENTED", "message": "sandbox not wired"}
 
@@ -197,7 +232,7 @@ list_strategy_candidates_tool: AgentTool = tool(
 
 
 def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
-    lake = _lake
+    lake = _get_lake()
     if lake is None:
         return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
 
@@ -411,12 +446,12 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
     run_ids = input_data.get("run_ids", [])
     sections = input_data.get("include_sections", ["summary", "metrics"])
 
-    sb = _sandbox
+    sb = _get_sandbox()
     reports_root = sb.generated_root / "reports" if sb else Path("reports/research")
     reports_root.mkdir(parents=True, exist_ok=True)
     report_path = reports_root / f"{exp_id}.md"
 
-    store = _store
+    store = _get_store()
     experiment_meta = {}
     if store:
         try:
@@ -463,6 +498,30 @@ generate_research_report_tool: AgentTool = tool(
     ),
     fn=_generate_research_report,
 )
+
+
+def build_strategy_tools(deps: AgentToolDependencies) -> list[AgentTool]:
+    definitions: list[
+        tuple[AgentTool, Callable[[dict[str, Any], ToolContext], dict[str, Any]]]
+    ] = [
+        (create_strategy_spec_tool, _create_strategy_spec),
+        (generate_strategy_code_tool, _generate_strategy_code),
+        (list_strategy_candidates_tool, _list_strategy_candidates),
+        (run_backtest_tool, _run_backtest),
+        (generate_research_report_tool, _generate_research_report),
+    ]
+    return [_bind_tool(deps, existing, fn) for existing, fn in definitions]
+
+
+def _bind_tool(
+    deps: AgentToolDependencies,
+    existing: AgentTool,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+) -> AgentTool:
+    return tool(
+        existing.spec,
+        fn=lambda input_data, context: _with_deps(deps, fn, input_data, context),
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ from typing import Any
 
 from nicegui import ui
 
-from qmt_agent_trader.web.routes.tools import get_registry
+from qmt_agent_trader.web.runtime import get_agent_runtime
 from qmt_agent_trader.web.ui.layout import shell
 
 
@@ -17,7 +17,7 @@ def register() -> None:
         shell("Tools")
         ui.label("Agent Tools").classes("text-2xl font-semibold")
         try:
-            tools = get_registry().list_tools()
+            tools = get_agent_runtime().list_tools(agent_callable_only=True)
         except Exception as exc:
             ui.markdown(f"Tool registry unavailable: `{exc}`")
             return

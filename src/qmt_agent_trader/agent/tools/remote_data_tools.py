@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
@@ -21,6 +23,15 @@ from qmt_agent_trader.services.data_update_service import (
 _lake: DataLake | None = None
 _settings: Settings | None = None
 _client_factory: Callable[[], TushareClient] | None = None
+_lake_var: ContextVar[DataLake | None] = ContextVar("remote_data_tool_lake", default=None)
+_settings_var: ContextVar[Settings | None] = ContextVar(
+    "remote_data_tool_settings",
+    default=None,
+)
+_client_factory_var: ContextVar[Callable[[], TushareClient] | None] = ContextVar(
+    "remote_data_tool_client_factory",
+    default=None,
+)
 
 
 def wire(
@@ -36,21 +47,39 @@ def wire(
 
 
 def _get_lake() -> DataLake | None:
-    return _lake
+    return _lake_var.get() or _lake
 
 
 def _get_settings() -> Settings:
-    return _settings or get_settings()
+    return _settings_var.get() or _settings or get_settings()
 
 
 def _build_client(settings: Settings) -> TushareClient:
-    if _client_factory is not None:
-        return _client_factory()
+    client_factory = _client_factory_var.get() or _client_factory
+    if client_factory is not None:
+        return client_factory()
     token = settings.tushare_token.get_secret_value() if settings.tushare_token else None
     return TushareClient(
         token=token,
         timeout_seconds=settings.remote_data_http_timeout_seconds,
     )
+
+
+def _with_deps(
+    deps: AgentToolDependencies,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    lake_token = _lake_var.set(deps.data_lake)
+    settings_token = _settings_var.set(deps.settings)
+    client_factory_token = _client_factory_var.set(None)
+    try:
+        return fn(input_data, context)
+    finally:
+        _client_factory_var.reset(client_factory_token)
+        _settings_var.reset(settings_token)
+        _lake_var.reset(lake_token)
 
 
 def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
@@ -472,3 +501,14 @@ run_remote_data_update_tool: AgentTool = tool(
     ),
     fn=_run_remote_data_update,
 )
+
+
+def build_remote_data_tools(deps: AgentToolDependencies) -> list[AgentTool]:
+    return [
+        tool(
+            run_remote_data_update_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _run_remote_data_update, input_data, context
+            ),
+        )
+    ]

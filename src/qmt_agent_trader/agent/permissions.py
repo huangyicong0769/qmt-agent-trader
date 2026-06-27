@@ -59,8 +59,12 @@ class PermissionLevel(StrEnum):
     FORBIDDEN_TO_LLM = "FORBIDDEN_TO_LLM"
 
 
-# LLM may call these levels directly.
-_LLM_CALLABLE: frozenset[PermissionLevel] = frozenset(
+class ToolCallMode(StrEnum):
+    AUTONOMOUS_AGENT = "AUTONOMOUS_AGENT"
+    TRUSTED_INTERNAL_WORKFLOW = "TRUSTED_INTERNAL_WORKFLOW"
+
+
+_AUTONOMOUS_CALLABLE: frozenset[PermissionLevel] = frozenset(
     {
         PermissionLevel.READ_ONLY,
         PermissionLevel.RESEARCH_WRITE,
@@ -70,39 +74,56 @@ _LLM_CALLABLE: frozenset[PermissionLevel] = frozenset(
 )
 
 
+_TRUSTED_INTERNAL_CALLABLE: frozenset[PermissionLevel] = frozenset(
+    {*_AUTONOMOUS_CALLABLE, PermissionLevel.APPROVAL_REQUIRED}
+)
+
+
+def can_call_tool(permission: PermissionLevel, mode: ToolCallMode) -> bool:
+    """Return True when a runtime call mode may execute this permission level."""
+    if permission == PermissionLevel.FORBIDDEN_TO_LLM:
+        return False
+    if mode == ToolCallMode.TRUSTED_INTERNAL_WORKFLOW:
+        return permission in _TRUSTED_INTERNAL_CALLABLE
+    return permission in _AUTONOMOUS_CALLABLE
+
+
 def can_llm_call(permission: PermissionLevel) -> bool:
-    """Return True if the LLM is allowed to call a tool at this permission level."""
-    return permission in _LLM_CALLABLE
+    """Backward-compatible alias for autonomous-agent callable tools."""
+    return can_call_tool(permission, ToolCallMode.AUTONOMOUS_AGENT)
 
 
 def require_permission(
     tool_permission: PermissionLevel,
     *,
     requested_by_llm: bool = True,
+    call_mode: ToolCallMode | None = None,
     tool_name: str | None = None,
 ) -> None:
     """Raise `PermissionDeniedError` if the caller is not authorised.
 
-    LLM callers are restricted to `_LLM_CALLABLE` levels.
-    Human / internal callers may bypass the LLM restriction but must still
-    obey the APPROVAL_REQUIRED / FORBIDDEN_TO_LLM semantics when appropriate.
+    Web, chat, and LLM tool calls are all autonomous-agent calls. Only explicit
+    internal workflows may run approval-required review tools.
     """
     label = f" ({tool_name})" if tool_name else ""
-
+    mode = call_mode or (
+        ToolCallMode.AUTONOMOUS_AGENT
+        if requested_by_llm
+        else ToolCallMode.TRUSTED_INTERNAL_WORKFLOW
+    )
+    if can_call_tool(tool_permission, mode):
+        return
     if tool_permission == PermissionLevel.FORBIDDEN_TO_LLM:
         raise PermissionDeniedError(
-            f"tool{label} is FORBIDDEN_TO_LLM and cannot be invoked at all"
+            f"tool{label} is FORBIDDEN_TO_LLM and cannot be invoked by the agent runtime"
         )
-
-    if requested_by_llm:
-        if tool_permission == PermissionLevel.APPROVAL_REQUIRED:
-            raise PermissionDeniedError(
-                f"tool{label} requires human approval and cannot be called by LLM"
-            )
-        if tool_permission not in _LLM_CALLABLE:
-            raise PermissionDeniedError(
-                f"tool{label} at level {tool_permission.value} is not allowed for LLM"
-            )
+    if tool_permission == PermissionLevel.APPROVAL_REQUIRED:
+        raise PermissionDeniedError(
+            f"tool{label} requires trusted internal workflow context"
+        )
+    raise PermissionDeniedError(
+        f"tool{label} at level {tool_permission.value} is not allowed for {mode.value}"
+    )
 
 
 # ── Bridge: map new PermissionLevel → old ToolCapability (best-effort) ───────

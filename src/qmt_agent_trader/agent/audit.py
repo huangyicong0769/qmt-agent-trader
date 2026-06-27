@@ -17,6 +17,7 @@ class AuditEntry:
     tool_name: str
     permission: str
     requested_by_llm: bool
+    call_mode: str
     input_hash: str
     output_hash: str
     status: str  # "ok" | "permission_denied" | "error"
@@ -38,6 +39,7 @@ class AuditLogger:
         experiment_id: str | None = None,
         permission: str = "READ_ONLY",
         requested_by_llm: bool = True,
+        call_mode: str = "AUTONOMOUS_AGENT",
         input_data: dict[str, Any] | None = None,
         output_data: dict[str, Any] | None = None,
         status: str = "ok",
@@ -51,6 +53,7 @@ class AuditLogger:
             tool_name=tool_name,
             permission=permission,
             requested_by_llm=requested_by_llm,
+            call_mode=call_mode,
             input_hash=self._safe_hash(input_data),
             output_hash=self._safe_hash(output_data),
             status=status,
@@ -79,6 +82,7 @@ class AuditLogger:
             "tool_name": entry.tool_name,
             "permission": entry.permission,
             "requested_by_llm": entry.requested_by_llm,
+            "call_mode": entry.call_mode,
             "input_hash": entry.input_hash,
             "output_hash": entry.output_hash,
             "status": entry.status,

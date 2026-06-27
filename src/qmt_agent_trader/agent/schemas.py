@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from qmt_agent_trader.agent.permissions import PermissionLevel
+from qmt_agent_trader.agent.permissions import PermissionLevel, ToolCallMode
 
 # ── Original schemas (preserved) ──────────────────────────────────────────────
 
@@ -68,6 +68,7 @@ class ToolContext(BaseModel):
     run_id: str
     experiment_id: str | None = None
     requested_by_llm: bool = True
+    call_mode: ToolCallMode | None = None
     dry_run: bool = True
     user_id: str | None = None
 

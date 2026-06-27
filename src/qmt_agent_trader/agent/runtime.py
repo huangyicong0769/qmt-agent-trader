@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from qmt_agent_trader.agent.llm_client import DeepSeekClient, DeepSeekToolLoopResult
-from qmt_agent_trader.agent.permissions import ToolCapability
-from qmt_agent_trader.agent.schemas import ToolContext
+from qmt_agent_trader.agent.permissions import ToolCallMode, ToolCapability
+from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_registry import ToolDefinition, ToolRegistry
 from qmt_agent_trader.agent.tools.backtest_tools import (
     plan_sensitivity_analysis,
@@ -48,6 +48,7 @@ class AgentRuntime:
     research_reports_dir: Path
     approvals_dir: Path
     broker_client: RemoteQMTBrokerClient | None = None
+    _agent_registry: AgentToolRegistry | None = field(default=None, init=False, repr=False)
 
     def registry(self) -> ToolRegistry:
         return build_default_tool_registry(self)
@@ -59,12 +60,68 @@ class AgentRuntime:
         from qmt_agent_trader.agent.sandbox import CodeSandbox
         from qmt_agent_trader.agent.tools import build_agent_registry
 
-        return build_agent_registry(
-            data_lake=self.lake,
-            audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
-            experiment_root=self.settings.resolved_data_dir / "experiments",
-            settings=self.settings,
-            sandbox=CodeSandbox(),
+        if self._agent_registry is None:
+            self._agent_registry = build_agent_registry(
+                data_lake=self.lake,
+                audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
+                experiment_root=self.settings.resolved_data_dir / "experiments",
+                settings=self.settings,
+                sandbox=CodeSandbox(),
+            )
+        return self._agent_registry
+
+    def list_tools(
+        self,
+        *,
+        permission: str | None = None,
+        agent_callable_only: bool = True,
+        call_mode: ToolCallMode = ToolCallMode.AUTONOMOUS_AGENT,
+    ) -> list[dict[str, object]]:
+        return self.agent_registry().list_tools(
+            permission=permission,
+            agent_callable_only=agent_callable_only,
+            call_mode=call_mode,
+        )
+
+    def describe_tool(self, name: str) -> ToolSpec:
+        return self.agent_registry().describe_tool(name)
+
+    def run_tool(
+        self,
+        name: str,
+        input_data: dict[str, Any],
+        context: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return self.agent_registry().run_tool(
+            name,
+            input_data,
+            context
+            or ToolContext(
+                run_id="runtime",
+                requested_by_llm=True,
+                call_mode=ToolCallMode.AUTONOMOUS_AGENT,
+                dry_run=False,
+            ),
+        )
+
+    def llm_tools(
+        self,
+        *,
+        run_id: str,
+        experiment_id: str | None = None,
+    ) -> list[Any]:
+        return (
+            self.agent_registry()
+            .to_legacy_registry(
+                context_factory=lambda: ToolContext(
+                    run_id=run_id,
+                    experiment_id=experiment_id,
+                    requested_by_llm=True,
+                    call_mode=ToolCallMode.AUTONOMOUS_AGENT,
+                    dry_run=False,
+                )
+            )
+            .deepseek_tools_for_llm()
         )
 
     def ask(self, prompt: str, *, max_rounds: int = 100) -> DeepSeekToolLoopResult:
@@ -92,17 +149,7 @@ class AgentRuntime:
                 },
                 {"role": "user", "content": prompt},
             ],
-            tools=(
-                self.agent_registry()
-                .to_legacy_registry(
-                    context_factory=lambda: ToolContext(
-                        run_id=run_id,
-                        requested_by_llm=True,
-                        dry_run=False,
-                    )
-                )
-                .deepseek_tools_for_llm()
-            ),
+            tools=self.llm_tools(run_id=run_id),
             max_rounds=max_rounds,
         )
 

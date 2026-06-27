@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import FactorSpec, ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id
 from qmt_agent_trader.data.storage import DataLake
@@ -23,6 +26,9 @@ from qmt_agent_trader.factors.service import (
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
 _lake: DataLake | None = None
+_sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("factor_tool_sandbox", default=None)
+_store_var: ContextVar[ExperimentStore | None] = ContextVar("factor_tool_store", default=None)
+_lake_var: ContextVar[DataLake | None] = ContextVar("factor_tool_lake", default=None)
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
@@ -30,6 +36,31 @@ def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
     _sandbox = sandbox
     _store = store
     _lake = lake
+
+
+def _get_sandbox() -> CodeSandbox | None:
+    return _sandbox_var.get() or _sandbox
+
+
+def _get_lake() -> DataLake | None:
+    return _lake_var.get() or _lake
+
+
+def _with_deps(
+    deps: AgentToolDependencies,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    sandbox_token = _sandbox_var.set(deps.sandbox)
+    store_token = _store_var.set(deps.experiment_store)
+    lake_token = _lake_var.set(deps.data_lake)
+    try:
+        return fn(input_data, context)
+    finally:
+        _lake_var.reset(lake_token)
+        _store_var.reset(store_token)
+        _sandbox_var.reset(sandbox_token)
 
 
 # ── create_factor_spec ──────────────────────────────────────────────────────
@@ -108,7 +139,7 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
     test_code = _render_factor_test_code(name)
     spec_code = json.dumps(spec_data, ensure_ascii=False, indent=2, default=str)
 
-    sb = _sandbox
+    sb = _get_sandbox()
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
 
@@ -158,7 +189,7 @@ def _run_factor_static_checks(input_data: dict[str, Any], context: ToolContext) 
     factor_id = str(input_data.get("factor_id") or "").strip()
     if not code_path_str and not factor_id:
         return {"status": "INVALID_REQUEST", "issues": ["code_path or factor_id is required"]}
-    sb = _sandbox
+    sb = _get_sandbox()
     if sb is None:
         return {"status": "FAILED", "issues": ["sandbox not wired"]}
     code_path, recovered = _resolve_factor_code_path(
@@ -200,8 +231,8 @@ run_factor_static_checks_tool: AgentTool = tool(
 
 
 def _save_factor(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
-    sb = _sandbox
-    lake = _lake
+    sb = _get_sandbox()
+    lake = _get_lake()
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
     if lake is None:
@@ -290,7 +321,7 @@ save_factor_tool: AgentTool = tool(
 
 
 def _list_saved_factors(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
-    lake = _lake
+    lake = _get_lake()
     if lake is None:
         return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
 
@@ -346,7 +377,7 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
     end = input_data.get("end_date", _today_yyyymmdd())
     symbols = _requested_symbols(input_data)
 
-    lake = _lake
+    lake = _get_lake()
     if lake is None:
         return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
 
@@ -409,10 +440,9 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             "long_short_spread_mean": sum(spreads) / len(spreads) if spreads else 0,
             "walk_forward_slices": len(slices_raw),
         }
+        sb = _get_sandbox()
         result["report_path"] = str(
-            _sandbox.generated_root / "reports" / f"factor_{factor_id}.json"
-            if _sandbox
-            else ""
+            sb.generated_root / "reports" / f"factor_{factor_id}.json" if sb else ""
         )
         result["cache_hit"] = False
         put_cached_validation(cache_factor_name, start, end, result)
@@ -443,6 +473,31 @@ evaluate_factor_candidate_tool: AgentTool = tool(
     ),
     fn=_evaluate_factor_candidate,
 )
+
+
+def build_factor_tools(deps: AgentToolDependencies) -> list[AgentTool]:
+    definitions: list[
+        tuple[AgentTool, Callable[[dict[str, Any], ToolContext], dict[str, Any]]]
+    ] = [
+        (create_factor_spec_tool, _create_factor_spec),
+        (generate_factor_code_tool, _generate_factor_code),
+        (run_factor_static_checks_tool, _run_factor_static_checks),
+        (save_factor_tool, _save_factor),
+        (list_saved_factors_tool, _list_saved_factors),
+        (evaluate_factor_candidate_tool, _evaluate_factor_candidate),
+    ]
+    return [_bind_tool(deps, existing, fn) for existing, fn in definitions]
+
+
+def _bind_tool(
+    deps: AgentToolDependencies,
+    existing: AgentTool,
+    fn: Callable[[dict[str, Any], ToolContext], dict[str, Any]],
+) -> AgentTool:
+    return tool(
+        existing.spec,
+        fn=lambda input_data, context: _with_deps(deps, fn, input_data, context),
+    )
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

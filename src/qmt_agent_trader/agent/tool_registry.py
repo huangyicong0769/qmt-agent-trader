@@ -22,8 +22,10 @@ from qmt_agent_trader.agent.audit import AuditLogger
 from qmt_agent_trader.agent.errors import ToolDuplicateError, ToolExecutionError, ToolNotFoundError
 from qmt_agent_trader.agent.llm_client import DeepSeekTool
 from qmt_agent_trader.agent.permissions import (
+    ToolCallMode,
     ToolCapability,
     assert_llm_tool_allowed,
+    can_call_tool,
     can_llm_call,
     require_permission,
     to_capability,
@@ -122,12 +124,19 @@ class AgentToolRegistry:
     # ── Discovery ─────────────────────────────────────────────────────────
 
     def list_tools(
-        self, *, permission: str | None = None
+        self,
+        *,
+        permission: str | None = None,
+        agent_callable_only: bool = False,
+        call_mode: ToolCallMode = ToolCallMode.AUTONOMOUS_AGENT,
     ) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
         for _name, tool in sorted(self.tools.items()):
             spec = tool.spec
             if permission is not None and spec.permission.value != permission:
+                continue
+            agent_callable = spec.llm_callable and can_call_tool(spec.permission, call_mode)
+            if agent_callable_only and not agent_callable:
                 continue
             result.append(
                 {
@@ -139,6 +148,7 @@ class AgentToolRegistry:
                     "side_effect_level": spec.side_effect_level,
                     "deterministic": spec.deterministic,
                     "llm_callable": spec.llm_callable and can_llm_call(spec.permission),
+                    "agent_callable": agent_callable,
                 }
             )
         return result
@@ -157,11 +167,17 @@ class AgentToolRegistry:
     ) -> dict[str, Any]:
         tool = self._require_tool(name)
         spec = tool.spec
+        call_mode = context.call_mode or (
+            ToolCallMode.AUTONOMOUS_AGENT
+            if context.requested_by_llm
+            else ToolCallMode.TRUSTED_INTERNAL_WORKFLOW
+        )
 
         # 1. Permissions
         require_permission(
             spec.permission,
             requested_by_llm=context.requested_by_llm,
+            call_mode=call_mode,
             tool_name=name,
         )
 
@@ -196,6 +212,7 @@ class AgentToolRegistry:
             experiment_id=context.experiment_id,
             permission=spec.permission.value,
             requested_by_llm=context.requested_by_llm,
+            call_mode=call_mode.value,
             input_data=input_data,
             output_data=result,
             status=status,
@@ -262,6 +279,7 @@ class AgentToolRegistry:
         experiment_id: str | None,
         permission: str,
         requested_by_llm: bool,
+        call_mode: str,
         input_data: dict[str, Any] | None,
         output_data: dict[str, Any] | None,
         status: str,
@@ -276,6 +294,7 @@ class AgentToolRegistry:
                     experiment_id=experiment_id,
                     permission=permission,
                     requested_by_llm=requested_by_llm,
+                    call_mode=call_mode,
                     input_data=input_data,
                     output_data=output_data,
                     status=status,

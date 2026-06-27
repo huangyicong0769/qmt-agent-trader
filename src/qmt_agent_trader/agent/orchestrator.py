@@ -23,10 +23,8 @@ from qmt_agent_trader.agent.llm_client import (
 )
 from qmt_agent_trader.agent.permissions import ToolCapability
 from qmt_agent_trader.agent.router import RoutingDecision
-from qmt_agent_trader.agent.sandbox import CodeSandbox
-from qmt_agent_trader.agent.schemas import ToolContext
+from qmt_agent_trader.agent.runtime import AgentRuntime, build_default_runtime
 from qmt_agent_trader.agent.tool_registry import AgentToolRegistry, ToolDefinition, ToolRegistry
-from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.tools.backtest_tools import (
     plan_sensitivity_analysis,
     run_factor_rank_sensitivity,
@@ -82,13 +80,12 @@ class AgentOrchestrator:
         self,
         settings: Settings | None = None,
         data_lake: DataLake | None = None,
+        runtime: AgentRuntime | None = None,
     ) -> None:
         resolved = settings or get_settings()
-        self.settings = resolved
-        self._lake = data_lake or DataLake(
-            root=resolved.resolved_data_dir / "lake",
-            duckdb_path=resolved.resolved_data_dir / "qmt_agent_trader.duckdb",
-        )
+        self.runtime = runtime or build_default_runtime(resolved)
+        self.settings = self.runtime.settings
+        self._lake = data_lake or self.runtime.lake
         self._reports_dir = resolved.project_root / "reports" / "backtests"
         self._research_dir = resolved.project_root / "reports" / "research"
         self._approvals_dir = resolved.project_root / "approvals"
@@ -99,13 +96,7 @@ class AgentOrchestrator:
 
     def _build_registry(self) -> AgentToolRegistry:
         """Build the full AgentTool registry used by chat orchestration."""
-        return build_agent_registry(
-            data_lake=self._lake,
-            audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
-            experiment_root=self.settings.resolved_data_dir / "experiments",
-            settings=self.settings,
-            sandbox=CodeSandbox(),
-        )
+        return self.runtime.agent_registry()
 
     async def execute_stream(
         self,
@@ -269,16 +260,7 @@ class AgentOrchestrator:
             + routing_hint
         )
 
-        registry = self._build_registry()
-        legacy_registry = registry.to_legacy_registry(
-            context_factory=lambda: ToolContext(
-                run_id=rid,
-                experiment_id=experiment_id,
-                requested_by_llm=True,
-                dry_run=False,
-            )
-        )
-        tools = legacy_registry.deepseek_tools_for_llm()
+        tools = self.runtime.llm_tools(run_id=rid, experiment_id=experiment_id)
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_msg}]
         messages.extend(_conversation_history(history or [], current_message=message))
