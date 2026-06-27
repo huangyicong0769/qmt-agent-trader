@@ -12,6 +12,7 @@ from rich import print
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.runtime import build_default_runtime
 from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
 from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.workflows.factor_discovery import (
@@ -297,11 +298,16 @@ def agent_call_tool(
     name: Annotated[str, typer.Option("--name")],
     params: Annotated[str, typer.Option("--params")] = "{}",
 ) -> None:
-    runtime = build_default_runtime(_settings())
     payload = _parse_json_params(params)
     if not isinstance(payload, dict):
         raise typer.BadParameter("--params must be a JSON object")
-    print_json({"tool": name, "result": runtime.call_tool(name, **payload)})
+    registry = _agent_registry()
+    result = registry.run_tool(
+        name,
+        payload,
+        ToolContext(run_id="cli-call-tool", requested_by_llm=False, dry_run=False),
+    )
+    print_json({"tool": name, "result": result})
 
 
 @agent_app.command("ask")
