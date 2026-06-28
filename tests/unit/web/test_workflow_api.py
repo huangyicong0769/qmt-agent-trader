@@ -34,9 +34,15 @@ class _FakeFactorWorkflow:
         )
 
 
+class _FakeRuntime:
+    def agent_registry(self) -> object:
+        return object()
+
+
 def test_workflow_api_creates_run_and_returns_status(tmp_path, monkeypatch) -> None:
     workflows._workflow_runs.clear()
-    monkeypatch.setattr(workflows, "get_registry", lambda: object())
+    assert "get_registry" not in workflows.__dict__
+    monkeypatch.setattr(workflows, "get_agent_runtime", lambda: _FakeRuntime())
     monkeypatch.setattr(workflows, "get_experiment_store", lambda: ExperimentStore(tmp_path))
     monkeypatch.setattr(workflows, "FactorDiscoveryWorkflow", _FakeFactorWorkflow)
     app = FastAPI()

@@ -31,10 +31,6 @@ def get_experiment_store() -> ExperimentStore:
     return ExperimentStore(settings.resolved_data_dir / "experiments")
 
 
-def get_registry() -> AgentToolRegistry:
-    return get_agent_runtime().agent_registry()
-
-
 @router.post("/factor-discovery", response_model=WorkflowRunResponse)
 async def start_factor_discovery(request: WorkflowRunRequest) -> WorkflowRunResponse:
     if not request.theme:
@@ -114,7 +110,7 @@ async def _run_workflow(
     try:
         record = await asyncio.to_thread(
             runner,
-            get_registry(),
+            get_agent_runtime().agent_registry(),
             get_experiment_store(),
         )
     except Exception as exc:
