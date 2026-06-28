@@ -161,6 +161,7 @@ class TushareDataUpdateService:
         include_basics: bool = True,
         ts_code: str | None = None,
         asset_type: str = "stock",
+        required_symbols: list[str] | None = None,
     ) -> DataUpdateResult:
         with DataUpdateLock(
             self.lake.root / "_locks" / "remote_data.lock",
@@ -239,7 +240,11 @@ class TushareDataUpdateService:
                         )
                     )
                 else:
-                    missing_daily_dates = self._missing_trade_dates("tushare_daily", open_dates)
+                    missing_daily_dates = self._missing_trade_dates(
+                        "tushare_daily",
+                        open_dates,
+                        required_symbols=required_symbols,
+                    )
                     if open_dates:
                         daily = self._fetch_daily_by_open_dates(missing_daily_dates)
                     else:
@@ -395,18 +400,39 @@ class TushareDataUpdateService:
                 frames.append(frame)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    def _missing_trade_dates(self, dataset_name: str, open_dates: list[str]) -> list[str]:
+    def _missing_trade_dates(
+        self,
+        dataset_name: str,
+        open_dates: list[str],
+        *,
+        required_symbols: list[str] | None = None,
+    ) -> list[str]:
         if not open_dates:
             return []
-        covered = self._covered_trade_dates(dataset_name)
+        covered = self._covered_trade_dates(dataset_name, required_symbols=required_symbols)
         return [item for item in open_dates if item not in covered]
 
-    def _covered_trade_dates(self, dataset_name: str) -> set[str]:
+    def _covered_trade_dates(
+        self,
+        dataset_name: str,
+        *,
+        required_symbols: list[str] | None = None,
+    ) -> set[str]:
         if not self.lake.dataset_path("raw", dataset_name).exists():
             return set()
         frame = self.lake.read_parquet("raw", dataset_name)
         if "trade_date" not in frame.columns:
             return set()
+        if required_symbols:
+            if "ts_code" not in frame.columns:
+                return set()
+            requested = set(required_symbols)
+            covered_dates: set[str] = set()
+            for trade_date, group in frame.groupby("trade_date"):
+                symbols = set(group["ts_code"].dropna().astype(str).tolist())
+                if requested.issubset(symbols):
+                    covered_dates.add(_format_trade_date(trade_date))
+            return covered_dates
         return {_format_trade_date(item) for item in frame["trade_date"].dropna().tolist()}
 
 

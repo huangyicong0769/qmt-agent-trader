@@ -9,6 +9,7 @@ from qmt_agent_trader.agent.llm_client import FinalMessage, SafetyCapHit, TextDe
 from qmt_agent_trader.agent.orchestrator import (
     AgentOrchestrator,
     _is_data_acquisition_request,
+    _is_large_batch_data_request,
     _requires_fresh_evidence,
 )
 from qmt_agent_trader.core.config import Settings
@@ -17,12 +18,14 @@ from qmt_agent_trader.data.storage import DataLake
 
 class CapturingDeepSeekClient:
     seen_messages: ClassVar[list[dict]] = []
+    seen_tool_names: ClassVar[list[str]] = []
 
     def __init__(self, **_kwargs: object) -> None:
         pass
 
     def run_tool_loop_stream(self, *, messages: list[dict], tools: list[object], max_rounds: int):
         CapturingDeepSeekClient.seen_messages = messages
+        CapturingDeepSeekClient.seen_tool_names = [tool.name for tool in tools]
         return iter(())
 
 
@@ -72,6 +75,12 @@ def test_execute_stream_includes_recent_natural_session_history(monkeypatch, tmp
     assert "For data acquisition or coverage-check requests" in system_prompt
     assert "do not stop after a dry_run plan or ask whether to fetch" in system_prompt
     assert "loop over each requested symbol" in system_prompt
+    assert "For large-basket or bulk data pulls" in system_prompt
+    assert "prefer one batch or market-wide remote update without ts_code" in system_prompt
+    assert "passing the full symbols=[...] list" in system_prompt
+    assert "verify the full requested symbols list with query_bars" in system_prompt
+    assert "Do not expand the user-requested date window" in system_prompt
+    assert "Do not validate only a sample symbol" in system_prompt
 
 
 class SafetyCapDeepSeekClient:
@@ -207,3 +216,45 @@ def test_data_acquisition_detection_covers_combo_coverage_prompts() -> None:
     )
     assert _is_data_acquisition_request("补齐 600519.SH 和 000858.SZ 的远程数据")
     assert not _is_data_acquisition_request("在这个组合上寻找有效因子")
+
+
+def test_large_batch_detection_covers_bulk_symbol_fetch_prompts() -> None:
+    assert _is_large_batch_data_request("测试大批量标的数据拉取，54个工业金属标的")
+    assert _is_large_batch_data_request("批量拉取几十个标的的日线数据")
+    assert _is_large_batch_data_request("large basket bulk data pull for 50 symbols")
+    assert not _is_large_batch_data_request("补齐 600519.SH 的远程数据")
+
+
+def test_execute_stream_limits_tools_for_pure_large_batch_data_pull(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.orchestrator.DeepSeekClient",
+        CapturingDeepSeekClient,
+    )
+    settings = Settings(project_root=tmp_path, deepseek_api_key=SecretStr("key"))
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    orchestrator = AgentOrchestrator(settings=settings, data_lake=lake)
+
+    async def collect_events() -> list[object]:
+        return [
+            event
+            async for event in orchestrator.execute_stream(
+                "测试大批量标的数据拉取，54个工业金属标的，批量拉取日线并验证",
+                run_id="run-bulk-data-tools",
+            )
+        ]
+
+    events = anyio.run(collect_events)
+
+    assert events[-1].type == "done"
+    assert set(CapturingDeepSeekClient.seen_tool_names) <= {
+        "get_current_time",
+        "list_data_catalog",
+        "describe_tool",
+        "run_remote_data_update",
+        "query_bars",
+    }
+    assert "run_backtest" not in CapturingDeepSeekClient.seen_tool_names
+    assert "detect_tool_gap" not in CapturingDeepSeekClient.seen_tool_names

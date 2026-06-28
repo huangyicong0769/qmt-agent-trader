@@ -91,10 +91,13 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
         if source != "tushare":
             return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
         ts_code = _normalize_ts_code(input_data.get("ts_code"))
+        symbols = _normalize_symbols(input_data.get("symbols"))
         asset_type = str(input_data.get("asset_type", "stock")).lower()
         effective_start, metadata = _effective_start_from_local_basics(
             lake, start, ts_code=ts_code, asset_type=asset_type
         )
+        if symbols:
+            metadata["requested_symbols_count"] = len(symbols)
         if _parse_date(effective_start) > _parse_date(end):
             metadata["reason"] = "requested_end_before_listing"
             metadata["plan_meaning"] = "no_data_expected_before_security_listing"
@@ -121,6 +124,7 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
             lake,
             expected_dates,
             ts_code=ts_code,
+            symbols=symbols,
             asset_type=asset_type,
         )
         metadata["plan_meaning"] = "dry_run_only_no_remote_fetch_performed"
@@ -132,7 +136,7 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
                 "missing_ranges are calendar-day gaps; do not claim they are "
                 "weekends or holidays without trade-calendar validation"
             )
-        actual_coverage = _actual_data_coverage(lake, ts_code=ts_code)
+        actual_coverage = _actual_data_coverage(lake, ts_code=ts_code, symbols=symbols)
         data_freshness = (
             "covers_expected_trading_dates"
             if not missing_ranges
@@ -176,6 +180,7 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
     try:
         source, start, end = _parse_request(input_data)
         ts_code = _normalize_ts_code(input_data.get("ts_code"))
+        symbols = _normalize_symbols(input_data.get("symbols"))
         asset_type = str(input_data.get("asset_type", "stock")).lower()
         if source != "tushare":
             return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
@@ -193,6 +198,21 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
         planned = _plan_remote_data_update(input_data, context)
         planned["dry_run"] = True
         return planned
+
+    planned = _plan_remote_data_update({**input_data, "dry_run": True}, context)
+    if planned.get("data_update_needed") is False:
+        planned_metadata = planned.get("metadata")
+        metadata = planned_metadata if isinstance(planned_metadata, dict) else {}
+        return {
+            **planned,
+            "status": "up_to_date",
+            "dry_run": False,
+            "metadata": {
+                **metadata,
+                "live_fetch_skipped": True,
+                "skip_reason": "requested_range_already_covered",
+            },
+        }
 
     if settings.tushare_token is None and _client_factory is None:
         return {
@@ -219,9 +239,10 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
             include_basics=bool(input_data.get("include_basics", True)),
             ts_code=ts_code,
             asset_type=asset_type,
+            required_symbols=symbols or None,
         )
         payload = result.as_dict()
-        actual_coverage = _actual_data_coverage(lake, ts_code=ts_code)
+        actual_coverage = _actual_data_coverage(lake, ts_code=ts_code, symbols=symbols)
         payload.update(
             {
                 "requested_start_date": start,
@@ -232,9 +253,11 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
                 "coverage_end_date": actual_coverage.get("actual_data_end"),
             }
         )
-        metadata = payload.setdefault("metadata", {})
-        if isinstance(metadata, dict):
-            metadata.update(actual_coverage)
+        payload_metadata = payload.get("metadata")
+        if isinstance(payload_metadata, dict):
+            payload_metadata.update(actual_coverage)
+        else:
+            payload["metadata"] = dict(actual_coverage)
         return payload
     except Exception as exc:
         message = _sanitize_error(str(exc), settings)
@@ -277,8 +300,29 @@ def _missing_ranges(
     expected_dates: list[str],
     *,
     ts_code: str | None,
+    symbols: list[str],
     asset_type: str,
 ) -> list[dict[str, str]]:
+    if symbols:
+        covered_by_date: dict[str, set[str]] = {}
+        requested = set(symbols)
+        for dataset in _datasets_for_asset_type(asset_type, scoped=True):
+            if not lake.dataset_path("raw", dataset).exists():
+                continue
+            frame = lake.read_parquet("raw", dataset)
+            if "trade_date" not in frame.columns or "ts_code" not in frame.columns:
+                continue
+            frame = frame[frame["ts_code"].astype(str).isin(requested)]
+            for row in frame[["ts_code", "trade_date"]].dropna().itertuples(index=False):
+                trade_date = _format_date(row.trade_date)
+                covered_by_date.setdefault(trade_date, set()).add(str(row.ts_code))
+        missing = [
+            item
+            for item in expected_dates
+            if not requested.issubset(covered_by_date.get(item, set()))
+        ]
+        return _coalesce_dates(missing)
+
     covered: set[str] = set()
     for dataset in _datasets_for_asset_type(asset_type, scoped=ts_code is not None):
         if not lake.dataset_path("raw", dataset).exists():
@@ -305,8 +349,14 @@ def _datasets_for_asset_type(asset_type: str, *, scoped: bool) -> tuple[str, ...
     return ("tushare_daily", "tushare_fund_daily")
 
 
-def _actual_data_coverage(lake: DataLake, *, ts_code: str | None) -> dict[str, Any]:
+def _actual_data_coverage(
+    lake: DataLake,
+    *,
+    ts_code: str | None,
+    symbols: list[str] | None = None,
+) -> dict[str, Any]:
     observed: list[str] = []
+    requested = set(symbols or [])
     for dataset in ("tushare_daily", "tushare_fund_daily"):
         if not lake.dataset_path("raw", dataset).exists():
             continue
@@ -315,6 +365,8 @@ def _actual_data_coverage(lake: DataLake, *, ts_code: str | None) -> dict[str, A
             continue
         if ts_code and "ts_code" in frame.columns:
             frame = frame[frame["ts_code"].astype(str) == ts_code]
+        if requested and "ts_code" in frame.columns:
+            frame = frame[frame["ts_code"].astype(str).isin(requested)]
         if frame.empty:
             continue
         observed.extend(_format_date(item) for item in frame["trade_date"].dropna().tolist())
@@ -347,7 +399,8 @@ def _expected_coverage_dates(
                 for item in data["cal_date"].dropna().tolist()
                 if start_date <= _parse_date(_format_date(item)) <= end_date
             ]
-            return sorted(set(dates)), "tushare_trade_calendar"
+            if dates:
+                return sorted(set(dates)), "tushare_trade_calendar"
     observed_dates = _observed_market_dates(lake, start, end)
     if observed_dates:
         return observed_dates, "observed_market_daily_dates"
@@ -430,6 +483,14 @@ _UPDATE_INPUT_SCHEMA = {
         "include_daily": {"type": "boolean"},
         "include_basics": {"type": "boolean"},
         "ts_code": {"type": "string", "description": "Optional security code, e.g. 159259.SZ."},
+        "symbols": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Optional basket symbols for coverage checks. Live stock updates still "
+                "use batch or market-wide requests instead of per-symbol fan-out."
+            ),
+        },
         "asset_type": {
             "type": "string",
             "description": (
@@ -456,6 +517,17 @@ def _normalize_ts_code(value: object) -> str | None:
     if "." not in text and text.isdigit() and len(text) == 6:
         text = f"{text}.SZ" if text.startswith(("0", "1", "2", "3")) else f"{text}.SH"
     return text
+
+
+def _normalize_symbols(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        text = _normalize_ts_code(item)
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
 
 
 def _effective_start_from_local_basics(

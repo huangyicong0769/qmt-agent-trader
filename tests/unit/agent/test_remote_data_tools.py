@@ -98,6 +98,39 @@ def test_run_remote_data_update_fetches_even_when_agent_context_is_dry_run(tmp_p
     assert lake.dataset_path("raw", "tushare_daily").exists()
 
 
+def test_run_remote_data_update_skips_live_fetch_when_range_is_covered(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"cal_date": "20240102", "is_open": 1}]),
+        "raw",
+        "tushare_trade_calendar",
+    )
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102"}]),
+        "raw",
+        "tushare_daily",
+    )
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240102",
+            "end_date": "20240102",
+            "include_daily": True,
+        },
+        ToolContext(run_id="r-covered-live", dry_run=False),
+    )
+
+    assert result["status"] == "up_to_date"
+    assert result["data_update_needed"] is False
+    assert result["dry_run"] is False
+
+
 def test_run_remote_data_update_normalizes_hyphenated_dates_for_tushare(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = RecordingEtfClient()
@@ -197,6 +230,38 @@ def test_run_remote_data_update_dry_run_uses_trade_calendar_when_available(
     assert result["data_freshness"] == "missing_expected_trading_dates"
 
 
+def test_run_remote_data_update_dry_run_does_not_treat_empty_calendar_window_as_covered(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"cal_date": "20240102", "is_open": 1}]),
+        "raw",
+        "tushare_trade_calendar",
+    )
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240408",
+            "end_date": "20240410",
+            "symbols": ["000001.SZ"],
+            "dry_run": True,
+        },
+        ToolContext(run_id="r-empty-calendar-window", dry_run=True),
+    )
+
+    assert result["status"] == "CALENDAR_VALIDATION_REQUIRED"
+    assert result["data_update_needed"] is True
+    assert result["missing_ranges"] == [{"start_date": "20240408", "end_date": "20240410"}]
+    assert result["metadata"]["calendar_source"] == "calendar_days"
+
+
 def test_run_remote_data_update_dry_run_detects_symbol_specific_gaps(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
@@ -240,6 +305,54 @@ def test_run_remote_data_update_dry_run_detects_symbol_specific_gaps(tmp_path) -
     assert result["data_update_needed"] is True
     assert result["missing_ranges"] == [{"start_date": "20240103", "end_date": "20240103"}]
     assert result["actual_data_end"] == "20240102"
+    assert result["data_freshness"] == "missing_expected_trading_dates"
+
+
+def test_run_remote_data_update_dry_run_detects_basket_symbol_gaps(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"cal_date": "20240102", "is_open": 1},
+                {"cal_date": "20240103", "is_open": 1},
+            ]
+        ),
+        "raw",
+        "tushare_trade_calendar",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240102"},
+                {"ts_code": "000002.SZ", "trade_date": "20240102"},
+                {"ts_code": "000001.SZ", "trade_date": "20240103"},
+                {"ts_code": "000999.SZ", "trade_date": "20240103"},
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240102",
+            "end_date": "20240103",
+            "symbols": ["000001.SZ", "000002.SZ"],
+            "asset_type": "stock",
+            "dry_run": True,
+        },
+        ToolContext(run_id="r-basket-calendar-dry", dry_run=True),
+    )
+
+    assert result["data_update_needed"] is True
+    assert result["missing_ranges"] == [{"start_date": "20240103", "end_date": "20240103"}]
+    assert result["metadata"]["requested_symbols_count"] == 2
     assert result["data_freshness"] == "missing_expected_trading_dates"
 
 

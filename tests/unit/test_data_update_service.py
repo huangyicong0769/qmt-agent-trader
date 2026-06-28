@@ -152,6 +152,26 @@ def test_tushare_data_update_is_idempotent_for_overlapping_ranges(tmp_path) -> N
     assert not lake.dataset_path("raw", "tushare_daily_20260609_20260610").exists()
 
 
+def test_tushare_data_update_refetches_dates_with_required_symbol_gaps(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20260609"}]),
+        "raw",
+        "tushare_daily",
+    )
+    client = FakeTushareClient()
+
+    TushareDataUpdateService(client, lake).update(
+        "20260609",
+        "20260610",
+        include_basics=False,
+        required_symbols=["000001.SZ", "000002.SZ"],
+    )
+
+    daily_requests = [request for request in client.requests if request.api_name == "daily"]
+    assert [request.params for request in daily_requests] == [{"trade_date": "20260609"}]
+
+
 def test_tushare_data_update_falls_back_when_calendar_empty(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = FakeTushareClient()

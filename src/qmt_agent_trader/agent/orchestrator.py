@@ -180,6 +180,22 @@ class AgentOrchestrator:
                 "split it into allowed windows or clearly state the remaining bounded "
                 "range that was not fetched."
             )
+        if _is_large_batch_data_request(message):
+            routing_hint += (
+                "\nFor large-basket or bulk data pulls, prefer one batch or market-wide "
+                "remote update without ts_code when the requested date range is bounded "
+                "and all requested securities share the same asset type. Do not fan out "
+                "dozens of concurrent per-symbol run_remote_data_update calls after a "
+                "batch update. Do not expand the user-requested date window to fetch "
+                "extra history unless the user explicitly asks for that wider range. "
+                "Pass the full requested symbols=[...] list to run_remote_data_update "
+                "so the dry-run and live update can detect basket member gaps. "
+                "After the batch update returns, verify the full requested symbols list "
+                "with query_bars using symbols=[...] and the same requested date window. "
+                "Do not validate only a sample symbol. Inspect which symbols, if any, "
+                "are still missing. Only then run targeted per-symbol updates for the "
+                "explicit missing subset."
+            )
 
         system_msg = (
             "You are the QMT research agent. Use tools for local facts and for "
@@ -234,10 +250,24 @@ class AgentOrchestrator:
             "dry_run plan or ask whether to fetch when local data is stale or missing; "
             "perform the bounded remote update yourself with dry_run=false, and for "
             "baskets loop over each requested symbol."
+            " For large-basket or bulk data pulls, prefer one batch or market-wide "
+            "remote update without ts_code while passing the full symbols=[...] list, "
+            "then verify the full requested symbols list with query_bars before "
+            "considering any per-symbol retries. Do not "
+            "expand the user-requested date window. Do not validate only a sample symbol."
             + routing_hint
         )
 
         tools = self.runtime.llm_tools(run_id=rid, experiment_id=experiment_id)
+        if _is_pure_large_batch_data_pull(message):
+            allowed_tools = {
+                "get_current_time",
+                "list_data_catalog",
+                "describe_tool",
+                "run_remote_data_update",
+                "query_bars",
+            }
+            tools = [tool for tool in tools if tool.name in allowed_tools]
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_msg}]
         messages.extend(_conversation_history(history or [], current_message=message))
@@ -510,6 +540,35 @@ def _is_data_acquisition_request(message: str) -> bool:
             r"(fetch|sync|update|download|get).{0,40}(data|bars|quotes)",
             r"(coverage|freshness|missing|gap).{0,40}(data|bars|quotes)",
         ]
+    )
+
+
+def _is_large_batch_data_request(message: str) -> bool:
+    normalized = message.strip().lower()
+    if not normalized:
+        return False
+    return any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in [
+            r"(大批量|批量|几十个|数十个).{0,40}(标的|股票|证券|数据|行情|日线|拉取|同步)",
+            r"(标的|股票|证券).{0,20}(大批量|批量|几十个|数十个).{0,40}(数据|行情|日线|拉取|同步)",
+            r"(large|big|bulk).{0,20}(basket|batch|symbol|symbols|ticker|tickers).{0,40}(data|bars|pull|fetch|sync)",
+            r"(basket|batch).{0,20}(50|[2-9][0-9]).{0,40}(symbol|symbols|ticker|tickers)",
+        ]
+    )
+
+
+def _is_pure_large_batch_data_pull(message: str) -> bool:
+    normalized = message.strip().lower()
+    if not _is_large_batch_data_request(normalized):
+        return False
+    strategy_patterns = [
+        r"(策略|轮动|回测|因子|调仓|仓位|买|卖|持有|收益|sharpe)",
+        r"(strategy|rotation|backtest|factor|rebalance|position|buy|sell|hold)",
+    ]
+    return not any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in strategy_patterns
     )
 
 
