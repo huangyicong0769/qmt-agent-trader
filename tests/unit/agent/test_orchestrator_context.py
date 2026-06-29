@@ -178,6 +178,51 @@ class QueryOnlyDecisionDeepSeekClient:
         yield FinalMessage(content="建议买入。")
 
 
+class TodoToolDeepSeekClient:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def run_tool_loop_stream(self, *, messages: list[dict], tools: list[object], max_rounds: int):
+        todo_tool = next(tool for tool in tools if tool.name == "todo_set_list")
+        result = todo_tool.fn(items=[{"title": "检查数据"}, {"title": "运行回测"}])
+        yield ToolResult(
+            tool_call_id="call-todo",
+            tool_name="todo_set_list",
+            result=result,
+        )
+        yield FinalMessage(content="我会按清单执行。")
+
+
+def test_execute_stream_emits_todo_status_with_session_id(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.orchestrator.DeepSeekClient",
+        TodoToolDeepSeekClient,
+    )
+    settings = Settings(project_root=tmp_path, deepseek_api_key=SecretStr("key"))
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    orchestrator = AgentOrchestrator(settings=settings, data_lake=lake)
+
+    async def collect_events() -> list[object]:
+        return [
+            event
+            async for event in orchestrator.execute_stream(
+                "制定一个研究计划",
+                run_id="run-todo",
+                session_id="chat_x",
+            )
+        ]
+
+    events = anyio.run(collect_events)
+    event_types = [event.type for event in events]
+    todo_events = [event for event in events if event.type == "todo_status"]
+
+    assert "tool_done" in event_types
+    assert len(todo_events) == 1
+    assert todo_events[0].data["session_id"] == "chat_x"
+    assert todo_events[0].data["summary"]["total"] == 2
+    assert todo_events[0].data["items"][0]["title"] == "检查数据"
+
+
 def test_execute_stream_guides_trade_decisions_without_runtime_rejection(
     monkeypatch,
     tmp_path,

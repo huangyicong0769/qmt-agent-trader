@@ -82,6 +82,7 @@ class AgentRuntime:
         self,
         *,
         run_id: str,
+        session_id: str | None = None,
         experiment_id: str | None = None,
     ) -> list[DeepSeekTool]:
         return (
@@ -89,6 +90,7 @@ class AgentRuntime:
             .to_legacy_registry(
                 context_factory=lambda: ToolContext(
                     run_id=run_id,
+                    session_id=session_id,
                     experiment_id=experiment_id,
                     requested_by_llm=True,
                     call_mode=ToolCallMode.AUTONOMOUS_AGENT,

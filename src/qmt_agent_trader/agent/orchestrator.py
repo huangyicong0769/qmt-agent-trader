@@ -79,6 +79,7 @@ class AgentOrchestrator:
         message: str,
         *,
         run_id: str | None = None,
+        session_id: str | None = None,
         history: list[dict[str, Any]] | None = None,
         max_rounds: int = 100,
         cancel_event: asyncio.Event | None = None,
@@ -89,6 +90,7 @@ class AgentOrchestrator:
         and yields a 'cancelled' event instead of completing normally.
         """
         rid = run_id or new_id("run")
+        sid = session_id or rid
         experiment_id = new_id("exp")
         ExperimentStore(self.settings.resolved_data_dir / "experiments").create_experiment(
             "chat_research",
@@ -202,6 +204,11 @@ class AgentOrchestrator:
             "run_backtest, generate_research_report. Typical self-bootstrap loop: "
             "search_experiments, detect_tool_gap, create_tool_spec, generate_tool_code, "
             "generate_tool_tests, run_tool_sandbox_tests, score_tool_candidate. "
+            "For multi-step tasks, create or refresh a session todo-list first "
+            "with todo_set_list. Before starting a step, mark it IN_PROGRESS "
+            "with todo_update_item. Mark completed steps COMPLETED, and mark "
+            "externally blocked steps BLOCKED with a short note. Use todo_get_status "
+            "when resuming a session or when the current todo state is unclear. "
             "When a tool returns actual_data_end or data_freshness, distinguish the "
             "local latest data date from the requested end date and from the latest "
             "market trading day; do not call data complete through today when "
@@ -241,7 +248,11 @@ class AgentOrchestrator:
             + routing_hint
         )
 
-        tools = self.runtime.llm_tools(run_id=rid, experiment_id=experiment_id)
+        tools = self.runtime.llm_tools(
+            run_id=rid,
+            session_id=sid,
+            experiment_id=experiment_id,
+        )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_msg}]
         messages.extend(_conversation_history(history or [], current_message=message))
@@ -399,7 +410,7 @@ def _stream_to_events(
     if cls_name == "ToolResult":
         preview = _preview(evt.result)
         result_id = _result_id(evt.result)
-        return [
+        events = [
             OrchestratorEvent(
                 type="tool_done",
                 run_id=run_id,
@@ -412,6 +423,10 @@ def _stream_to_events(
                 },
             )
         ]
+        todo_event = _todo_status_event(evt.result, run_id, experiment_id)
+        if todo_event is not None:
+            events.append(todo_event)
+        return events
 
     if cls_name == "LoopError":
         return [
@@ -534,6 +549,37 @@ def _is_large_batch_data_request(message: str) -> bool:
 def _result_id(result: Any) -> str:
     payload = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _todo_status_event(
+    result: Any,
+    run_id: str,
+    experiment_id: str,
+) -> OrchestratorEvent | None:
+    if not isinstance(result, dict):
+        return None
+    state = result.get("todo_state")
+    if not isinstance(state, dict):
+        return None
+    data = {
+        "session_id": state.get("session_id"),
+        "items": state.get("items", []),
+        "summary": state.get("summary", {}),
+        "active_item": state.get("active_item"),
+        "goal": state.get("goal"),
+        "updated_at": state.get("updated_at"),
+        "experiment_id": experiment_id,
+    }
+    summary = data["summary"] if isinstance(data["summary"], dict) else {}
+    return OrchestratorEvent(
+        type="todo_status",
+        run_id=run_id,
+        message=(
+            f"Todo status: {summary.get('completed', 0)}/"
+            f"{summary.get('total', 0)} completed"
+        ),
+        data=data,
+    )
 
 
 def _safe_result(result: Any) -> Any:

@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+from qmt_agent_trader.agent.orchestrator import OrchestratorEvent
 from qmt_agent_trader.web.routes import chat
 
 
@@ -122,6 +123,42 @@ def test_execute_without_body_reuses_queued_message_without_duplicate() -> None:
         message for message in payload["messages"] if message["role"] == "user"
     ]
     assert [message["content"] for message in user_messages] == ["发现因子"]
+
+
+def test_execute_stream_outputs_todo_status_event_with_session_id(monkeypatch) -> None:
+    chat._sessions.clear()
+    app = FastAPI()
+    app.include_router(chat.router)
+    client = TestClient(app)
+    session = client.post("/sessions", json={}).json()
+    session_id = session["session_id"]
+
+    class FakeOrchestrator:
+        async def execute_stream(self, message: str, **kwargs: object):
+            assert message == "制定计划"
+            assert kwargs["session_id"] == session_id
+            yield OrchestratorEvent(
+                type="todo_status",
+                run_id="run_test",
+                message="Todo status: 0/1 completed",
+                data={
+                    "session_id": session_id,
+                    "items": [{"title": "检查数据", "status": "PENDING"}],
+                    "summary": {"total": 1, "completed": 0},
+                    "active_item": None,
+                },
+            )
+
+    monkeypatch.setattr(chat, "_get_orchestrator", lambda: FakeOrchestrator())
+
+    response = client.post(
+        f"/sessions/{session_id}/execute",
+        json={"message": "制定计划"},
+    )
+
+    assert response.status_code == 200
+    assert "event: todo_status" in response.text
+    assert f'"session_id": "{session_id}"' in response.text
 
 
 def test_session_schema_no_mode_field() -> None:

@@ -216,6 +216,33 @@ def _trunc(s: str, n: int) -> str:
     return s[:n] + ("…" if len(s) > n else "")
 
 
+def _todo_status_markdown(data: dict[str, Any]) -> str:
+    summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
+    items = data.get("items", []) if isinstance(data.get("items"), list) else []
+    active = data.get("active_item")
+    completed = summary.get("completed", 0)
+    total = summary.get("total", len(items))
+    lines = [f"**Todo** {completed}/{total} completed"]
+    goal = data.get("goal")
+    if goal:
+        lines.append(f"Goal: {goal}")
+    if isinstance(active, dict):
+        lines.append(f"Active: {active.get('title', '')}")
+    if not items:
+        lines.append("No todo items.")
+        return "\n\n".join(lines)
+    lines.append("")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status", "PENDING"))
+        title = str(item.get("title", ""))
+        notes = str(item.get("notes", "")).strip()
+        suffix = f" - {notes}" if notes else ""
+        lines.append(f"- `{status}` {title}{suffix}")
+    return "\n".join(lines)
+
+
 async def _send(
     session: _ChatSession,
     message_input: ui.textarea,
@@ -255,6 +282,7 @@ async def _send(
         async for evt in session.orchestrator.execute_stream(
             message=content,
             run_id=run_id,
+            session_id=session.sid,
             history=[
                 {"role": msg.role, "content": msg.content}
                 for msg in session.messages
@@ -364,6 +392,14 @@ async def _send(
                     tool_name=ed.get("tool_name", ""),
                     result_preview=prv, result_id=result_id, phase="done",
                 )
+
+            elif et == "todo_status":
+                plan_card.clear()
+                with plan_card:
+                    ui.markdown(_todo_status_markdown(ed)).classes(
+                        "text-sm text-blue-900"
+                    )
+                plan_card.visible = True
 
             elif et == "done":
                 progress_card.visible = False

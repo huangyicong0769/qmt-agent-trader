@@ -152,6 +152,7 @@ async def execute_stream(session_id: str, request: Request) -> StreamingResponse
             async for event in orchestrator.execute_stream(
                 message=message,
                 run_id=run_id,
+                session_id=session_id,
                 history=[
                     {"role": m.role, "content": m.content}
                     for m in session.messages
@@ -200,6 +201,7 @@ def _to_agent_event_type(event_type: str) -> AgentEventType:
         "final_message": AgentEventType.LLM_TOKEN_DELTA,
         "tool_done": AgentEventType.TOOL_CALL_COMPLETED,
         "tool_start": AgentEventType.TOOL_CALL_STARTED,
+        "todo_status": AgentEventType.TODO_STATUS_UPDATED,
         "progress": AgentEventType.PROGRESS,
     }
     return mapping.get(event_type, AgentEventType.PROGRESS)
