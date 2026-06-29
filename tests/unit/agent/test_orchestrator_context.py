@@ -225,7 +225,7 @@ def test_large_batch_detection_covers_bulk_symbol_fetch_prompts() -> None:
     assert not _is_large_batch_data_request("补齐 600519.SH 的远程数据")
 
 
-def test_execute_stream_limits_tools_for_pure_large_batch_data_pull(
+def test_execute_stream_guides_large_batch_data_pull_without_hiding_agent_tools(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -249,12 +249,10 @@ def test_execute_stream_limits_tools_for_pure_large_batch_data_pull(
     events = anyio.run(collect_events)
 
     assert events[-1].type == "done"
-    assert set(CapturingDeepSeekClient.seen_tool_names) <= {
-        "get_current_time",
-        "list_data_catalog",
-        "describe_tool",
-        "run_remote_data_update",
-        "query_bars",
-    }
-    assert "run_backtest" not in CapturingDeepSeekClient.seen_tool_names
-    assert "detect_tool_gap" not in CapturingDeepSeekClient.seen_tool_names
+    system_prompt = CapturingDeepSeekClient.seen_messages[0]["content"]
+    assert "For large-basket or bulk data pulls" in system_prompt
+    assert "prefer one batch or market-wide remote update without ts_code" in system_prompt
+    assert "run_remote_data_update" in CapturingDeepSeekClient.seen_tool_names
+    assert "query_bars" in CapturingDeepSeekClient.seen_tool_names
+    assert "run_backtest" in CapturingDeepSeekClient.seen_tool_names
+    assert "detect_tool_gap" in CapturingDeepSeekClient.seen_tool_names

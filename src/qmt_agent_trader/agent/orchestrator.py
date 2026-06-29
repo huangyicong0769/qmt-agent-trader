@@ -259,15 +259,6 @@ class AgentOrchestrator:
         )
 
         tools = self.runtime.llm_tools(run_id=rid, experiment_id=experiment_id)
-        if _is_pure_large_batch_data_pull(message):
-            allowed_tools = {
-                "get_current_time",
-                "list_data_catalog",
-                "describe_tool",
-                "run_remote_data_update",
-                "query_bars",
-            }
-            tools = [tool for tool in tools if tool.name in allowed_tools]
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_msg}]
         messages.extend(_conversation_history(history or [], current_message=message))
@@ -555,20 +546,6 @@ def _is_large_batch_data_request(message: str) -> bool:
             r"(large|big|bulk).{0,20}(basket|batch|symbol|symbols|ticker|tickers).{0,40}(data|bars|pull|fetch|sync)",
             r"(basket|batch).{0,20}(50|[2-9][0-9]).{0,40}(symbol|symbols|ticker|tickers)",
         ]
-    )
-
-
-def _is_pure_large_batch_data_pull(message: str) -> bool:
-    normalized = message.strip().lower()
-    if not _is_large_batch_data_request(normalized):
-        return False
-    strategy_patterns = [
-        r"(策略|轮动|回测|因子|调仓|仓位|买|卖|持有|收益|sharpe)",
-        r"(strategy|rotation|backtest|factor|rebalance|position|buy|sell|hold)",
-    ]
-    return not any(
-        re.search(pattern, normalized, flags=re.IGNORECASE)
-        for pattern in strategy_patterns
     )
 
 
