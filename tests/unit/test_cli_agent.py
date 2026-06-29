@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from qmt_agent_trader.cli.main import app
+from qmt_agent_trader.core.types import ApprovalStatus
+from qmt_agent_trader.strategy.models import SavedStrategy, StrategySource, StrategySpec
 
 
 def test_agent_call_tool_uses_agent_tool_registry_for_query_bars() -> None:
@@ -74,3 +76,26 @@ def test_agent_ask_json_preserves_legacy_output_shape(monkeypatch) -> None:
             }
         ],
     }
+
+
+def test_strategy_approve_rejects_non_review_required_candidate(monkeypatch) -> None:
+    saved = SavedStrategy(
+        strategy_id="strat_draft",
+        name="draft",
+        version="0.1.0",
+        source=StrategySource.AGENT_GENERATED,
+        status=ApprovalStatus.GENERATED_BY_LLM,
+        spec=StrategySpec(strategy_id="strat_draft", name="draft"),
+        implementation_ref="file:strategy.py",
+    )
+
+    class FakeRegistry:
+        def get_strategy(self, strategy_id: str) -> SavedStrategy | None:
+            return saved if strategy_id == "strat_draft" else None
+
+    monkeypatch.setattr("qmt_agent_trader.cli.main._strategy_registry", lambda: FakeRegistry())
+
+    result = CliRunner().invoke(app, ["strategy", "approve", "--strategy-id", "strat_draft"])
+
+    assert result.exit_code != 0
+    assert "REVIEW_REQUIRED" in result.output

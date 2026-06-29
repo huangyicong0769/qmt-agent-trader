@@ -3,24 +3,34 @@ and report tool: generate_research_report."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
+from pprint import pformat
 from typing import Any
-
-import pandas as pd
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
-from qmt_agent_trader.agent.schemas import StrategySpec, ToolContext, ToolSpec
+from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
+from qmt_agent_trader.strategy.execution_adapter import (
+    StrategyBacktestConfig,
+    run_strategy_backtest,
+)
+from qmt_agent_trader.strategy.loader import static_check_strategy_file
+from qmt_agent_trader.strategy.models import (
+    StrategyKind,
+    StrategySource,
+    StrategySpec,
+    strategy_spec_from_agent_spec,
+)
+from qmt_agent_trader.strategy.registry import StrategyRegistry
 
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
@@ -77,30 +87,49 @@ def _create_strategy_spec(input_data: dict[str, Any], context: ToolContext) -> d
     constraints = input_data.get("constraints", {})
 
     strategy_id = new_id("strat")
+    kind = (
+        StrategyKind.ETF_TREND
+        if "etf" in str(strategy_idea).lower() and "trend" in str(strategy_idea).lower()
+        else StrategyKind.FACTOR_RANK_LONG_ONLY
+    )
     spec = StrategySpec(
         strategy_id=strategy_id,
         name=strategy_idea[:60] or "candidate_strategy",
         version="0.1.0",
+        description=strategy_idea,
+        kind=kind,
+        source=StrategySource.AGENT_GENERATED,
         universe=universe,
-        factors=selected_factors,
-        portfolio_construction={
-            "method": "equal_weight",
-            "top_n": 20,
-        },
+        factors=[{"factor_id": str(item), "weight": 1.0} for item in selected_factors],
+        portfolio={"method": "equal_weight_top_n", "top_n": 20},
         rebalance={"frequency": rebalance_freq},
         risk_constraints=constraints,
-        execution_assumptions={
-            "timing": "next_open",
-            "slippage_model": "fixed_5bps",
+        execution={
+            "signal_timing": "after_close",
+            "execution_timing": "next_open",
+            "execution_delay_days": 1,
+            "slippage_bps": 5.0,
         },
     )
-    return {"strategy_spec": spec.model_dump(mode="json")}
+    return {"status": "created", "strategy_spec": spec.model_dump(mode="json")}
 
 
 create_strategy_spec_tool: AgentTool = tool(
     ToolSpec(
         name="create_strategy_spec",
         description="将策略想法和候选因子组合转成结构化 strategy spec。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "strategy_idea": {"type": "string"},
+                "selected_factors": {"type": "array", "items": {"type": "string"}},
+                "universe": {"type": "string"},
+                "rebalance_frequency": {"type": "string"},
+                "constraints": {"type": "object"},
+            },
+            "required": ["strategy_idea", "selected_factors"],
+            "additionalProperties": False,
+        },
         permission=PermissionLevel.RESEARCH_WRITE,
         side_effect_level="write_generated",
         deterministic=False,
@@ -113,22 +142,16 @@ create_strategy_spec_tool: AgentTool = tool(
 
 def _generate_strategy_code(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     spec_data = input_data.get("strategy_spec", {})
+    spec = strategy_spec_from_agent_spec(spec_data)
     name = spec_data.get("name", "candidate")
-    strategy_id = spec_data.get("strategy_id", new_id("strat"))
-    factors = spec_data.get("factors", [])
-    top_n = (
-        
-            spec_data.get("portfolio_construction", {}).get("top_n", 20)
-            if "portfolio_construction" in spec_data
-            else 20
-        
-    )
+    strategy_id = spec.strategy_id
+    factors = [factor.factor_id for factor in spec.factors]
     warnings: list[str] = []
 
     if not factors:
         warnings.append("no factors selected; strategy will not generate signals")
 
-    strategy_code = _render_strategy_code(name, factors, top_n)
+    strategy_code = _render_strategy_code(name, spec)
     test_code = _render_strategy_test_code(name)
 
     sb = _get_sandbox()
@@ -148,16 +171,24 @@ def _generate_strategy_code(input_data: dict[str, Any], context: ToolContext) ->
             "code_path": str(code_path),
             "tests_path": str(tests_path),
             "status": "generated",
+            "strategy_id": strategy_id,
+            "strategy_spec": spec.model_dump(mode="json"),
             "warnings": warnings,
         }
     except Exception as exc:
-        return {"status": "error", "warnings": [str(exc)]}
+        return {"status": "STATIC_CHECK_FAILED", "message": str(exc), "warnings": [str(exc)]}
 
 
 generate_strategy_code_tool: AgentTool = tool(
     ToolSpec(
         name="generate_strategy_code",
         description="根据 strategy spec 生成候选策略代码和测试。",
+        input_schema={
+            "type": "object",
+            "properties": {"strategy_spec": {"type": "object"}},
+            "required": ["strategy_spec"],
+            "additionalProperties": False,
+        },
         permission=PermissionLevel.CODE_GENERATION,
         side_effect_level="write_generated",
         deterministic=False,
@@ -174,6 +205,7 @@ def _list_strategy_candidates(input_data: dict[str, Any], context: ToolContext) 
         return {"status": "NOT_IMPLEMENTED", "message": "sandbox not wired"}
 
     query = str(input_data.get("query") or "").strip()
+    strategy_registry = _strategy_registry()
     root = sb.generated_root / "strategies"
     candidates: list[dict[str, Any]] = []
     for path in sorted(root.glob("**/strategy.py")):
@@ -184,10 +216,13 @@ def _list_strategy_candidates(input_data: dict[str, Any], context: ToolContext) 
         candidates.append(
             {
                 "strategy_id": strategy_id,
-                "status": "draft",
+                "status": _registered_status(strategy_registry, strategy_id) or "draft",
                 "code_path": str(path),
                 "tests_path": str(tests_path) if tests_path.exists() else None,
-                "saved": False,
+                "saved": strategy_registry.get_strategy(strategy_id) is not None,
+                "saved_in_registry": strategy_registry.get_strategy(strategy_id) is not None,
+                "report_paths": _registered_reports(strategy_registry, strategy_id),
+                "approval_file": _registered_approval(strategy_registry, strategy_id),
             }
         )
     for path in sorted(root.glob("*.py")):
@@ -200,10 +235,13 @@ def _list_strategy_candidates(input_data: dict[str, Any], context: ToolContext) 
         candidates.append(
             {
                 "strategy_id": strategy_id,
-                "status": "draft",
+                "status": _registered_status(strategy_registry, strategy_id) or "draft",
                 "code_path": str(path),
                 "tests_path": str(tests_path) if tests_path.exists() else None,
-                "saved": False,
+                "saved": strategy_registry.get_strategy(strategy_id) is not None,
+                "saved_in_registry": strategy_registry.get_strategy(strategy_id) is not None,
+                "report_paths": _registered_reports(strategy_registry, strategy_id),
+                "approval_file": _registered_approval(strategy_registry, strategy_id),
             }
         )
     return {
@@ -221,11 +259,46 @@ list_strategy_candidates_tool: AgentTool = tool(
         input_schema={
             "type": "object",
             "properties": {"query": {"type": "string"}},
+            "additionalProperties": False,
         },
         permission=PermissionLevel.READ_ONLY,
         deterministic=False,
     ),
     fn=_list_strategy_candidates,
+)
+
+# ── run_strategy_static_checks ──────────────────────────────────────────────
+
+
+def _run_strategy_static_checks(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    code_path = input_data.get("code_path")
+    if not code_path:
+        return {"status": "FAILED", "issues": ["code_path is required"]}
+    issues = static_check_strategy_file(Path(str(code_path)))
+    return {
+        "status": "PASSED" if not issues else "FAILED",
+        "issues": issues,
+        "code_path": str(code_path),
+    }
+
+
+run_strategy_static_checks_tool: AgentTool = tool(
+    ToolSpec(
+        name="run_strategy_static_checks",
+        description=(
+            "检查候选策略代码是否包含未来函数、危险 import、broker/gateway "
+            "或 live trading 调用。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"code_path": {"type": "string"}},
+            "required": ["code_path"],
+            "additionalProperties": False,
+        },
+        permission=PermissionLevel.BACKTEST_EXECUTE,
+        deterministic=True,
+    ),
+    fn=_run_strategy_static_checks,
 )
 
 # ── run_backtest ────────────────────────────────────────────────────────────
@@ -238,11 +311,26 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
 
     strategy_id = input_data.get("strategy_id", "")
     factor_name = input_data.get("factor_name", "")
+    spec_data = input_data.get("strategy_spec")
+    strategy_spec = (
+        strategy_spec_from_agent_spec(spec_data)
+        if isinstance(spec_data, dict)
+        else None
+    )
+    if strategy_spec is not None:
+        strategy_id = strategy_id or strategy_spec.strategy_id
+        if not factor_name and strategy_spec.factors:
+            factor_name = strategy_spec.factors[0].factor_id
     start_date = input_data.get("start_date", "20200101")
     end_date = input_data.get("end_date", _today_yyyymmdd())
     initial_cash = float(input_data.get("initial_cash", 1_000_000))
-    top_n = int(input_data.get("top_n", 20))
+    top_n = int(input_data.get("top_n", strategy_spec.portfolio.top_n if strategy_spec else 20))
     symbols = _requested_symbols(input_data)
+    code_path = str(input_data.get("code_path") or "")
+    if code_path:
+        issues = static_check_strategy_file(Path(code_path))
+        if issues:
+            return {"status": "STATIC_CHECK_FAILED", "issues": issues, "code_path": code_path}
 
     # Resolve factor_name from strategy_id if not provided
     if not factor_name and strategy_id:
@@ -252,14 +340,6 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             "status": "error",
             "message": "必须提供 strategy_id 或 factor_name 才能回测策略。"
         }
-
-    # Use the research runner for a baseline backtest
-    from qmt_agent_trader.backtest.research_runner import (
-        FactorRankResearchConfig,
-        FactorRankResearchRunner,
-    )
-    from qmt_agent_trader.backtest.sensitivity import SensitivityScenario
-    from qmt_agent_trader.data.bars import load_daily_bars
 
     registry_root = _factor_registry_root(lake)
     factor_registry = FactorRegistry(registry_root)
@@ -283,128 +363,48 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             ],
         }
     factor_name = saved.factor_id
-
-    bars = load_daily_bars(lake, symbols=symbols or None)
-    if bars.empty:
-        return {"status": "error", "message": "data lake is empty; run data update first"}
-
-    # Filter bars to date range
-    start_bound = pd.to_datetime(start_date).date()
-    end_bound = pd.to_datetime(end_date).date()
-    bars = bars[
-        (bars["trade_date"] >= start_bound)
-        & (bars["trade_date"] <= end_bound)
-    ]
-    if bars.empty:
-        return {
-            "status": "error",
-            "message": f"no bars in range {start_date}–{end_date}",
-        }
-    actual_start_date = bars["trade_date"].min()
-    actual_end_date = bars["trade_date"].max()
-    actual_start_text = f"{actual_start_date:%Y%m%d}"
-    actual_end_text = f"{actual_end_date:%Y%m%d}"
-    data_freshness = (
-        "stale_vs_requested_end"
-        if actual_end_date < end_bound
-        else "covers_requested_end"
+    if strategy_spec is None:
+        strategy_spec = StrategySpec(
+            strategy_id=strategy_id or f"factor_{factor_name}",
+            name=f"Factor baseline: {factor_name}",
+            kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
+            factors=[{"factor_id": factor_name}],
+            portfolio={"top_n": top_n},
+        )
+    result = run_strategy_backtest(
+        lake,
+        _strategy_registry(),
+        StrategyBacktestConfig(
+            strategy_id=strategy_spec.strategy_id,
+            strategy_spec=strategy_spec,
+            factor_name=factor_name,
+            start_date=start_date,
+            end_date=end_date,
+            universe=str(input_data.get("universe") or strategy_spec.universe),
+            initial_cash=initial_cash,
+            top_n=top_n,
+            max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
+            slippage_bps=strategy_spec.execution.slippage_bps,
+            execution_delay_days=strategy_spec.execution.execution_delay_days,
+            symbols=symbols,
+        ),
+        reports_dir=Path("reports/research"),
     )
-
-    config = FactorRankResearchConfig(
-        factor_name=factor_name,
-        factor_registry_root=registry_root,
-        top_n=top_n,
-        initial_cash=initial_cash,
-    )
-    runner = FactorRankResearchRunner(bars, config)
-    baseline = SensitivityScenario(
-        cost_multiplier=1.0,
-        slippage_bps=0.0,
-        execution_delay_days=1,
-        top_n=top_n,
-        max_single_position_pct=0.10,
-    )
-
-    result = runner.run(baseline)
-    result_dict = result.as_dict()
-
-    # Persist report
-    reports_dir = Path("reports/research")
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    report = {
-        "run_id": new_id("research"),
-        "created_at": shanghai_now_iso(),
-        "artifact_type": "strategy_backtest",
-        "title": f"Strategy backtest: {factor_name} (top_n={top_n})",
-        "research_only": True,
-        "approval_status": "NOT_REQUESTED",
-        "live_trading_allowed": False,
-        "metadata": {
-            "factor_name": factor_name,
-            "symbols": symbols,
-            "top_n": top_n,
-            "initial_cash": initial_cash,
-            "start_date": start_date,
-            "end_date": end_date,
-            "actual_data_start": actual_start_text,
-            "actual_data_end": actual_end_text,
-            "data_freshness": data_freshness,
-        },
-        "summary": {
-            "baseline_total_return": result.metrics.total_return,
-            "sharpe": result.metrics.sharpe,
-            "max_drawdown": result.metrics.max_drawdown,
-            "turnover": result.metrics.turnover,
-            "diagnostic_pass": result.metrics.diagnostic_pass,
-            "trade_count": len(result.trades),
-            "rejected_orders": result.rejected_orders,
-        },
-        "performance_report": {
-            "total_return": result.metrics.total_return,
-            "sharpe": result.metrics.sharpe,
-            "max_drawdown": result.metrics.max_drawdown,
-            "turnover": result.metrics.turnover,
-            "trade_count": len(result.trades),
-            "fills": len(result.trades),
-        },
-        "trade_blotter": [
+    payload = result.model_dump(mode="json")
+    if result.status == "completed":
+        payload.update(
             {
-                "symbol": t.symbol,
-                "execution_date": t.trade_date,
-                "side": t.side.value,
-                "quantity": t.quantity,
-                "price": t.price,
+                "factor_name": factor_name,
+                "symbols": symbols,
+                "start_date": start_date,
+                "end_date": end_date,
+                "actual_data_start": result.data_window.get("actual_start"),
+                "actual_data_end": result.data_window.get("actual_end"),
+                "data_freshness": result.data_window.get("data_freshness"),
+                "cache_hit": False,
             }
-            for t in result.trades
-        ],
-        "payload": result_dict,
-    }
-    report_path = reports_dir / f"{report['run_id']}.json"
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
-
-    return {
-        "run_id": report["run_id"],
-        "status": "completed",
-        "factor_name": factor_name,
-        "symbols": symbols,
-        "start_date": start_date,
-        "end_date": end_date,
-        "actual_data_start": actual_start_text,
-        "actual_data_end": actual_end_text,
-        "data_freshness": data_freshness,
-        "metrics": {
-            "total_return": round(result.metrics.total_return, 4),
-            "sharpe": round(result.metrics.sharpe, 4),
-            "max_drawdown": round(result.metrics.max_drawdown, 4),
-            "turnover": round(result.metrics.turnover, 4),
-            "trade_count": len(result.trades),
-        },
-        "report_path": str(report_path),
-        "cache_hit": False,
-    }
+        )
+    return payload
 
 
 run_backtest_tool: AgentTool = tool(
@@ -421,6 +421,8 @@ run_backtest_tool: AgentTool = tool(
             "properties": {
                 "factor_name": {"type": "string"},
                 "strategy_id": {"type": "string"},
+                "strategy_spec": {"type": "object"},
+                "code_path": {"type": "string"},
                 "start_date": {"type": "string"},
                 "end_date": {"type": "string"},
                 "symbol": {"type": "string"},
@@ -429,7 +431,7 @@ run_backtest_tool: AgentTool = tool(
                 "initial_cash": {"type": "number"},
                 "top_n": {"type": "integer"},
             },
-            "required": ["factor_name"],
+            "additionalProperties": False,
         },
         permission=PermissionLevel.BACKTEST_EXECUTE,
         deterministic=False,
@@ -492,6 +494,15 @@ generate_research_report_tool: AgentTool = tool(
     ToolSpec(
         name="generate_research_report",
         description="生成因子或策略研究报告。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "experiment_id": {"type": "string"},
+                "run_ids": {"type": "array", "items": {"type": "string"}},
+                "include_sections": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": False,
+        },
         permission=PermissionLevel.RESEARCH_WRITE,
         side_effect_level="write_generated",
         deterministic=False,
@@ -507,6 +518,7 @@ def build_strategy_tools(deps: AgentToolDependencies) -> list[AgentTool]:
         (create_strategy_spec_tool, _create_strategy_spec),
         (generate_strategy_code_tool, _generate_strategy_code),
         (list_strategy_candidates_tool, _list_strategy_candidates),
+        (run_strategy_static_checks_tool, _run_strategy_static_checks),
         (run_backtest_tool, _run_backtest),
         (generate_research_report_tool, _generate_research_report),
     ]
@@ -527,27 +539,65 @@ def _bind_tool(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _render_strategy_code(name: str, factors: list[str], top_n: int) -> str:
+def _render_strategy_code(name: str, spec: StrategySpec) -> str:
     name.replace(" ", "_").replace("-", "_").lower()
+    spec_literal = pformat(spec.model_dump(mode="json"), width=100)
     return f'''"""Candidate strategy: {name}.
 Auto-generated by Agent. REVIEW_REQUIRED before promotion.
 """
 
 import pandas as pd
 
+from qmt_agent_trader.strategy.base import StrategyContext
+from qmt_agent_trader.strategy.portfolio import equal_weight_top_n_from_scores
 
-FACTORS = {factors!r}
-TOP_N = {top_n}
+STRATEGY_SPEC = {spec_literal}
+FACTORS = [item["factor_id"] for item in STRATEGY_SPEC.get("factors", [])]
+TOP_N = int(STRATEGY_SPEC.get("portfolio", {{}}).get("top_n", 20))
+MAX_SINGLE_POSITION_PCT = float(
+    STRATEGY_SPEC.get("portfolio", {{}}).get("max_single_position_pct", 0.10)
+)
+CASH_BUFFER_PCT = float(STRATEGY_SPEC.get("portfolio", {{}}).get("cash_buffer_pct", 0.02))
 
 
-def generate_signals(data: pd.DataFrame) -> pd.DataFrame:
-    """Generate buy signals based on factor rankings."""
-    if data.empty:
-        return pd.DataFrame(columns=["symbol", "target_weight"])
-    # Placeholder: in a full implementation, combine multiple factors into a score.
-    ranked = data.head(TOP_N).copy()
-    ranked["target_weight"] = 1 / max(len(ranked), 1)
-    return ranked[["symbol", "target_weight"]]
+def generate_signals(context: StrategyContext) -> pd.DataFrame:
+    """Generate long-only target weights from configured factor columns."""
+    data = context.factors if isinstance(context.factors, pd.DataFrame) else context.bars
+    if not isinstance(data, pd.DataFrame) or data.empty:
+        return _empty_signals()
+    if "symbol" not in data.columns:
+        raise ValueError("strategy input must include symbol")
+    missing = [factor for factor in FACTORS if factor not in data.columns]
+    if missing:
+        raise ValueError(f"missing factor columns: {{missing}}")
+    scored = data.drop_duplicates("symbol", keep="last").copy()
+    scored["score"] = 0.0
+    for item in STRATEGY_SPEC.get("factors", []):
+        factor_id = item["factor_id"]
+        weight = float(item.get("weight", 1.0))
+        values = pd.to_numeric(scored[factor_id], errors="coerce")
+        std = float(values.std(ddof=0))
+        mean = float(values.mean())
+        normalized = values - mean if std <= 0 else (values - mean) / std
+        if bool(item.get("ascending", False)):
+            normalized = -normalized
+        scored["score"] = scored["score"] + normalized.fillna(0.0) * weight
+    signals = equal_weight_top_n_from_scores(
+        scored,
+        top_n=TOP_N,
+        max_single_position_pct=MAX_SINGLE_POSITION_PCT,
+        cash_buffer_pct=CASH_BUFFER_PCT,
+        score_column="score",
+    )
+    signal_date = context.as_of_date
+    signals.insert(1, "signal_date", signal_date)
+    scores = scored.set_index("symbol")["score"]
+    signals.insert(2, "score", signals["symbol"].map(scores))
+    return signals[["symbol", "signal_date", "score", "target_weight", "reason"]]
+
+
+def _empty_signals() -> pd.DataFrame:
+    return pd.DataFrame(columns=["symbol", "signal_date", "score", "target_weight", "reason"])
 '''
 
 
@@ -558,6 +608,7 @@ import importlib.util
 from pathlib import Path
 
 import pandas as pd
+from qmt_agent_trader.strategy.base import StrategyContext
 
 
 MODULE_PATH = Path(__file__).with_name("strategy.py")
@@ -569,19 +620,23 @@ generate_signals = MODULE.generate_signals
 
 
 def test_empty_data():
-    result = generate_signals(pd.DataFrame())
+    context = StrategyContext(as_of_date="20240102", universe="stock_etf", bars=pd.DataFrame())
+    result = generate_signals(context)
     assert result.empty
 
 
 def test_generates_signals():
+    factor_id = MODULE.FACTORS[0] if MODULE.FACTORS else "score"
     data = pd.DataFrame({{
         "symbol": ["A", "B", "C"],
         "close": [10, 20, 30],
-        "score": [0.9, 0.5, 0.1],
+        factor_id: [0.9, 0.5, 0.1],
     }})
-    result = generate_signals(data)
+    context = StrategyContext(as_of_date="20240102", universe="stock_etf", bars=data, factors=data)
+    result = generate_signals(context)
     assert "symbol" in result.columns
     assert "target_weight" in result.columns
+    assert "score" in result.columns
 '''
 
 
@@ -617,6 +672,27 @@ def _map_strategy_factor(strategy_id: str) -> str | None:
 
 def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
+
+
+def _strategy_registry() -> StrategyRegistry:
+    lake = _get_lake()
+    root = lake.root.parent / "strategies" if lake is not None else Path("data/strategies")
+    return StrategyRegistry(root)
+
+
+def _registered_status(registry: StrategyRegistry, strategy_id: str) -> str | None:
+    saved = registry.get_strategy(strategy_id)
+    return saved.status.value if saved is not None else None
+
+
+def _registered_reports(registry: StrategyRegistry, strategy_id: str) -> list[str]:
+    saved = registry.get_strategy(strategy_id)
+    return saved.report_paths if saved is not None else []
+
+
+def _registered_approval(registry: StrategyRegistry, strategy_id: str) -> str | None:
+    saved = registry.get_strategy(strategy_id)
+    return saved.approval_file if saved is not None else None
 
 
 def _today_yyyymmdd() -> str:

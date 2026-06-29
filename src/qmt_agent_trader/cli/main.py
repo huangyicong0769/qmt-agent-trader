@@ -51,6 +51,8 @@ from qmt_agent_trader.services.order_plan_service import (
     save_order_plan,
 )
 from qmt_agent_trader.strategy.approval import StrategyApproval, write_approval_file
+from qmt_agent_trader.strategy.models import StrategySource
+from qmt_agent_trader.strategy.registry import StrategyRegistry
 
 app = typer.Typer(help="Mac control plane for QMT agent trading.")
 data_app = typer.Typer(help="Data lake commands.")
@@ -72,6 +74,10 @@ app.add_typer(trade_app, name="trade")
 
 def _settings() -> Settings:
     return get_settings()
+
+
+def _strategy_registry() -> StrategyRegistry:
+    return StrategyRegistry(_settings().resolved_data_dir / "strategies")
 
 
 def _broker_client() -> RemoteQMTBrokerClient:
@@ -489,14 +495,34 @@ def agent_self_bootstrap(
     workflow = SelfBootstrapWorkflow(reg, store)
     exp = workflow.run(ids)
     print_json(exp.model_dump(mode="json"))
+
+
+@strategy_app.command("list")
 def strategy_list() -> None:
-    approval_dir = Path("approvals")
-    files = (
-        sorted(str(path) for path in approval_dir.glob("*.approval.yaml"))
-        if approval_dir.exists()
-        else []
+    registry = _strategy_registry()
+    print_json(
+        {
+            "strategies": [
+                item.model_dump(mode="json")
+                for item in registry.list_strategies(include_builtins=True)
+            ]
+        }
     )
-    print_json({"approvals": files})
+
+
+@strategy_app.command("candidates")
+def strategy_candidates(query: Annotated[str | None, typer.Option("--query")] = None) -> None:
+    registry = _agent_registry()
+    context = ToolContext(run_id="cli_strategy_candidates", requested_by_llm=False)
+    print_json(registry.run_tool("list_strategy_candidates", {"query": query or ""}, context))
+
+
+@strategy_app.command("show")
+def strategy_show(strategy_id: Annotated[str, typer.Option("--strategy-id")]) -> None:
+    saved = _strategy_registry().get_strategy(strategy_id)
+    if saved is None:
+        raise typer.BadParameter(f"strategy not found: {strategy_id}")
+    print_json(saved.model_dump(mode="json"))
 
 
 @strategy_app.command("review")
@@ -509,14 +535,22 @@ def strategy_approve(
     strategy_id: Annotated[str, typer.Option("--strategy-id")],
     paper_only: bool = True,
 ) -> None:
+    registry = _strategy_registry()
+    saved = registry.get_strategy(strategy_id)
+    if saved is None:
+        raise typer.BadParameter(f"strategy not found in registry: {strategy_id}")
+    if saved.source == StrategySource.BUILTIN:
+        raise typer.BadParameter("built-in strategies cannot be approved from CLI")
+    if saved.status != ApprovalStatus.REVIEW_REQUIRED:
+        raise typer.BadParameter("strategy must be REVIEW_REQUIRED before approval")
     approval = StrategyApproval(
         strategy_id=strategy_id,
-        strategy_name=strategy_id.replace("_", " ").title(),
-        strategy_version="1.0.0",
+        strategy_name=saved.name,
+        strategy_version=saved.version,
         approved_by="human",
         allowed_universe=["A_SHARE_STOCK", "ETF"],
-        allowed_accounts=["default_stock_account"],
-        max_single_position_pct=0.10,
+        allowed_accounts=["paper_account"],
+        max_single_position_pct=saved.spec.portfolio.max_single_position_pct,
         max_turnover_daily_pct=0.30,
         max_order_value=100000,
         live_trading_allowed=False,
@@ -524,6 +558,8 @@ def strategy_approve(
         notes="First approval for paper trading only.",
     )
     path = write_approval_file(approval, Path("approvals"))
+    registry.attach_approval(strategy_id, str(path))
+    registry.update_status(strategy_id, ApprovalStatus.APPROVED, trusted=True)
     print_json({"status": "APPROVED", "paper_only": paper_only, "path": str(path)})
 
 
