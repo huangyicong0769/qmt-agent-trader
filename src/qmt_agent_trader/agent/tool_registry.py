@@ -353,4 +353,6 @@ def _timeout_seconds_for_call(
     resolved = resolver(input_data, context)
     if resolved is None:
         return default
+    if not isinstance(resolved, int | float):
+        return default
     return resolved
