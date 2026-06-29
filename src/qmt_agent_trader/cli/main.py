@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich import print
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
+from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
 from qmt_agent_trader.agent.permissions import ToolCallMode
 from qmt_agent_trader.agent.runtime import AgentRuntime, build_default_runtime
 from qmt_agent_trader.agent.schemas import ToolContext
@@ -27,6 +32,7 @@ from qmt_agent_trader.backtest.service import compare_backtest_reports, run_back
 from qmt_agent_trader.broker.order_plan import OrderPlan
 from qmt_agent_trader.broker.remote_client import RemoteQMTBrokerClient
 from qmt_agent_trader.broker.risk import run_order_plan_risk_checks
+from qmt_agent_trader.cli.todo_render import empty_todo_state, render_todo_panel
 from qmt_agent_trader.cli.tui import run_tui
 from qmt_agent_trader.core.audit import AuditLogger
 from qmt_agent_trader.core.config import Settings, get_settings
@@ -318,25 +324,78 @@ def agent_call_tool(
 def agent_ask(
     prompt: Annotated[str, typer.Option("--prompt")],
     max_rounds: Annotated[int, typer.Option("--max-rounds")] = 100,
+    session_id: Annotated[str, typer.Option("--session-id")] = "cli-default",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    runtime = build_default_runtime(_settings())
-    try:
-        result = runtime.ask(prompt, max_rounds=max_rounds)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    print_json(
-        {
-            "content": result.content,
-            "tool_calls": [
-                {
-                    "name": call.name,
-                    "arguments": call.arguments,
-                    "result": call.result,
-                }
-                for call in result.tool_calls
-            ],
-        }
+    if json_output:
+        runtime = build_default_runtime(_settings())
+        try:
+            result = runtime.ask(prompt, max_rounds=max_rounds)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        print_json(
+            {
+                "content": result.content,
+                "tool_calls": [
+                    {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "result": call.result,
+                    }
+                    for call in result.tool_calls
+                ],
+            }
+        )
+        return
+
+    asyncio.run(
+        _agent_ask_stream(
+            prompt=prompt,
+            max_rounds=max_rounds,
+            session_id=session_id,
+        )
     )
+
+
+async def _agent_ask_stream(*, prompt: str, max_rounds: int, session_id: str) -> None:
+    runtime = build_default_runtime(_settings())
+    orchestrator = AgentOrchestrator(runtime=runtime)
+    console = Console()
+    todo_state = empty_todo_state()
+    event_lines: list[str] = []
+    answer_parts: list[str] = []
+    final_answer = ""
+
+    def view() -> Group:
+        answer = final_answer or "".join(answer_parts) or "Waiting for assistant output..."
+        events = "\n".join(event_lines[-10:]) or "No tool calls yet."
+        return Group(
+            render_todo_panel(todo_state),
+            Panel(events, title="Events", border_style="green"),
+            Panel(answer, title="Assistant", border_style="cyan"),
+        )
+
+    with Live(view(), console=console, refresh_per_second=8) as live:
+        async for event in orchestrator.execute_stream(
+            prompt,
+            session_id=session_id,
+            max_rounds=max_rounds,
+        ):
+            if event.type == "todo_status":
+                todo_state = event.data
+            elif event.type == "tool_start":
+                event_lines.append(f"Calling {event.data.get('tool_name', '')}")
+            elif event.type == "tool_done":
+                event_lines.append(f"Done {event.data.get('tool_name', '')}")
+            elif event.type == "token":
+                answer_parts.append(event.message)
+            elif event.type == "final_message":
+                final_answer = event.message
+            elif event.type == "error":
+                event_lines.append(f"Error: {event.message}")
+            elif event.type == "done":
+                event_lines.append(event.message)
+            live.update(view())
 
 
 def _agent_registry() -> AgentToolRegistry:
