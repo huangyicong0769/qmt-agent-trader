@@ -22,6 +22,7 @@ from qmt_agent_trader.agent.tools.meta_tools import build_meta_tools
 from qmt_agent_trader.agent.tools.query_tools import build_query_tools
 from qmt_agent_trader.agent.tools.remote_data_tools import build_remote_data_tools
 from qmt_agent_trader.agent.tools.strategy_tools import build_strategy_tools
+from qmt_agent_trader.agent.tools.todo_tools import build_todo_tools
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
 
@@ -116,6 +117,7 @@ def build_agent_registry(
         *build_factor_tools(deps),
         *build_strategy_tools(deps),
         *build_meta_tools(deps),
+        *build_todo_tools(deps),
     )
     if resolved_settings.mcp_enabled:
         from qmt_agent_trader.agent.mcp_client import build_mcp_tools

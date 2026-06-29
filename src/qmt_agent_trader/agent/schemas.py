@@ -66,6 +66,7 @@ class ToolContext(BaseModel):
     """Runtime context passed to every tool invocation."""
 
     run_id: str
+    session_id: str | None = None
     experiment_id: str | None = None
     requested_by_llm: bool = True
     call_mode: ToolCallMode | None = None
