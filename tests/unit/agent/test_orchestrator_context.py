@@ -81,6 +81,9 @@ def test_execute_stream_includes_recent_natural_session_history(monkeypatch, tmp
     assert "verify the full requested symbols list with query_bars" in system_prompt
     assert "Do not expand the user-requested date window" in system_prompt
     assert "Do not validate only a sample symbol" in system_prompt
+    assert "intent has been classified" not in system_prompt
+    assert "Suggested workflow" not in system_prompt
+    assert "Recommended tools" not in system_prompt
 
 
 class SafetyCapDeepSeekClient:

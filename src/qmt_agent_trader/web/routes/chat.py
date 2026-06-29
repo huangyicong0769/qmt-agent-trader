@@ -2,7 +2,7 @@
 
 Includes:
 - /sessions CRUD
-- /messages (with routing + stub response)
+- /messages (message enqueue)
 - /sessions/{id}/execute (SSE streaming, real LLM orchestration)
 """
 
@@ -15,7 +15,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
-from qmt_agent_trader.agent.router import agent_router
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.web.event_bus import AgentEvent, AgentEventType, event_bus
 from qmt_agent_trader.web.runtime import get_agent_runtime
@@ -23,7 +22,6 @@ from qmt_agent_trader.web.schemas import (
     ChatMessage,
     ChatSession,
     CreateChatSessionRequest,
-    RoutingInfo,
     SendMessageRequest,
 )
 
@@ -72,81 +70,30 @@ async def get_session(session_id: str) -> ChatSession:
 
 @router.post("/sessions/{session_id}/messages")
 async def send_message(session_id: str, request: SendMessageRequest) -> dict[str, object]:
-    """Send a message with intent routing. Returns routing + stub response.
+    """Store a user message.
 
     For real LLM execution, use the /execute SSE endpoint.
     """
     session = _get_session_or_404(session_id)
-    decision = agent_router.route(
-        message=request.content,
-        session_context=session.context,
-    )
-
-    routing_info = RoutingInfo(
-        intent=decision.intent.value,
-        confidence=decision.confidence,
-        rationale=decision.rationale,
-        required_tools=decision.required_tools,
-        proposed_workflow=decision.proposed_workflow,
-        parameters=decision.parameters,
-        needs_user_clarification=decision.needs_user_clarification,
-        clarification_question=decision.clarification_question,
-    )
-    session.routing_history.append(routing_info)
-
     user_message = ChatMessage(
         session_id=session_id,
         role="user",
         content=request.content,
         metadata=request.metadata or {},
     )
-
-    tools_preview = decision.required_tools[:6]
-    extra = len(decision.required_tools) - 6 if len(decision.required_tools) > 6 else 0
-    tools_preview_str = ", ".join(tools_preview) + (f"... (+{extra} more)" if extra else "")
-
     orchestrator = _get_orchestrator()
     llm_configured = orchestrator.settings.deepseek_api_key is not None
-
-    content = (
-        f"**Intent:** {decision.intent.value} (confidence: {decision.confidence:.0%})\n\n"
-        f"**Plan:** {decision.rationale}\n\n"
-        f"**Required tools:** {tools_preview_str or 'none'}"
-    )
-    if llm_configured:
-        content += (
-            "\n\n✅ DeepSeek LLM is configured. Use `/execute` to run real orchestration, "
-            "or send your message to the SSE endpoint for live execution."
-        )
-    else:
-        content += (
-            "\n\n⚠️ DeepSeek LLM not configured. "
-            "Set DEEPSEEK_API_KEY in .env to enable real execution."
-        )
-
-    assistant_message = ChatMessage(
-        session_id=session_id,
-        role="assistant",
-        content=content,
-        metadata={
-            "stub": True,
-            "intent": decision.intent.value,
-            "llm_configured": llm_configured,
-        },
-    )
-    session.messages.extend([user_message, assistant_message])
+    session.messages.append(user_message)
     session.updated_at = shanghai_now_iso()
 
     await event_bus.publish(
         AgentEvent(
             run_id=session_id,
-            event_type=AgentEventType.LLM_MESSAGE,
-            title=f"Intent: {decision.intent.value}",
-            message=decision.rationale,
+            event_type=AgentEventType.PROGRESS,
+            title="Chat message received",
+            message=request.content,
             payload={
-                "message_id": assistant_message.message_id,
-                "intent": decision.intent.value,
-                "confidence": decision.confidence,
+                "message_id": user_message.message_id,
                 "llm_configured": llm_configured,
             },
         )
@@ -155,9 +102,8 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
     return {
         "session_id": session.session_id,
         "run_id": session.session_id,
-        "message_id": assistant_message.message_id,
-        "message": assistant_message,
-        "routing_decision": routing_info,
+        "message_id": user_message.message_id,
+        "message": user_message,
         "llm_configured": llm_configured,
     }
 
@@ -180,53 +126,31 @@ async def execute_stream(session_id: str, request: Request) -> StreamingResponse
         pass
 
     message = body.get("message", "") or body.get("content", "")
+    using_session_message = False
     if not message:
         # Use the last user message in the session
         for m in reversed(session.messages):
             if m.role == "user":
                 message = m.content
+                using_session_message = True
                 break
     if not message:
         raise HTTPException(status_code=400, detail="No message to execute")
 
-    # Route intent
-    decision = agent_router.route(
-        message=message,
-        session_context=session.context,
-    )
-
-    session.routing_history.append(
-        RoutingInfo(
-            intent=decision.intent.value,
-            confidence=decision.confidence,
-            rationale=decision.rationale,
-            required_tools=decision.required_tools,
-            proposed_workflow=decision.proposed_workflow,
-        )
-    )
-
     run_id = new_id("run")
 
-    # Add user message to session
-    user_msg = ChatMessage(session_id=session_id, role="user", content=message)
-    session.messages.append(user_msg)
-    session.updated_at = shanghai_now_iso()
+    if not using_session_message:
+        user_msg = ChatMessage(session_id=session_id, role="user", content=message)
+        session.messages.append(user_msg)
+        session.updated_at = shanghai_now_iso()
 
     orchestrator = _get_orchestrator()
 
     async def event_generator() -> AsyncGenerator[str, None]:
         """Stream OrchestratorEvents as SSE."""
         try:
-            routing_payload = json.dumps({
-                "intent": decision.intent.value,
-                "confidence": decision.confidence,
-                "rationale": decision.rationale,
-            }, ensure_ascii=False)
-            yield f"event: routing\ndata: {routing_payload}\n\n"
-
             async for event in orchestrator.execute_stream(
                 message=message,
-                routing=decision,
                 run_id=run_id,
                 history=[
                     {"role": m.role, "content": m.content}

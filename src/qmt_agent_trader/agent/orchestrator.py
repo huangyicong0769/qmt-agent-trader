@@ -1,7 +1,7 @@
-"""Agent Orchestrator — bridges Router → LLM Runtime → EventBus → Frontend.
+"""Agent Orchestrator — bridges LLM Runtime → EventBus → Frontend.
 
-Takes a natural language message + routing decision, executes the LLM
-tool loop with real-time event streaming suitable for SSE delivery.
+Takes a natural language message and executes the LLM tool loop with
+real-time event streaming suitable for SSE delivery.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.llm_client import (
     DeepSeekClient,
 )
-from qmt_agent_trader.agent.router import RoutingDecision
 from qmt_agent_trader.agent.runtime import AgentRuntime, build_default_runtime
 from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
 from qmt_agent_trader.core.config import Settings, get_settings
@@ -78,7 +77,6 @@ class AgentOrchestrator:
     async def execute_stream(
         self,
         message: str,
-        routing: RoutingDecision | None = None,
         *,
         run_id: str | None = None,
         history: list[dict[str, Any]] | None = None,
@@ -95,10 +93,7 @@ class AgentOrchestrator:
         ExperimentStore(self.settings.resolved_data_dir / "experiments").create_experiment(
             "chat_research",
             experiment_id=experiment_id,
-            hypothesis={
-                "message": message,
-                "intent": routing.intent.value if routing else "GENERAL_RESEARCH",
-            },
+            hypothesis={"message": message},
             tags=["chat_research"],
         )
 
@@ -106,12 +101,7 @@ class AgentOrchestrator:
         yield OrchestratorEvent(
             type="run_started",
             run_id=rid,
-            data={
-                "experiment_id": experiment_id,
-                "intent": routing.intent.value if routing else "GENERAL_RESEARCH",
-                "confidence": routing.confidence if routing else 0.0,
-                "rationale": routing.rationale if routing else "",
-            },
+            data={"experiment_id": experiment_id},
             message=f"Starting run {rid}",
         )
 
@@ -142,13 +132,6 @@ class AgentOrchestrator:
 
         # ── Build system prompt ──
         routing_hint = ""
-        if routing and routing.proposed_workflow:
-            routing_hint = (
-                f"\nThe user's intent has been classified as: {routing.intent.value}. "
-                f"Suggested workflow: {routing.proposed_workflow}. "
-                f"Recommended tools: {', '.join(routing.required_tools[:6])}. "
-                f"Rationale: {routing.rationale}"
-            )
         if _requires_fresh_evidence(message):
             routing_hint += (
                 "\nFresh evidence is likely needed for this request. Prefer existing "
@@ -344,7 +327,6 @@ class AgentOrchestrator:
             data={
                 "experiment_id": experiment_id,
                 "tool_calls_count": tcount,
-                "intent": routing.intent.value if routing else "GENERAL_RESEARCH",
             },
         )
 

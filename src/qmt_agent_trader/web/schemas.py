@@ -26,7 +26,6 @@ class ChatSession(BaseModel):
     updated_at: str = Field(default_factory=shanghai_now_iso)
     messages: list[ChatMessage] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
-    routing_history: list[RoutingInfo] = Field(default_factory=list)
 
 
 class AdvancedOptions(BaseModel):
@@ -36,17 +35,6 @@ class AdvancedOptions(BaseModel):
     max_hypotheses: int | None = None
     risk_profile: str | None = None
     budget_mode: str = "balanced"
-
-
-class RoutingInfo(BaseModel):
-    intent: str
-    confidence: float
-    rationale: str
-    required_tools: list[str] = Field(default_factory=list)
-    proposed_workflow: str | None = None
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    needs_user_clarification: bool = False
-    clarification_question: str | None = None
 
 
 class CreateChatSessionRequest(BaseModel):

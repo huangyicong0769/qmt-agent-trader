@@ -17,7 +17,6 @@ from typing import Any
 from nicegui import ui
 
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
-from qmt_agent_trader.agent.router import agent_router
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.web.ui.layout import shell
@@ -242,30 +241,6 @@ async def _send(
     session.save()
     refresh_sidebar()
 
-    # ── Route ──
-    decision = agent_router.route(content)
-    intent = decision.intent.value
-    confidence = decision.confidence
-
-    plan_html = (
-        f"| | |\n|---|---|\n"
-        f"| **Intent** | `{intent}` |\n"
-        f"| **Confidence** | {confidence:.0%} |\n"
-    )
-    if decision.proposed_workflow:
-        plan_html += f"| **Workflow** | `{decision.proposed_workflow}` |\n"
-    plan_html += f"\n**Rationale:** {decision.rationale}"
-    if decision.required_tools:
-        plan_html += (
-            f"\n\n**Tools:** {', '.join(decision.required_tools[:8])}"
-            f"{'…' if len(decision.required_tools) > 8 else ''}"
-        )
-
-    plan_card.clear()
-    with plan_card:
-        ui.markdown(f"### 🤖 Agent Plan\n\n{plan_html}")
-    plan_card.visible = True
-
     # ── Orchestrate ──
     run_id = new_id("run")
     assistant_card: ui.card | None = None
@@ -278,7 +253,8 @@ async def _send(
 
     try:
         async for evt in session.orchestrator.execute_stream(
-            message=content, routing=decision, run_id=run_id,
+            message=content,
+            run_id=run_id,
             history=[
                 {"role": msg.role, "content": msg.content}
                 for msg in session.messages
@@ -298,11 +274,9 @@ async def _send(
                 exp = ed.get("experiment_id", "?")
                 c2 = ui.card().classes("w-full bg-gray-50 p-2 text-xs text-gray-500")
                 with c2:
-                    ui.label(
-                        f"**Run** `{run_id[:8]}` | **Exp** `{exp}` | `{intent}`"
-                    )
+                    ui.label(f"**Run** `{run_id[:8]}` | **Exp** `{exp}`")
                 c2.move(session.transcript)
-                session.add_message("info", f"Run {run_id[:8]} | {intent}")
+                session.add_message("info", f"Run {run_id[:8]}")
 
             elif et == "progress":
                 if em and lbl_ref[0] is not None:
