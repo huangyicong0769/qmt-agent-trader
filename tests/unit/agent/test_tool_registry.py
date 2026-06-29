@@ -181,6 +181,67 @@ def test_run_tool_timeout_returns_structured_result_and_audits(tmp_path) -> None
     assert '"status": "timeout"' in audit.log_path.read_text(encoding="utf-8")
 
 
+def test_run_tool_uses_dynamic_timeout_resolver() -> None:
+    reg = AgentToolRegistry()
+
+    def _slow(_d: dict, _c: ToolContext) -> dict:
+        time.sleep(0.02)
+        return {"finished": True}
+
+    reg.register(
+        tool(
+            ToolSpec(
+                name="dynamic_timeout",
+                description="dynamic_timeout",
+                permission=PermissionLevel.READ_ONLY,
+                timeout_seconds=0,
+            ),
+            fn=_slow,
+            timeout_seconds_for_call=lambda _data, _ctx: 1,
+        )
+    )
+
+    result = reg.run_tool("dynamic_timeout", {}, ToolContext(run_id="r-dynamic-timeout"))
+
+    assert result == {"finished": True}
+
+
+def test_run_tool_timeout_reports_dynamic_timeout_used(tmp_path) -> None:
+    audit = AuditLogger(tmp_path / "audit.jsonl")
+    reg = AgentToolRegistry(audit_logger=audit)
+
+    def _slow(_d: dict, _c: ToolContext) -> dict:
+        time.sleep(0.2)
+        return {"late": True}
+
+    reg.register(
+        tool(
+            ToolSpec(
+                name="dynamic_timeout_slow",
+                description="dynamic_timeout_slow",
+                permission=PermissionLevel.READ_ONLY,
+                timeout_seconds=1,
+            ),
+            fn=_slow,
+            timeout_seconds_for_call=lambda _data, _ctx: 0,
+        )
+    )
+
+    result = reg.run_tool(
+        "dynamic_timeout_slow",
+        {},
+        ToolContext(run_id="r-dynamic-timeout-result"),
+    )
+
+    assert result == {
+        "status": "TIMEOUT",
+        "tool_name": "dynamic_timeout_slow",
+        "timeout_seconds": 0,
+    }
+    audit_entry = json.loads(audit.log_path.read_text(encoding="utf-8").strip())
+    assert audit_entry["output_data"]["timeout_seconds"] == 0
+
+
 # ── Legacy ToolRegistry ──────────────────────────────────────────────────────
 
 

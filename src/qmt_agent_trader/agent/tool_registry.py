@@ -179,13 +179,19 @@ class AgentToolRegistry:
 
         # 2. Audit (before)
         start_ms = int(time.monotonic() * 1000)
+        timeout_seconds = _timeout_seconds_for_call(
+            tool,
+            input_data,
+            context,
+            default=spec.timeout_seconds,
+        )
 
         # 3. Execute
         status = "ok"
         error_message = None
         result: dict[str, Any] = {}
         try:
-            result = _run_with_timeout(tool, input_data, context, spec.timeout_seconds)
+            result = _run_with_timeout(tool, input_data, context, timeout_seconds)
             if not isinstance(result, dict):
                 result = {"value": result}
         except FutureTimeoutError:
@@ -193,7 +199,7 @@ class AgentToolRegistry:
             result = {
                 "status": "TIMEOUT",
                 "tool_name": name,
-                "timeout_seconds": spec.timeout_seconds,
+                "timeout_seconds": timeout_seconds,
             }
         except Exception as exc:
             status = "permission_denied" if "PermissionDenied" in type(exc).__name__ else "error"
@@ -324,7 +330,7 @@ def _run_with_timeout(
     tool: AgentTool,
     input_data: dict[str, Any],
     context: ToolContext,
-    timeout_seconds: int,
+    timeout_seconds: int | float,
 ) -> dict[str, Any]:
     executor = ThreadPoolExecutor(max_workers=1)
     try:
@@ -332,3 +338,19 @@ def _run_with_timeout(
         return future.result(timeout=max(timeout_seconds, 0))
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _timeout_seconds_for_call(
+    tool: AgentTool,
+    input_data: dict[str, Any],
+    context: ToolContext,
+    *,
+    default: int,
+) -> int | float:
+    resolver = getattr(tool, "timeout_seconds_for_call", None)
+    if resolver is None:
+        return default
+    resolved = resolver(input_data, context)
+    if resolved is None:
+        return default
+    return resolved
