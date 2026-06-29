@@ -82,6 +82,20 @@ def _with_deps(
         _lake_var.reset(lake_token)
 
 
+def _timeout_with_deps(
+    deps: AgentToolDependencies,
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> int:
+    lake_token = _lake_var.set(deps.data_lake)
+    settings_token = _settings_var.set(deps.settings)
+    try:
+        return _remote_data_update_timeout_seconds(input_data, context)
+    finally:
+        _settings_var.reset(settings_token)
+        _lake_var.reset(lake_token)
+
+
 def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
     lake = _get_lake()
     if lake is None:
@@ -127,6 +141,20 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
             symbols=symbols,
             asset_type=asset_type,
         )
+        coverage = _symbol_coverage(
+            lake,
+            expected_dates,
+            ts_code=ts_code,
+            symbols=symbols,
+            asset_type=asset_type,
+        )
+        missing_ranges = coverage.get("missing_ranges", missing_ranges)
+        estimated_request_count = _estimate_request_count(
+            input_data,
+            missing_dates_count=int(coverage.get("missing_dates_count", 0)),
+            data_update_needed=bool(missing_ranges),
+            scoped=bool(ts_code),
+        )
         metadata["plan_meaning"] = "dry_run_only_no_remote_fetch_performed"
         metadata["calendar_source"] = calendar_source
         metadata["missing_ranges_are_calendar_days"] = not uses_date_calendar
@@ -149,6 +177,15 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
             else "planned"
         )
         metadata.update(actual_coverage)
+        metadata.update(
+            {
+                "coverage_by_symbol": coverage["coverage_by_symbol"],
+                "missing_symbols": coverage["missing_symbols"],
+                "stale_symbols": coverage["stale_symbols"],
+                "covered_symbols": coverage["covered_symbols"],
+                "estimated_request_count": estimated_request_count,
+            }
+        )
         metadata["data_freshness"] = data_freshness
         return {
             "status": status,
@@ -165,6 +202,11 @@ def _plan_remote_data_update(input_data: dict[str, Any], _context: ToolContext) 
             "data_update_needed": bool(missing_ranges),
             "metadata": metadata,
             "missing_ranges": missing_ranges,
+            "coverage_by_symbol": coverage["coverage_by_symbol"],
+            "missing_symbols": coverage["missing_symbols"],
+            "stale_symbols": coverage["stale_symbols"],
+            "covered_symbols": coverage["covered_symbols"],
+            "estimated_request_count": estimated_request_count,
             "requests": build_data_update_plan(TushareClient(token=None), effective_start, end),
         }
     except ValueError as exc:
@@ -177,6 +219,7 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
         return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
 
     settings = _get_settings()
+    timeout_seconds_used = _remote_data_update_timeout_seconds(input_data, context)
     try:
         source, start, end = _parse_request(input_data)
         ts_code = _normalize_ts_code(input_data.get("ts_code"))
@@ -197,6 +240,7 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
     if bool(input_data.get("dry_run", False)):
         planned = _plan_remote_data_update(input_data, context)
         planned["dry_run"] = True
+        planned["timeout_seconds_used"] = timeout_seconds_used
         return planned
 
     planned = _plan_remote_data_update({**input_data, "dry_run": True}, context)
@@ -207,6 +251,7 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
             **planned,
             "status": "up_to_date",
             "dry_run": False,
+            "timeout_seconds_used": timeout_seconds_used,
             "metadata": {
                 **metadata,
                 "live_fetch_skipped": True,
@@ -251,6 +296,7 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
                 "actual_data_end": actual_coverage.get("actual_data_end"),
                 "coverage_start_date": actual_coverage.get("actual_data_start"),
                 "coverage_end_date": actual_coverage.get("actual_data_end"),
+                "timeout_seconds_used": timeout_seconds_used,
             }
         )
         payload_metadata = payload.get("metadata")
@@ -258,6 +304,26 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
             payload_metadata.update(actual_coverage)
         else:
             payload["metadata"] = dict(actual_coverage)
+            payload_metadata = payload["metadata"]
+        post_update = _plan_remote_data_update({**input_data, "dry_run": True}, context)
+        _copy_coverage_fields(payload, post_update)
+        if isinstance(payload_metadata, dict):
+            payload_metadata.update(
+                {
+                    "coverage_by_symbol": post_update.get("coverage_by_symbol", {}),
+                    "missing_symbols": post_update.get("missing_symbols", []),
+                    "stale_symbols": post_update.get("stale_symbols", []),
+                    "covered_symbols": post_update.get("covered_symbols", []),
+                    "estimated_request_count": post_update.get("estimated_request_count", 0),
+                }
+            )
+        if post_update.get("data_update_needed") is True:
+            payload["status"] = "PARTIAL_COVERAGE"
+            payload["data_update_needed"] = True
+            if isinstance(payload_metadata, dict):
+                payload_metadata["post_update_status"] = "PARTIAL_COVERAGE"
+        else:
+            payload["data_update_needed"] = False
         return payload
     except Exception as exc:
         message = _sanitize_error(str(exc), settings)
@@ -337,6 +403,103 @@ def _missing_ranges(
         return _coalesce_dates(expected_dates)
     missing = [item for item in expected_dates if item not in covered]
     return _coalesce_dates(missing)
+
+
+def _symbol_coverage(
+    lake: DataLake,
+    expected_dates: list[str],
+    *,
+    ts_code: str | None,
+    symbols: list[str],
+    asset_type: str,
+) -> dict[str, Any]:
+    requested_symbols = symbols or ([ts_code] if ts_code else [])
+    if not requested_symbols:
+        missing_dates = _missing_dates(lake, expected_dates, ts_code=None, asset_type=asset_type)
+        return {
+            "coverage_by_symbol": {},
+            "missing_symbols": [],
+            "stale_symbols": [],
+            "covered_symbols": [],
+            "missing_ranges": _coalesce_dates(missing_dates),
+            "missing_dates_count": len(missing_dates),
+        }
+
+    observed_by_symbol: dict[str, set[str]] = {symbol: set() for symbol in requested_symbols}
+    requested = set(requested_symbols)
+    for dataset in _datasets_for_asset_type(asset_type, scoped=True):
+        if not lake.dataset_path("raw", dataset).exists():
+            continue
+        frame = lake.read_parquet("raw", dataset)
+        if frame.empty or "trade_date" not in frame.columns or "ts_code" not in frame.columns:
+            continue
+        frame = frame[frame["ts_code"].astype(str).isin(requested)]
+        for row in frame[["ts_code", "trade_date"]].dropna().itertuples(index=False):
+            observed_by_symbol.setdefault(str(row.ts_code), set()).add(
+                _format_date(row.trade_date)
+            )
+
+    coverage_by_symbol: dict[str, dict[str, Any]] = {}
+    missing_symbols: list[str] = []
+    stale_symbols: list[str] = []
+    covered_symbols: list[str] = []
+    all_missing_dates: set[str] = set()
+    expected_set = set(expected_dates)
+    for symbol in requested_symbols:
+        observed_dates = sorted(observed_by_symbol.get(symbol, set()))
+        observed_expected_dates = [item for item in observed_dates if item in expected_set]
+        missing_dates = [item for item in expected_dates if item not in observed_dates]
+        all_missing_dates.update(missing_dates)
+        missing_ranges = _coalesce_dates(missing_dates)
+        if not observed_dates:
+            missing_symbols.append(symbol)
+        elif missing_dates:
+            stale_symbols.append(symbol)
+        else:
+            covered_symbols.append(symbol)
+        coverage_by_symbol[symbol] = {
+            "actual_data_start": observed_dates[0] if observed_dates else None,
+            "actual_data_end": observed_dates[-1] if observed_dates else None,
+            "actual_rows": len(observed_expected_dates),
+            "missing_ranges": missing_ranges,
+            "data_freshness": (
+                "covers_expected_trading_dates"
+                if not missing_dates
+                else "missing_expected_trading_dates"
+            ),
+        }
+
+    missing_dates_sorted = sorted(all_missing_dates)
+    return {
+        "coverage_by_symbol": coverage_by_symbol,
+        "missing_symbols": missing_symbols,
+        "stale_symbols": stale_symbols,
+        "covered_symbols": covered_symbols,
+        "missing_ranges": _coalesce_dates(missing_dates_sorted),
+        "missing_dates_count": len(missing_dates_sorted),
+    }
+
+
+def _missing_dates(
+    lake: DataLake,
+    expected_dates: list[str],
+    *,
+    ts_code: str | None,
+    asset_type: str,
+) -> list[str]:
+    covered: set[str] = set()
+    for dataset in _datasets_for_asset_type(asset_type, scoped=ts_code is not None):
+        if not lake.dataset_path("raw", dataset).exists():
+            continue
+        frame = lake.read_parquet("raw", dataset)
+        if "trade_date" not in frame.columns:
+            continue
+        if ts_code and "ts_code" in frame.columns:
+            frame = frame[frame["ts_code"].astype(str) == ts_code]
+        covered.update(_format_date(item) for item in frame["trade_date"].dropna().tolist())
+    if not covered:
+        return expected_dates
+    return [item for item in expected_dates if item not in covered]
 
 
 def _datasets_for_asset_type(asset_type: str, *, scoped: bool) -> tuple[str, ...]:
@@ -441,6 +604,59 @@ def _coalesce_dates(dates: list[str]) -> list[dict[str, str]]:
         previous = item
     ranges.append({"start_date": range_start, "end_date": previous})
     return ranges
+
+
+def _estimate_request_count(
+    input_data: dict[str, Any],
+    *,
+    missing_dates_count: int,
+    data_update_needed: bool,
+    scoped: bool,
+) -> int:
+    include_daily = bool(input_data.get("include_daily", True))
+    include_basics = bool(input_data.get("include_basics", True))
+    if not data_update_needed:
+        return 0
+    count = 1
+    if include_basics:
+        count += 3
+    if include_daily:
+        count += 1 if scoped else missing_dates_count or 1
+        if not scoped:
+            count += 1
+            count += missing_dates_count
+    return count
+
+
+def _remote_data_update_timeout_seconds(
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> int:
+    settings = _get_settings()
+    planned = _plan_remote_data_update({**input_data, "dry_run": True}, context)
+    request_count = int(planned.get("estimated_request_count") or 0)
+    computed = (
+        settings.remote_data_tool_base_timeout_seconds
+        + request_count * settings.remote_data_tool_timeout_seconds_per_request
+    )
+    return min(
+        max(300, computed),
+        settings.remote_data_tool_max_timeout_seconds,
+    )
+
+
+def _copy_coverage_fields(payload: dict[str, Any], plan: dict[str, Any]) -> None:
+    for key in (
+        "coverage_by_symbol",
+        "missing_symbols",
+        "stale_symbols",
+        "covered_symbols",
+        "missing_ranges",
+        "estimated_request_count",
+        "data_freshness",
+    ):
+        if key in plan:
+            payload[key] = plan[key]
 
 
 def _date_range(start: date, end: date) -> list[date]:
@@ -572,6 +788,7 @@ run_remote_data_update_tool: AgentTool = tool(
         timeout_seconds=300,
     ),
     fn=_run_remote_data_update,
+    timeout_seconds_for_call=_remote_data_update_timeout_seconds,
 )
 
 
@@ -581,6 +798,11 @@ def build_remote_data_tools(deps: AgentToolDependencies) -> list[AgentTool]:
             run_remote_data_update_tool.spec,
             fn=lambda input_data, context: _with_deps(
                 deps, _run_remote_data_update, input_data, context
+            ),
+            timeout_seconds_for_call=lambda input_data, context: _timeout_with_deps(
+                deps,
+                input_data,
+                context,
             ),
         )
     ]

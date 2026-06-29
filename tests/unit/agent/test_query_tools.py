@@ -160,3 +160,139 @@ def test_query_bars_filters_code_alias_without_returning_market_head(tmp_path) -
     assert result["rows"] == []
     assert result["metadata"]["returned"] == 0
     assert result["metadata"]["reason"] == "no matching bars"
+
+
+def test_query_bars_reports_partial_coverage_for_multi_symbol_request(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20260629",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "vol": 200,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "trade_date": "20260629",
+                    "open": 20.0,
+                    "high": 21.0,
+                    "low": 19.0,
+                    "close": 20.5,
+                    "vol": 300,
+                },
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    set_data_lake(lake)
+
+    result = query_bars_tool.run(
+        {
+            "symbols": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "start_date": "20260629",
+            "end_date": "20260629",
+        },
+        ToolContext(run_id="bars-partial"),
+    )
+
+    assert len(result["rows"]) == 2
+    metadata = result["metadata"]
+    assert metadata["status"] == "PARTIAL_COVERAGE"
+    assert metadata["covered_symbols"] == ["000001.SZ", "000002.SZ"]
+    assert metadata["missing_symbols"] == ["000003.SZ"]
+    assert metadata["stale_symbols"] == []
+    assert metadata["coverage_by_symbol"]["000001.SZ"]["returned"] == 1
+    assert metadata["coverage_by_symbol"]["000003.SZ"]["returned"] == 0
+
+
+def test_query_bars_reports_no_matching_bars_for_requested_symbols(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20260629",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "vol": 200,
+                }
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    set_data_lake(lake)
+
+    result = query_bars_tool.run(
+        {
+            "symbols": ["000003.SZ", "000004.SZ"],
+            "start_date": "20260629",
+            "end_date": "20260629",
+        },
+        ToolContext(run_id="bars-none"),
+    )
+
+    assert result["rows"] == []
+    metadata = result["metadata"]
+    assert metadata["status"] == "NO_MATCHING_BARS"
+    assert metadata["missing_symbols"] == ["000003.SZ", "000004.SZ"]
+    assert metadata["covered_symbols"] == []
+    assert metadata["stale_symbols"] == []
+
+
+def test_query_bars_reports_stale_symbols_when_end_is_not_covered(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20260626",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "vol": 200,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "trade_date": "20260629",
+                    "open": 20.0,
+                    "high": 21.0,
+                    "low": 19.0,
+                    "close": 20.5,
+                    "vol": 300,
+                },
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    set_data_lake(lake)
+
+    result = query_bars_tool.run(
+        {
+            "symbols": ["000001.SZ", "000002.SZ"],
+            "start_date": "20260626",
+            "end_date": "20260629",
+        },
+        ToolContext(run_id="bars-stale"),
+    )
+
+    metadata = result["metadata"]
+    assert metadata["status"] == "PARTIAL_COVERAGE"
+    assert metadata["covered_symbols"] == ["000002.SZ"]
+    assert metadata["stale_symbols"] == ["000001.SZ"]
+    assert metadata["missing_symbols"] == []
+    assert metadata["coverage_by_symbol"]["000001.SZ"]["data_freshness"] == (
+        "stale_vs_requested_end"
+    )

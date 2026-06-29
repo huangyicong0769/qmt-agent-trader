@@ -9,5 +9,8 @@ def test_config_defaults_are_safe() -> None:
     assert settings.remote_data_max_concurrency == 200
     assert settings.remote_data_min_interval_seconds == 0.3
     assert settings.remote_data_http_timeout_seconds == 300.0
+    assert settings.remote_data_tool_base_timeout_seconds == 120
+    assert settings.remote_data_tool_timeout_seconds_per_request == 15
+    assert settings.remote_data_tool_max_timeout_seconds == 3600
     assert settings.remote_data_retry_attempts == 3
     assert settings.remote_data_retry_backoff_seconds == 2.0

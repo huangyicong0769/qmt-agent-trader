@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     remote_data_max_days_per_call: int = 366
     remote_data_lock_timeout_seconds: float = 30.0
     remote_data_http_timeout_seconds: float = 300.0
+    remote_data_tool_base_timeout_seconds: int = 120
+    remote_data_tool_timeout_seconds_per_request: int = 15
+    remote_data_tool_max_timeout_seconds: int = 3600
     remote_data_retry_attempts: int = 3
     remote_data_retry_backoff_seconds: float = 2.0
 

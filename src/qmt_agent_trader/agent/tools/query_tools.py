@@ -144,20 +144,23 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
     try:
         bars = load_daily_bars(lake, start=start, end=end, symbols=symbols or None)
         if bars.empty:
+            coverage_metadata = _bars_coverage_metadata(symbols, bars, end)
             metadata: dict[str, Any] = {
                 "requested_start_date": str(start),
                 "requested_end_date": str(end),
                 "returned": 0,
+                **coverage_metadata,
             }
             if symbols:
                 metadata["requested_symbols"] = symbols
                 metadata["reason"] = "no matching bars"
             else:
-                metadata["status"] = "empty"
+                metadata["status"] = "NO_MATCHING_BARS"
             return {"rows": [], "metadata": metadata}
         cols = [c for c in fields if c in bars.columns]
         # Limit rows for agent safety
         output = bars[cols].head(2000).to_dict(orient="records")
+        coverage_metadata = _bars_coverage_metadata(symbols, bars, end)
         return {
             "rows": output,
             "metadata": {
@@ -171,6 +174,7 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
                 "returned": len(output),
                 "total_rows": len(bars),
                 "identity_fields_forced": True,
+                **coverage_metadata,
             },
         }
     except Exception as exc:
@@ -207,6 +211,65 @@ def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
         if text not in normalized:
             normalized.append(text)
     return normalized
+
+
+def _bars_coverage_metadata(symbols: list[str], bars: Any, requested_end: str) -> dict[str, Any]:
+    if not symbols:
+        return {
+            "status": "OK" if not bars.empty else "NO_MATCHING_BARS",
+            "coverage_by_symbol": {},
+            "missing_symbols": [],
+            "stale_symbols": [],
+            "covered_symbols": [],
+        }
+
+    requested_end_date = _parse_date(str(requested_end))
+    coverage_by_symbol: dict[str, dict[str, Any]] = {}
+    missing_symbols: list[str] = []
+    stale_symbols: list[str] = []
+    covered_symbols: list[str] = []
+
+    for symbol in symbols:
+        symbol_bars = bars[bars["symbol"] == symbol] if not bars.empty else bars
+        returned = len(symbol_bars)
+        if returned == 0:
+            missing_symbols.append(symbol)
+            coverage_by_symbol[symbol] = {
+                "returned": 0,
+                "actual_start_date": None,
+                "actual_end_date": None,
+                "data_freshness": "missing_expected_trading_dates",
+            }
+            continue
+
+        actual_start = symbol_bars["trade_date"].min()
+        actual_end = symbol_bars["trade_date"].max()
+        actual_end_date = _parse_date(str(actual_end))
+        data_freshness = _freshness(str(actual_end), str(requested_end))
+        if actual_end_date < requested_end_date:
+            stale_symbols.append(symbol)
+        else:
+            covered_symbols.append(symbol)
+        coverage_by_symbol[symbol] = {
+            "returned": returned,
+            "actual_start_date": str(actual_start),
+            "actual_end_date": str(actual_end),
+            "data_freshness": data_freshness,
+        }
+
+    if len(missing_symbols) == len(symbols):
+        status = "NO_MATCHING_BARS"
+    elif missing_symbols or stale_symbols:
+        status = "PARTIAL_COVERAGE"
+    else:
+        status = "OK"
+    return {
+        "status": status,
+        "coverage_by_symbol": coverage_by_symbol,
+        "missing_symbols": missing_symbols,
+        "stale_symbols": stale_symbols,
+        "covered_symbols": covered_symbols,
+    }
 
 
 def _today_yyyymmdd() -> str:

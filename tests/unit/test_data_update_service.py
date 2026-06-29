@@ -172,6 +172,32 @@ def test_tushare_data_update_refetches_dates_with_required_symbol_gaps(tmp_path)
     assert [request.params for request in daily_requests] == [{"trade_date": "20260609"}]
 
 
+def test_tushare_data_update_required_symbols_coverage_requires_each_symbol(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20260609"},
+                {"ts_code": "000001.SZ", "trade_date": "20260610"},
+                {"ts_code": "000002.SZ", "trade_date": "20260610"},
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    service = TushareDataUpdateService(FakeTushareClient(), lake)
+
+    missing_dates = service._missing_trade_dates(
+        "tushare_daily",
+        ["20260609", "20260610"],
+        required_symbols=["000001.SZ", "000002.SZ"],
+    )
+
+    assert missing_dates == ["20260609"]
+
+
 def test_tushare_data_update_falls_back_when_calendar_empty(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = FakeTushareClient()

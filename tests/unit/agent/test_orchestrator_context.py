@@ -72,6 +72,9 @@ def test_execute_stream_includes_recent_natural_session_history(monkeypatch, tmp
     assert "list_saved_factors" in system_prompt
     assert "requires_trade_calendar_validation" in system_prompt
     assert "CALENDAR_VALIDATION_REQUIRED" in system_prompt
+    assert "PARTIAL_COVERAGE" in system_prompt
+    assert "missing_symbols" in system_prompt
+    assert "stale_symbols" in system_prompt
     assert "For data acquisition or coverage-check requests" in system_prompt
     assert "do not stop after a dry_run plan or ask whether to fetch" in system_prompt
     assert "loop over each requested symbol" in system_prompt
