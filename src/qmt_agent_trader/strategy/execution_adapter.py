@@ -52,6 +52,8 @@ class StrategyBacktestResult(BaseModel):
     research_only: bool = True
     live_trading_allowed: bool = False
     data_window: dict[str, object] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    adapter_limitations: list[str] = Field(default_factory=list)
 
 
 def run_strategy_backtest(
@@ -64,6 +66,9 @@ def run_strategy_backtest(
     run_id = new_id("research")
     spec = config.strategy_spec or _strategy_spec_from_registry(registry, config.strategy_id)
     factor_name = config.factor_name or _first_factor_id(spec)
+    requested_factor_ids = _factor_ids(spec) or ([factor_name] if factor_name else [])
+    adapter_limitations = _adapter_limitations(requested_factor_ids, factor_name)
+    warnings = list(adapter_limitations)
     if not factor_name:
         return _error(
             run_id,
@@ -142,10 +147,13 @@ def run_strategy_backtest(
         "artifact_type": "strategy_backtest",
         "strategy_id": config.strategy_id,
         "strategy_version": spec.version if spec else "0.1.0",
+        "requested_factor_ids": requested_factor_ids,
         "factor_ids": [factor_name],
         "execution_backend": "factor_rank_baseline_adapter",
         "research_only": True,
         "live_trading_allowed": False,
+        "warnings": warnings,
+        "adapter_limitations": adapter_limitations,
         "config": config.model_dump(mode="json"),
         "data_window": data_window,
         "metrics": metrics,
@@ -170,6 +178,8 @@ def run_strategy_backtest(
         diagnostics=diagnostics,
         factor_ids=[factor_name],
         data_window=data_window,
+        warnings=warnings,
+        adapter_limitations=adapter_limitations,
     )
 
 
@@ -185,6 +195,25 @@ def _first_factor_id(spec: StrategySpec | None) -> str | None:
     if spec is None or not spec.factors:
         return None
     return spec.factors[0].factor_id
+
+
+def _factor_ids(spec: StrategySpec | None) -> list[str]:
+    if spec is None:
+        return []
+    return [factor.factor_id for factor in spec.factors]
+
+
+def _adapter_limitations(requested_factor_ids: list[str], used_factor_id: str | None) -> list[str]:
+    if len(requested_factor_ids) <= 1 or used_factor_id is None:
+        return []
+    return [
+        (
+            "factor_rank_baseline_adapter currently executes only the first factor "
+            f"'{used_factor_id}' from strategy_spec; requested factors were "
+            f"{requested_factor_ids}. Generated strategy code may combine factors, "
+            "but this backtest adapter is still a first-factor baseline."
+        )
+    ]
 
 
 def _diagnostic_evidence(

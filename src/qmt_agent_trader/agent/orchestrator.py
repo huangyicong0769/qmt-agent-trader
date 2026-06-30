@@ -95,8 +95,8 @@ class AgentOrchestrator:
         ExperimentStore(self.settings.resolved_data_dir / "experiments").create_experiment(
             "chat_research",
             experiment_id=experiment_id,
-            hypothesis={"message": message},
-            tags=["chat_research"],
+            hypothesis={"message": message, "session_id": sid},
+            tags=["chat_research", f"session:{sid}"],
         )
 
         # ── Emit start ──
@@ -200,7 +200,7 @@ class AgentOrchestrator:
             "run_factor_static_checks, "
             "save_factor, evaluate_factor_candidate, generate_research_report. Typical strategy "
             "loop: search_experiments, list_strategy_candidates, create_strategy_spec, "
-            "generate_strategy_code, "
+            "generate_strategy_code, run_strategy_static_checks, save_strategy_candidate, "
             "run_backtest, generate_research_report. Typical self-bootstrap loop: "
             "search_experiments, detect_tool_gap, create_tool_spec, generate_tool_code, "
             "generate_tool_tests, run_tool_sandbox_tests, score_tool_candidate. "
@@ -209,6 +209,14 @@ class AgentOrchestrator:
             "with todo_update_item. Mark completed steps COMPLETED, and mark "
             "externally blocked steps BLOCKED with a short note. Use todo_get_status "
             "when resuming a session or when the current todo state is unclear. "
+            "When the user asks what happened in the previous/current run, what "
+            "difficulties were encountered, or what tool-chain boundaries were exposed, "
+            "use todo_get_status plus get_experiment_tool_calls or search_experiments "
+            "when available. Prefer the current session's tool audit; do not broaden to "
+            "older experiments unless the user explicitly asks for historical comparison. "
+            "Mention only tools and failures observed in tool evidence; "
+            "do not claim run_remote_data_update, data fetches, or code changes happened "
+            "unless the tool audit or current tool result shows them. "
             "When a tool returns actual_data_end or data_freshness, distinguish the "
             "local latest data date from the requested end date and from the latest "
             "market trading day; do not call data complete through today when "

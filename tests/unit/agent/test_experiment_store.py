@@ -6,11 +6,14 @@ import pytest
 
 from qmt_agent_trader.agent.errors import ExperimentNotFoundError
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
+from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ExperimentStatus, ToolContext
+from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.tools.experiment_tools import (
     log_experiment_event_tool,
     set_experiment_store,
 )
+from qmt_agent_trader.data.storage import DataLake
 
 
 @pytest.fixture
@@ -69,6 +72,47 @@ def test_log_experiment_event_uses_context_id(store: ExperimentStore) -> None:
 
     assert result["status"] == "logged"
     assert "[observation] context works" in store.get_experiment("exp_context").lessons
+
+
+def test_get_experiment_tool_calls_returns_real_audit_entries(tmp_path) -> None:
+    lake = DataLake(
+        root=tmp_path / "lake",
+        duckdb_path=tmp_path / "test.duckdb",
+    )
+    registry = build_agent_registry(
+        data_lake=lake,
+        audit_path=tmp_path / "audit.jsonl",
+        experiment_root=tmp_path / "experiments",
+        sandbox=CodeSandbox(tmp_path / "generated"),
+    )
+    context = ToolContext(
+        run_id="run_audit",
+        session_id="session_audit",
+        experiment_id="exp_audit",
+    )
+    other_context = ToolContext(
+        run_id="run_other",
+        session_id="session_other",
+        experiment_id="exp_other",
+    )
+
+    registry.run_tool("list_strategy_candidates", {"query": "none"}, context)
+    registry.run_tool("list_strategy_candidates", {"query": "none"}, other_context)
+    result = registry.run_tool("get_experiment_tool_calls", {}, context)
+    current_alias = registry.run_tool(
+        "get_experiment_tool_calls",
+        {"session_id": "current"},
+        context,
+    )
+
+    assert result["status"] == "ok"
+    assert result["session_id"] == "session_audit"
+    assert result["count"] == 1
+    assert result["tool_calls"][0]["tool_name"] == "list_strategy_candidates"
+    assert result["tool_calls"][0]["session_id"] == "session_audit"
+    assert result["tool_calls"][0]["output"]["status"] == "ok"
+    assert current_alias["session_id"] == "session_audit"
+    assert current_alias["count"] == 2
 
 
 def test_add_artifact(store: ExperimentStore) -> None:

@@ -13,6 +13,7 @@ from typing import Any
 class AuditEntry:
     timestamp: str
     run_id: str
+    session_id: str | None
     experiment_id: str | None
     tool_name: str
     permission: str
@@ -36,6 +37,7 @@ class AuditLogger:
         tool_name: str,
         run_id: str,
         *,
+        session_id: str | None = None,
         experiment_id: str | None = None,
         permission: str = "READ_ONLY",
         requested_by_llm: bool = True,
@@ -49,6 +51,7 @@ class AuditLogger:
         entry = AuditEntry(
             timestamp=self._now(),
             run_id=run_id,
+            session_id=session_id,
             experiment_id=experiment_id,
             tool_name=tool_name,
             permission=permission,
@@ -78,6 +81,7 @@ class AuditLogger:
         return {
             "timestamp": entry.timestamp,
             "run_id": entry.run_id,
+            "session_id": entry.session_id,
             "experiment_id": entry.experiment_id,
             "tool_name": entry.tool_name,
             "permission": entry.permission,

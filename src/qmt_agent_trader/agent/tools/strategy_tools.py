@@ -17,6 +17,7 @@ from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
+from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.strategy.execution_adapter import (
@@ -25,6 +26,7 @@ from qmt_agent_trader.strategy.execution_adapter import (
 )
 from qmt_agent_trader.strategy.loader import static_check_strategy_file
 from qmt_agent_trader.strategy.models import (
+    SavedStrategy,
     StrategyKind,
     StrategySource,
     StrategySpec,
@@ -267,6 +269,73 @@ list_strategy_candidates_tool: AgentTool = tool(
     fn=_list_strategy_candidates,
 )
 
+# ── save_strategy_candidate ─────────────────────────────────────────────────
+
+
+def _save_strategy_candidate(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    spec_data = input_data.get("strategy_spec")
+    if not isinstance(spec_data, dict):
+        return {"status": "error", "message": "strategy_spec is required"}
+    spec = strategy_spec_from_agent_spec(spec_data)
+    code_path = str(input_data.get("code_path") or "")
+    if not code_path:
+        return {"status": "error", "message": "code_path is required"}
+    tests_path = str(input_data.get("tests_path") or "") or None
+    registry = _strategy_registry()
+    existing = registry.get_strategy(spec.strategy_id)
+    if existing is not None:
+        return {
+            "status": "already_saved",
+            "strategy_id": spec.strategy_id,
+            "saved_strategy": existing.model_dump(mode="json"),
+        }
+
+    saved = SavedStrategy(
+        strategy_id=spec.strategy_id,
+        name=spec.name,
+        version=spec.version,
+        source=StrategySource.AGENT_GENERATED,
+        status=ApprovalStatus.GENERATED_BY_LLM,
+        spec=spec,
+        implementation_ref=f"file:{code_path}",
+        code_path=code_path,
+        tests_path=tests_path,
+        created_by="agent",
+    )
+    stored = registry.save_candidate(saved)
+    return {
+        "status": "saved",
+        "strategy_id": spec.strategy_id,
+        "saved_strategy": stored.model_dump(mode="json"),
+        "review_required": True,
+        "live_trading_allowed": False,
+    }
+
+
+save_strategy_candidate_tool: AgentTool = tool(
+    ToolSpec(
+        name="save_strategy_candidate",
+        description=(
+            "将已生成并通过静态检查的 strategy spec/code_path 保存到策略注册表。"
+            "保存后仍是 GENERATED_BY_LLM/REVIEW_REQUIRED，不能直接实盘。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "strategy_spec": {"type": "object"},
+                "code_path": {"type": "string"},
+                "tests_path": {"type": "string"},
+            },
+            "required": ["strategy_spec", "code_path"],
+            "additionalProperties": False,
+        },
+        permission=PermissionLevel.RESEARCH_WRITE,
+        side_effect_level="write_generated",
+        deterministic=False,
+    ),
+    fn=_save_strategy_candidate,
+)
+
 # ── run_strategy_static_checks ──────────────────────────────────────────────
 
 
@@ -317,6 +386,10 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         if isinstance(spec_data, dict)
         else None
     )
+    if strategy_spec is None and strategy_id:
+        saved_strategy = _strategy_registry().get_strategy(str(strategy_id))
+        if saved_strategy is not None:
+            strategy_spec = saved_strategy.spec
     if strategy_spec is not None:
         strategy_id = strategy_id or strategy_spec.strategy_id
         if not factor_name and strategy_spec.factors:
@@ -338,7 +411,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     if not factor_name:
         return {
             "status": "error",
-            "message": "必须提供 strategy_id 或 factor_name 才能回测策略。"
+            "message": "必须提供 factor_name、strategy_spec 或可映射到因子的 strategy_id。"
         }
 
     registry_root = _factor_registry_root(lake)
@@ -411,8 +484,10 @@ run_backtest_tool: AgentTool = tool(
     ToolSpec(
         name="run_backtest",
         description=(
-            "运行因子排名策略的基线回测。返回 total_return, sharpe, max_drawdown,"
-            " turnover, trade_count。需提供 factor_name 或 strategy_id。"
+            "运行因子排名策略的基线回测。返回 total_return, sharpe, max_drawdown, "
+            "turnover, trade_count。必须提供 factor_name、strategy_spec 或可映射到因子的 "
+            "strategy_id。传入多因子 strategy_spec 时，当前 baseline adapter 只用第一个"
+            "因子，并在 warnings/adapter_limitations 中说明。"
             " 内置因子: momentum_20d, momentum_60d, reversal_5d, volatility_20d,"
             " turnover_20d, amount_zscore_20d"
         ),
@@ -431,6 +506,11 @@ run_backtest_tool: AgentTool = tool(
                 "initial_cash": {"type": "number"},
                 "top_n": {"type": "integer"},
             },
+            "anyOf": [
+                {"required": ["factor_name"]},
+                {"required": ["strategy_spec"]},
+                {"required": ["strategy_id"]},
+            ],
             "additionalProperties": False,
         },
         permission=PermissionLevel.BACKTEST_EXECUTE,
@@ -518,6 +598,7 @@ def build_strategy_tools(deps: AgentToolDependencies) -> list[AgentTool]:
         (create_strategy_spec_tool, _create_strategy_spec),
         (generate_strategy_code_tool, _generate_strategy_code),
         (list_strategy_candidates_tool, _list_strategy_candidates),
+        (save_strategy_candidate_tool, _save_strategy_candidate),
         (run_strategy_static_checks_tool, _run_strategy_static_checks),
         (run_backtest_tool, _run_backtest),
         (generate_research_report_tool, _generate_research_report),

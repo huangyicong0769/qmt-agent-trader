@@ -211,6 +211,7 @@ class AgentToolRegistry:
         self._audit_entry(
             tool_name=name,
             run_id=context.run_id,
+            session_id=context.session_id,
             experiment_id=context.experiment_id,
             permission=spec.permission.value,
             requested_by_llm=context.requested_by_llm,
@@ -278,6 +279,7 @@ class AgentToolRegistry:
         *,
         tool_name: str,
         run_id: str,
+        session_id: str | None,
         experiment_id: str | None,
         permission: str,
         requested_by_llm: bool,
@@ -293,6 +295,7 @@ class AgentToolRegistry:
                 self.audit_logger.append(
                     tool_name=tool_name,
                     run_id=run_id,
+                    session_id=session_id,
                     experiment_id=experiment_id,
                     permission=permission,
                     requested_by_llm=requested_by_llm,

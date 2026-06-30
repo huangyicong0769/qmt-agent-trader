@@ -2,13 +2,22 @@ from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools.strategy_tools import (
     generate_strategy_code_tool,
+    run_backtest_tool,
     run_strategy_static_checks_tool,
+    save_strategy_candidate_tool,
 )
 
 
 def test_strategy_tools_have_explicit_input_schemas() -> None:
     assert generate_strategy_code_tool.spec.input_schema["required"] == ["strategy_spec"]
     assert run_strategy_static_checks_tool.spec.input_schema["required"] == ["code_path"]
+    assert save_strategy_candidate_tool.spec.input_schema["required"] == [
+        "strategy_spec",
+        "code_path",
+    ]
+    assert {"required": ["strategy_spec"]} in run_backtest_tool.spec.input_schema["anyOf"]
+    assert {"required": ["factor_name"]} in run_backtest_tool.spec.input_schema["anyOf"]
+    assert {"required": ["strategy_id"]} in run_backtest_tool.spec.input_schema["anyOf"]
 
 
 def test_run_strategy_static_checks_rejects_dangerous_code(tmp_path) -> None:

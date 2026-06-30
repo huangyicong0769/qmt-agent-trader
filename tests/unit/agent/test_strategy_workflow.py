@@ -111,6 +111,77 @@ def test_agent_can_list_generated_strategy_candidates(registry):
     assert listed["strategies"][0]["status"] == "draft"
 
 
+def test_agent_can_save_generated_strategy_candidate(registry):
+    context = ToolContext(run_id="strategy-save")
+    spec = registry.run_tool(
+        "create_strategy_spec",
+        {
+            "strategy_idea": "基于动量和波动率的候选策略",
+            "selected_factors": ["momentum_20d", "volatility_20d"],
+        },
+        context,
+    )["strategy_spec"]
+    generated = registry.run_tool("generate_strategy_code", {"strategy_spec": spec}, context)
+
+    saved = registry.run_tool(
+        "save_strategy_candidate",
+        {
+            "strategy_spec": spec,
+            "code_path": generated["code_path"],
+            "tests_path": generated["tests_path"],
+        },
+        context,
+    )
+    listed = registry.run_tool(
+        "list_strategy_candidates",
+        {"query": spec["strategy_id"]},
+        context,
+    )
+
+    assert saved["status"] == "saved"
+    assert saved["saved_strategy"]["status"] == "GENERATED_BY_LLM"
+    assert saved["live_trading_allowed"] is False
+    assert listed["strategies"][0]["saved_in_registry"] is True
+    assert listed["strategies"][0]["status"] == "GENERATED_BY_LLM"
+
+
+def test_saved_strategy_id_can_be_used_for_backtest(registry):
+    context = ToolContext(run_id="strategy-save-backtest")
+    spec = registry.run_tool(
+        "create_strategy_spec",
+        {
+            "strategy_idea": "基于动量的候选策略",
+            "selected_factors": ["momentum_20d"],
+        },
+        context,
+    )["strategy_spec"]
+    generated = registry.run_tool("generate_strategy_code", {"strategy_spec": spec}, context)
+    registry.run_tool(
+        "save_strategy_candidate",
+        {
+            "strategy_spec": spec,
+            "code_path": generated["code_path"],
+            "tests_path": generated["tests_path"],
+        },
+        context,
+    )
+
+    result = registry.run_tool(
+        "run_backtest",
+        {
+            "strategy_id": spec["strategy_id"],
+            "start_date": "20240102",
+            "end_date": "20240102",
+            "symbols": ["000001.SZ"],
+            "top_n": 1,
+        },
+        context,
+    )
+
+    assert result["status"] != "error"
+    assert result["strategy_id"] == spec["strategy_id"]
+
+
 def test_agent_can_list_legacy_flat_strategy_candidates(registry, tmp_path):
     context = ToolContext(run_id="strategy-list-flat")
     generated = tmp_path / "generated" / "strategies" / "strat_legacy.py"
