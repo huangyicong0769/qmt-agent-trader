@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from qmt_agent_trader.web.ui.pages.chat import _todo_status_markdown
+from qmt_agent_trader.web.ui.pages.chat import (
+    _build_pending_message,
+    _mark_pending_ready,
+    _pending_message_status,
+    _todo_status_markdown,
+)
 
 
 def test_todo_status_markdown_renders_empty_state() -> None:
@@ -29,3 +34,40 @@ def test_todo_status_markdown_renders_active_and_blocked_items() -> None:
     assert "Active: 检查数据" in rendered
     assert "`IN_PROGRESS` 检查数据" in rendered
     assert "`BLOCKED` 等待远程数据 - API timeout" in rendered
+
+
+def test_pending_queue_message_waits_for_confirmation_before_send() -> None:
+    pending = _build_pending_message("queue", "  当前任务后检查数据覆盖  ")
+    assert pending is not None
+
+    waiting = _pending_message_status(pending)
+
+    assert waiting.badge == "排队中"
+    assert "等待当前任务完成" in waiting.detail
+    assert "自动执行" not in waiting.detail
+    assert waiting.can_undo is True
+    assert waiting.can_send is False
+
+    ready = _pending_message_status(_mark_pending_ready(pending))
+
+    assert ready.badge == "排队待确认"
+    assert "发送前可撤销" in ready.detail
+    assert ready.can_undo is True
+    assert ready.can_send is True
+
+
+def test_pending_guide_message_has_distinct_visible_status() -> None:
+    pending = _build_pending_message("guide", "补充用全市场ETF一起验证")
+    assert pending is not None
+
+    waiting = _pending_message_status(pending)
+    ready = _pending_message_status(_mark_pending_ready(pending))
+
+    assert waiting.badge == "引导中"
+    assert "引导消息" in waiting.detail
+    assert ready.badge == "引导待确认"
+    assert ready.can_send is True
+
+
+def test_empty_pending_message_is_ignored() -> None:
+    assert _build_pending_message("queue", "   ") is None

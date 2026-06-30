@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,21 @@ class ChatMessage:
     role: str
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _PendingMessage:
+    level: str
+    content: str
+    ready_to_send: bool = False
+
+
+@dataclass(frozen=True)
+class _PendingMessageStatus:
+    badge: str
+    detail: str
+    can_undo: bool
+    can_send: bool
 
 
 # ── Session model ──
@@ -214,6 +229,40 @@ def _fill_prompt(inp: ui.textarea, text: str) -> None:
 
 def _trunc(s: str, n: int) -> str:
     return s[:n] + ("…" if len(s) > n else "")
+
+
+def _build_pending_message(level: str, raw_content: str) -> _PendingMessage | None:
+    content = raw_content.strip()
+    if not content:
+        return None
+    if level not in {"guide", "queue"}:
+        level = "guide"
+    return _PendingMessage(level=level, content=content)
+
+
+def _mark_pending_ready(pending: _PendingMessage) -> _PendingMessage:
+    return replace(pending, ready_to_send=True)
+
+
+def _pending_message_status(pending: _PendingMessage) -> _PendingMessageStatus:
+    label = INTERRUPT_LEVELS[pending.level]
+    preview = _trunc(pending.content, 80)
+    if pending.ready_to_send:
+        return _PendingMessageStatus(
+            badge=f"{label}待确认",
+            detail=f"{label}消息已就绪：{preview}。发送前可撤销。",
+            can_undo=True,
+            can_send=True,
+        )
+    detail_prefix = (
+        "排队消息" if pending.level == "queue" else "引导消息"
+    )
+    return _PendingMessageStatus(
+        badge=f"{label}中",
+        detail=f"{detail_prefix}等待当前任务完成：{preview}",
+        can_undo=True,
+        can_send=False,
+    )
 
 
 def _todo_status_markdown(data: dict[str, Any]) -> str:
@@ -464,8 +513,11 @@ def register() -> None:
 
         # Interrupt state
         cancel_event = asyncio.Event()
-        queued_message: str | None = None
+        pending_message: _PendingMessage | None = None
         is_running: bool = False
+        pending_card: Any = None
+        pending_label: Any = None
+        pending_send_button: Any = None
 
         def activate_session(sid: str) -> None:
             nonlocal active_sid
@@ -512,10 +564,61 @@ def register() -> None:
             else:
                 _refresh_fn[0]()
 
+        def render_pending_status() -> None:
+            if pending_card is None or pending_label is None:
+                return
+            if pending_message is None:
+                queue_badge.visible = False
+                pending_card.visible = False
+                if pending_send_button is not None:
+                    pending_send_button.visible = False
+                queue_badge.update()
+                pending_card.update()
+                return
+
+            status = _pending_message_status(pending_message)
+            queue_badge.set_text(status.badge)
+            queue_badge.visible = True
+            pending_label.set_text(status.detail)
+            pending_card.visible = True
+            if pending_send_button is not None:
+                pending_send_button.visible = status.can_send
+                pending_send_button.update()
+            queue_badge.update()
+            pending_card.update()
+
+        def cancel_pending_message() -> None:
+            nonlocal pending_message
+            if pending_message is None:
+                return
+            pending_message = None
+            render_pending_status()
+            ui.notify("已撤销待发送消息。", type="info")
+
+        async def send_pending_message() -> None:
+            nonlocal pending_message
+            if pending_message is None:
+                return
+            if is_running:
+                ui.notify("当前任务仍在运行，稍后再确认发送。", type="warning")
+                return
+            content = pending_message.content
+            pending_message = None
+            render_pending_status()
+            message.value = content
+            await run_send_handler(from_pending=True)
+
         async def send_handler() -> None:
-            nonlocal active_sid, is_running, queued_message
+            await run_send_handler(from_pending=False)
+
+        async def run_send_handler(*, from_pending: bool) -> None:
+            nonlocal active_sid, is_running, pending_message
             if not active_sid or active_sid not in sessions:
                 ui.notify("No active session.", type="warning")
+                return
+
+            if pending_message is not None and pending_message.ready_to_send and not from_pending:
+                ui.notify("请先发送或撤销待处理消息。", type="warning")
                 return
 
             level = INTERRUPT_LABELS.get(interrupt_select.value, "guide")
@@ -528,28 +631,31 @@ def register() -> None:
                     # Wait briefly for cancellation to propagate
                     await asyncio.sleep(0.1)
                     is_running = False
-                    queue_badge.visible = False
+                    render_pending_status()
                     # Fall through to start new run
                 elif level == "queue":
-                    # 排队: store message, auto-process later
-                    queued_message = message.value.strip()
+                    pending = _build_pending_message(level, message.value or "")
+                    if pending is None:
+                        ui.notify("Enter a message first.", type="warning")
+                        return
+                    pending_message = pending
                     message.value = ""
-                    queue_badge.text = "排队中…"
-                    queue_badge.visible = True
-                    ui.notify("已排队，当前任务完成后自动执行。", type="info")
+                    render_pending_status()
+                    ui.notify("已排队，当前任务完成后等待你确认发送。", type="info")
                     return
                 else:
-                    # 引导 (default): queue for after current run
-                    queued_message = message.value.strip()
+                    pending = _build_pending_message(level, message.value or "")
+                    if pending is None:
+                        ui.notify("Enter a message first.", type="warning")
+                        return
+                    pending_message = pending
                     message.value = ""
-                    queue_badge.text = "引导中…"
-                    queue_badge.visible = True
-                    ui.notify("已加入引导队列，当前任务完成后自动执行。", type="info")
+                    render_pending_status()
+                    ui.notify("已加入引导，当前任务完成后等待你确认发送。", type="info")
                     return
 
             is_running = True
-            queue_badge.visible = False
-            queued_message = None
+            render_pending_status()
 
             try:
                 await _send(
@@ -563,12 +669,12 @@ def register() -> None:
                 )
             finally:
                 is_running = False
-                # Process queued message if any
-                if queued_message:
-                    qm = queued_message
-                    queued_message = None
-                    message.value = qm
-                    await send_handler()
+                if pending_message is not None:
+                    pending_message = _mark_pending_ready(pending_message)
+                    render_pending_status()
+                    ui.notify("待发送消息已就绪，请确认发送或撤销。", type="info")
+                else:
+                    render_pending_status()
 
         # ═══ Layout ═══
         with ui.row().classes("w-full gap-0 flex-1").style("min-height: 0"):
@@ -652,6 +758,28 @@ def register() -> None:
                         ui.spinner(size="sm")
                         ui.label("").classes("text-sm")
                 progress_card.visible = False
+
+                pending_card = ui.card().classes(
+                    "w-full bg-amber-50 border border-amber-200 p-3 mx-4"
+                )
+                with pending_card:
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.icon("schedule", size="sm").classes("text-amber-700")
+                        pending_label = ui.label("").classes(
+                            "text-sm text-amber-900 grow"
+                        )
+                        ui.button(
+                            "撤销",
+                            icon="undo",
+                            on_click=cancel_pending_message,
+                        ).props("flat dense color=negative")
+                        pending_send_button = ui.button(
+                            "发送",
+                            icon="send",
+                            on_click=send_pending_message,
+                        ).props("dense color=primary")
+                pending_card.visible = False
+                pending_send_button.visible = False
 
                 # ── Input row with interrupt control ──
                 with ui.row().classes("w-full items-end gap-2 p-4 border-t"):
