@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -123,6 +124,13 @@ class FactorWalkForwardResult:
         }
 
 
+@dataclass(frozen=True)
+class FactorEvaluationBundle:
+    validation: FactorValidationResult
+    walk_forward: FactorWalkForwardResult
+    quantile_returns: dict[str, object]
+
+
 def compute_factor_frame(
     bars: pd.DataFrame,
     name: str,
@@ -225,19 +233,156 @@ def validate_factor(
 ) -> FactorValidationResult:
     start_date = pd.to_datetime(start).date()
     end_date = pd.to_datetime(end).date()
-    bars = load_daily_bars(lake, symbols=symbols)
+    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
+    validation = _factor_validation_frame(
+        lake,
+        name=name,
+        start_date=start_date,
+        end_date=end_date,
+        registry=registry,
+        symbols=symbols,
+    )
+    return _validation_result_from_frame(name, start_date, end_date, validation)
+
+
+def walk_forward_factor_validation(
+    lake: DataLake,
+    *,
+    name: str,
+    start: str,
+    end: str,
+    window_days: int = 63,
+    step_days: int = 63,
+    quantile: float = 0.20,
+    registry_root: str | None = None,
+    symbols: list[str] | None = None,
+) -> FactorWalkForwardResult:
+    if window_days <= 1:
+        raise ValueError("window_days must be greater than 1")
+    if step_days <= 0:
+        raise ValueError("step_days must be positive")
+    if quantile <= 0 or quantile > 0.5:
+        raise ValueError("quantile must be in (0, 0.5]")
+
+    start_date = pd.to_datetime(start).date()
+    end_date = pd.to_datetime(end).date()
+    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
+    validation = _factor_validation_frame(
+        lake,
+        name=name,
+        start_date=start_date,
+        end_date=end_date,
+        registry=registry,
+        symbols=symbols,
+    )
+    return _walk_forward_result_from_frame(
+        name,
+        start_date,
+        end_date,
+        validation,
+        window_days=window_days,
+        step_days=step_days,
+        quantile=quantile,
+    )
+
+
+def evaluate_factor(
+    lake: DataLake,
+    *,
+    name: str,
+    start: str,
+    end: str,
+    registry_root: str | None = None,
+    symbols: list[str] | None = None,
+    window_days: int = 63,
+    step_days: int = 63,
+    quantile: float = 0.20,
+) -> FactorEvaluationBundle:
+    if window_days <= 1:
+        raise ValueError("window_days must be greater than 1")
+    if step_days <= 0:
+        raise ValueError("step_days must be positive")
+    if quantile <= 0 or quantile > 0.5:
+        raise ValueError("quantile must be in (0, 0.5]")
+
+    start_date = pd.to_datetime(start).date()
+    end_date = pd.to_datetime(end).date()
+    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
+    validation_frame = _factor_validation_frame(
+        lake,
+        name=name,
+        start_date=start_date,
+        end_date=end_date,
+        registry=registry,
+        symbols=symbols,
+    )
+    validation = _validation_result_from_frame(name, start_date, end_date, validation_frame)
+    walk_forward = _walk_forward_result_from_frame(
+        name,
+        start_date,
+        end_date,
+        validation_frame,
+        window_days=window_days,
+        step_days=step_days,
+        quantile=quantile,
+    )
+    spreads = [
+        item.long_short_spread
+        for item in walk_forward.slices
+        if item.long_short_spread is not None
+    ]
+    return FactorEvaluationBundle(
+        validation=validation,
+        walk_forward=walk_forward,
+        quantile_returns={
+            "long_short_spread_mean": sum(spreads) / len(spreads) if spreads else 0,
+            "walk_forward_slices": len(walk_forward.slices),
+        },
+    )
+
+
+def _factor_validation_frame(
+    lake: DataLake,
+    *,
+    name: str,
+    start_date: Any,
+    end_date: Any,
+    registry: FactorRegistry | None,
+    symbols: list[str] | None,
+) -> pd.DataFrame:
+    factor_registry = registry or FactorRegistry()
+    saved = factor_registry.get_factor(name)
+    lookback = int(saved.lookback) if saved is not None else 0
+    load_start = start_date - timedelta(days=max(lookback, 0))
+    load_end = end_date + timedelta(days=1)
+    bars = load_daily_bars(
+        lake,
+        start=f"{load_start:%Y%m%d}",
+        end=f"{load_end:%Y%m%d}",
+        symbols=symbols,
+    )
     if bars.empty:
         raise ValueError("no daily bars found in data lake; run data update first")
-
-    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
-    factor_frame = compute_factor_frame(bars, name, registry=registry)
-    returns = _forward_returns(bars)
-    validation = factor_frame.merge(returns, on=["symbol", "trade_date"], how="inner")
+    factor_frame = compute_factor_frame(bars, name, registry=factor_registry)
+    validation = factor_frame.merge(
+        _forward_returns(bars),
+        on=["symbol", "trade_date"],
+        how="inner",
+    )
     validation = validation[
         (validation["trade_date"] >= start_date) & (validation["trade_date"] <= end_date)
-    ]
+    ].reset_index(drop=True)
     if validation.empty:
         raise ValueError(f"no validation rows between {start_date} and {end_date}")
+    return validation
+
+
+def _validation_result_from_frame(
+    name: str,
+    start_date: Any,
+    end_date: Any,
+    validation: pd.DataFrame,
+) -> FactorValidationResult:
     actual_start = min(validation["trade_date"])
     actual_end = max(validation["trade_date"])
     data_freshness = (
@@ -262,7 +407,6 @@ def validate_factor(
         if len(evaluated_symbols) == 1
         else None
     )
-    evaluation_mode = "time_series" if time_series is not None else "cross_sectional"
     observations = len(validation)
     non_null = len(usable)
     return FactorValidationResult(
@@ -278,49 +422,21 @@ def validate_factor(
         ic_mean=ic_mean,
         ic_by_date=ic_by_date,
         symbols=evaluated_symbols,
-        evaluation_mode=evaluation_mode,
+        evaluation_mode="time_series" if time_series is not None else "cross_sectional",
         time_series=time_series,
     )
 
 
-def walk_forward_factor_validation(
-    lake: DataLake,
-    *,
+def _walk_forward_result_from_frame(
     name: str,
-    start: str,
-    end: str,
-    window_days: int = 63,
-    step_days: int = 63,
-    quantile: float = 0.20,
-    registry_root: str | None = None,
-    symbols: list[str] | None = None,
+    start_date: Any,
+    end_date: Any,
+    validation: pd.DataFrame,
+    *,
+    window_days: int,
+    step_days: int,
+    quantile: float,
 ) -> FactorWalkForwardResult:
-    if window_days <= 1:
-        raise ValueError("window_days must be greater than 1")
-    if step_days <= 0:
-        raise ValueError("step_days must be positive")
-    if quantile <= 0 or quantile > 0.5:
-        raise ValueError("quantile must be in (0, 0.5]")
-
-    start_date = pd.to_datetime(start).date()
-    end_date = pd.to_datetime(end).date()
-    bars = load_daily_bars(lake, symbols=symbols)
-    if bars.empty:
-        raise ValueError("no daily bars found in data lake; run data update first")
-
-    registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
-    factor_frame = compute_factor_frame(bars, name, registry=registry)
-    validation = factor_frame.merge(
-        _forward_returns(bars),
-        on=["symbol", "trade_date"],
-        how="inner",
-    )
-    validation = validation[
-        (validation["trade_date"] >= start_date) & (validation["trade_date"] <= end_date)
-    ].reset_index(drop=True)
-    if validation.empty:
-        raise ValueError(f"no validation rows between {start_date} and {end_date}")
-
     dates = sorted(validation["trade_date"].unique())
     slices: list[FactorWalkForwardSlice] = []
     for index in range(0, len(dates), step_days):

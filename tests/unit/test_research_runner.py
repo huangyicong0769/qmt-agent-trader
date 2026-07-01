@@ -127,3 +127,23 @@ def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Seri
     result = runner.run(SensitivityGrid(top_n=(1,)).scenarios()[0])
 
     assert result.trades
+
+
+def test_factor_rank_runner_preindexes_bars_by_date_and_symbol() -> None:
+    runner = FactorRankResearchRunner(
+        _bars(),
+        FactorRankResearchConfig(
+            factor_name="momentum_20d",
+            top_n=1,
+            max_single_position_pct=0.5,
+            initial_cash=100000,
+        ),
+    )
+
+    first_date = runner.bars["trade_date"].min()
+    day_bars = runner._bars_on(first_date)
+    row = runner._bar_for_symbol(day_bars, "000001.SZ")
+
+    assert day_bars.index.name == "symbol"
+    assert row is not None
+    assert row["symbol"] == "000001.SZ"

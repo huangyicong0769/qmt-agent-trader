@@ -16,11 +16,12 @@ from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import FactorSpec, ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
+from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import (
-    validate_factor,
+    evaluate_factor,
 )
 
 _sandbox: CodeSandbox | None = None
@@ -435,50 +436,48 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
         }
     factor_name = saved.factor_id
 
+    window_days = int(input_data.get("window_days", 63))
+    step_days = int(input_data.get("step_days", 63))
+    quantile = float(input_data.get("quantile", 0.20))
+
     # ── Dedup: check cache first ──
     from qmt_agent_trader.agent.tools.cache import (
         get_cached_validation,
         put_cached_validation,
     )
-    cache_factor_name = factor_name if not symbols else f"{factor_name}|{','.join(symbols)}"
+    cache_factor_name = json.dumps(
+        {
+            "factor_id": factor_name,
+            "start": start,
+            "end": end,
+            "symbols": sorted(symbols),
+            "registry_version": _factor_cache_version(saved),
+            "window_days": window_days,
+            "step_days": step_days,
+            "quantile": quantile,
+        },
+        sort_keys=True,
+    )
     cached = get_cached_validation(cache_factor_name, start, end)
     if cached is not None:
         cached["cache_hit"] = True
         return cached
 
     try:
-        result = validate_factor(
+        bundle = evaluate_factor(
             lake,
             name=factor_name,
             start=start,
             end=end,
             registry_root=str(registry_root),
             symbols=symbols or None,
-        ).as_dict()
-        # Compute quantile returns via walk-forward
-        from qmt_agent_trader.factors.service import walk_forward_factor_validation
-
-        wf = walk_forward_factor_validation(
-            lake,
-            name=factor_name,
-            start=start,
-            end=end,
-            registry_root=str(registry_root),
-            symbols=symbols or None,
-        ).as_dict()
-        slices_raw = wf.get("walk_forward", [])
-        if not isinstance(slices_raw, list):
-            slices_raw = []
-        spreads: list[float] = []
-        for s in slices_raw:
-            if isinstance(s, dict):
-                val = s.get("long_short_spread", 0)
-                if isinstance(val, (int, float)):
-                    spreads.append(float(val))
-        result["quantile_returns"] = {
-            "long_short_spread_mean": sum(spreads) / len(spreads) if spreads else 0,
-            "walk_forward_slices": len(slices_raw),
-        }
+            window_days=window_days,
+            step_days=step_days,
+            quantile=quantile,
+        )
+        result = bundle.validation.as_dict()
+        result["walk_forward"] = bundle.walk_forward.as_dict()["walk_forward"]
+        result["quantile_returns"] = bundle.quantile_returns
         sb = _get_sandbox()
         result["report_path"] = str(
             sb.generated_root / "reports" / f"factor_{factor_id}.json" if sb else ""
@@ -511,6 +510,10 @@ evaluate_factor_candidate_tool: AgentTool = tool(
         timeout_seconds=120,
     ),
     fn=_evaluate_factor_candidate,
+    timeout_seconds_for_call=lambda input_data, context: _factor_eval_timeout_seconds_for_call(
+        input_data,
+        context,
+    ),
 )
 
 
@@ -536,6 +539,7 @@ def _bind_tool(
     return tool(
         existing.spec,
         fn=lambda input_data, context: _with_deps(deps, fn, input_data, context),
+        timeout_seconds_for_call=getattr(existing, "timeout_seconds_for_call", None),
     )
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -562,6 +566,49 @@ def _saved_factor_payload(saved: Any) -> dict[str, Any]:
         "required_columns": list(saved.required_columns),
         "lookback": saved.lookback,
     }
+
+
+def _factor_cache_version(saved: Any) -> str:
+    implementation = str(getattr(saved, "implementation_ref", ""))
+    if implementation.startswith("file:"):
+        path = Path(implementation.removeprefix("file:"))
+        try:
+            stat = path.stat()
+        except OSError:
+            return implementation
+        return f"{implementation}:{stat.st_mtime_ns}:{stat.st_size}"
+    return f"{implementation}:{getattr(saved, 'version', '')}:{getattr(saved, 'lookback', '')}"
+
+
+def _factor_eval_timeout_seconds_for_call(
+    input_data: dict[str, Any],
+    _context: ToolContext,
+) -> int:
+    settings = get_settings()
+    symbols = _requested_symbols(input_data)
+    span_days = max(
+        1,
+        _date_span_days(
+            str(input_data.get("start_date", "20200101")),
+            str(input_data.get("end_date", _today_yyyymmdd())),
+        ),
+    )
+    symbol_count = len(symbols) if symbols else 5000
+    estimated_rows = span_days * symbol_count
+    variable = (
+        (estimated_rows + 99_999)
+        // 100_000
+        * settings.research_tool_timeout_seconds_per_100k_rows
+    )
+    return int(
+        min(
+            settings.factor_eval_tool_max_timeout_seconds,
+            max(
+                settings.research_tool_base_timeout_seconds,
+                settings.research_tool_base_timeout_seconds + variable,
+            ),
+        )
+    )
 
 
 def _factor_matches(registry: FactorRegistry, query: str) -> list[dict[str, Any]]:

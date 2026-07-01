@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     remote_data_retry_attempts: int = 3
     remote_data_retry_backoff_seconds: float = 2.0
 
+    research_tool_base_timeout_seconds: int = 120
+    research_tool_timeout_seconds_per_100k_rows: int = 30
+    research_tool_max_timeout_seconds: int = 1800
+    backtest_tool_max_timeout_seconds: int = 1800
+    factor_eval_tool_max_timeout_seconds: int = 900
+
     mcp_enabled: bool = False
     mcp_config_path: Path = Path("configs/mcp.servers.json")
     mcp_tool_prefix: str = "mcp"

@@ -5,6 +5,7 @@ import pandas as pd
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.service import (
     compute_factor_to_lake,
+    evaluate_factor,
     validate_factor,
     walk_forward_factor_validation,
 )
@@ -159,3 +160,109 @@ def test_walk_forward_factor_validation_slices_history(tmp_path) -> None:
     assert result.slices[0].mean_ic > 0
     assert result.slices[0].long_short_spread is not None
     assert result.slices[0].long_short_spread > 0
+
+
+def test_validate_factor_loads_only_requested_window_with_lookback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    calls: list[dict[str, object]] = []
+    start = date(2024, 1, 1)
+    rows = []
+    for offset in range(25):
+        trade_date = start + timedelta(days=offset)
+        for symbol, base in [("000001.SZ", 10.0), ("000002.SZ", 20.0)]:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": trade_date,
+                    "open": base + offset,
+                    "high": base + offset,
+                    "low": base + offset,
+                    "close": base + offset,
+                    "volume": 1000.0,
+                    "amount": 10000.0,
+                    "turnover": 0.0,
+                    "suspended": False,
+                    "limit_up": False,
+                    "limit_down": False,
+                    "st": False,
+                }
+            )
+
+    def fake_loader(lake_arg, **kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame(rows)
+
+    monkeypatch.setattr("qmt_agent_trader.factors.service.load_daily_bars", fake_loader)
+
+    result = validate_factor(
+        lake,
+        name="momentum_20d",
+        start="20240121",
+        end="20240122",
+        symbols=["000001.SZ"],
+    )
+
+    assert result.start == "20240121"
+    assert calls == [
+        {
+            "start": "20240101",
+            "end": "20240123",
+            "symbols": ["000001.SZ"],
+        }
+    ]
+
+
+def test_evaluate_factor_loads_bars_once_and_reuses_validation_frame(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    calls = 0
+    start = date(2024, 1, 1)
+    rows = []
+    for offset in range(35):
+        trade_date = start + timedelta(days=offset)
+        for symbol, base in [("000001.SZ", 10.0), ("000002.SZ", 20.0)]:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": trade_date,
+                    "open": base + offset,
+                    "high": base + offset,
+                    "low": base + offset,
+                    "close": base + offset,
+                    "volume": 1000.0,
+                    "amount": 10000.0,
+                    "turnover": 0.0,
+                    "suspended": False,
+                    "limit_up": False,
+                    "limit_down": False,
+                    "st": False,
+                }
+            )
+
+    def fake_loader(lake_arg, **kwargs):
+        nonlocal calls
+        calls += 1
+        return pd.DataFrame(rows)
+
+    monkeypatch.setattr("qmt_agent_trader.factors.service.load_daily_bars", fake_loader)
+
+    bundle = evaluate_factor(
+        lake,
+        name="momentum_20d",
+        start="20240121",
+        end="20240202",
+        symbols=["000001.SZ", "000002.SZ"],
+        window_days=5,
+        step_days=5,
+        quantile=0.5,
+    )
+
+    assert calls == 1
+    assert bundle.validation.observations > 0
+    assert bundle.walk_forward.slices
+    assert bundle.quantile_returns["walk_forward_slices"] == len(bundle.walk_forward.slices)

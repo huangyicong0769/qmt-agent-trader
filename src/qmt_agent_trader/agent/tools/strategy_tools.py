@@ -4,10 +4,11 @@ and report tool: generate_research_report."""
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 from collections.abc import Callable
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -18,6 +19,7 @@ from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
+from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.storage import DataLake
@@ -491,6 +493,20 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         execution_delay_days=strategy_spec.execution.execution_delay_days,
         symbols=symbols,
     )
+    cost_estimate = _backtest_cost_estimate(config)
+    timeout_seconds_used = _backtest_timeout_seconds_for_call(input_data, context)
+    cache_key = _backtest_cache_key(
+        lake,
+        config=config,
+        factor_name=factor_name,
+        requested_factor_ids=requested_factor_ids,
+    )
+    cached = _get_cached_backtest(cache_key)
+    if cached is not None:
+        cached["cache_hit"] = True
+        cached["timeout_seconds_used"] = timeout_seconds_used
+        cached["cost_estimate"] = cost_estimate
+        return cached
     try:
         result = run_strategy_backtest(
             lake,
@@ -520,8 +536,11 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
                 "actual_data_end": result.data_window.get("actual_end"),
                 "data_freshness": result.data_window.get("data_freshness"),
                 "cache_hit": False,
+                "timeout_seconds_used": timeout_seconds_used,
+                "cost_estimate": cost_estimate,
             }
         )
+        _put_cached_backtest(cache_key, payload)
     return payload
 
 
@@ -697,6 +716,10 @@ run_backtest_tool: AgentTool = tool(
         timeout_seconds=120,
     ),
     fn=_run_backtest,
+    timeout_seconds_for_call=lambda input_data, context: _backtest_timeout_seconds_for_call(
+        input_data,
+        context,
+    ),
 )
 
 # ── generate_research_report ────────────────────────────────────────────────
@@ -844,6 +867,7 @@ def _bind_tool(
     return tool(
         existing.spec,
         fn=lambda input_data, context: _with_deps(deps, fn, input_data, context),
+        timeout_seconds_for_call=getattr(existing, "timeout_seconds_for_call", None),
     )
 
 
@@ -1178,6 +1202,136 @@ def _registered_approval(registry: StrategyRegistry, strategy_id: str) -> str | 
 
 def _today_yyyymmdd() -> str:
     return datetime.now(tz=SHANGHAI_TZ).strftime("%Y%m%d")
+
+
+def _backtest_timeout_seconds_for_call(
+    input_data: dict[str, Any],
+    _context: ToolContext,
+) -> int:
+    settings = get_settings()
+    start = str(input_data.get("start_date", "20200101"))
+    end = str(input_data.get("end_date", _today_yyyymmdd()))
+    symbols = _requested_symbols(input_data)
+    span_days = max(1, _date_span_days(start, end))
+    symbol_count = len(symbols) if symbols else 5000
+    estimated_rows = span_days * symbol_count
+    variable = (
+        (estimated_rows + 99_999)
+        // 100_000
+        * settings.research_tool_timeout_seconds_per_100k_rows
+    )
+    return int(
+        min(
+            settings.backtest_tool_max_timeout_seconds,
+            max(
+                settings.research_tool_base_timeout_seconds,
+                settings.research_tool_base_timeout_seconds + variable,
+            ),
+        )
+    )
+
+
+def _backtest_cost_estimate(config: StrategyBacktestConfig) -> dict[str, Any]:
+    estimated_dates = max(1, _date_span_days(config.start_date, config.end_date))
+    estimated_symbols = len(config.symbols) if config.symbols else 5000
+    estimated_rows = estimated_dates * estimated_symbols
+    if estimated_rows < 100_000:
+        cost_level = "small"
+    elif estimated_rows < 2_000_000:
+        cost_level = "medium"
+    else:
+        cost_level = "large"
+    return {
+        "estimated_rows": estimated_rows,
+        "estimated_dates": estimated_dates,
+        "estimated_symbols": estimated_symbols,
+        "cost_level": cost_level,
+    }
+
+
+def _backtest_cache_key(
+    lake: DataLake,
+    *,
+    config: StrategyBacktestConfig,
+    factor_name: str,
+    requested_factor_ids: list[str],
+) -> str:
+    payload = {
+        "config": config.model_dump(mode="json"),
+        "factor_name": factor_name,
+        "requested_factor_ids": requested_factor_ids,
+        "data_fingerprint": _data_fingerprint(lake),
+        "factor_fingerprint": _factor_fingerprint(lake, requested_factor_ids),
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _get_cached_backtest(cache_key: str) -> dict[str, Any] | None:
+    path = Path("reports/cache") / f"backtest_{cache_key}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _put_cached_backtest(cache_key: str, payload: dict[str, Any]) -> None:
+    cache_root = Path("reports/cache")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root / f"backtest_{cache_key}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def _data_fingerprint(lake: DataLake) -> dict[str, tuple[int, int]]:
+    result: dict[str, tuple[int, int]] = {}
+    for name in ("tushare_daily", "tushare_fund_daily", "tushare_suspend", "tushare_stk_limit"):
+        path = lake.dataset_path("raw", name)
+        if path.exists():
+            stat = path.stat()
+            result[name] = (stat.st_mtime_ns, stat.st_size)
+    return result
+
+
+def _factor_fingerprint(lake: DataLake, factor_ids: list[str]) -> dict[str, str]:
+    registry = FactorRegistry(_factor_registry_root(lake))
+    result: dict[str, str] = {}
+    for factor_id in factor_ids:
+        saved = registry.get_factor(factor_id)
+        if saved is None:
+            continue
+        implementation = str(saved.implementation_ref)
+        if implementation.startswith("file:"):
+            path = Path(implementation.removeprefix("file:"))
+            try:
+                stat = path.stat()
+            except OSError:
+                result[factor_id] = implementation
+            else:
+                result[factor_id] = f"{implementation}:{stat.st_mtime_ns}:{stat.st_size}"
+        else:
+            result[factor_id] = f"{implementation}:{saved.version}:{saved.lookback}"
+    return result
+
+
+def _date_span_days(start: str, end: str) -> int:
+    start_date = _parse_backtest_date(start)
+    end_date = _parse_backtest_date(end)
+    return max(1, (end_date - start_date).days + 1)
+
+
+def _parse_backtest_date(value: str) -> date:
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return datetime.fromisoformat(value).date()
 
 
 def _requested_symbols(input_data: dict[str, Any]) -> list[str]:

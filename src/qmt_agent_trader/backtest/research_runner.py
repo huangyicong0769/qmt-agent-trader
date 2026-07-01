@@ -69,6 +69,10 @@ class FactorRankResearchRunner:
             else None
         )
         self.factor_frame = compute_factor_frame(self.bars, config.factor_name, registry=registry)
+        self._bars_by_date_symbol = {
+            trade_date: frame.set_index("symbol", drop=False)
+            for trade_date, frame in self.bars.groupby("trade_date", sort=True)
+        }
 
     def run(self, scenario: SensitivityScenario) -> FactorRankResearchResult:
         top_n = scenario.top_n or self.config.top_n
@@ -195,10 +199,18 @@ class FactorRankResearchRunner:
         )
 
     def _bars_on(self, trade_date: object) -> pd.DataFrame:
-        return self.bars[self.bars["trade_date"] == trade_date]
+        return self._bars_by_date_symbol.get(trade_date, pd.DataFrame(columns=self.bars.columns))
 
     @staticmethod
     def _bar_for_symbol(day_bars: pd.DataFrame, symbol: str) -> pd.Series | None:
+        if day_bars.empty:
+            return None
+        if day_bars.index.name == "symbol":
+            if symbol not in day_bars.index:
+                return None
+            match = day_bars.loc[symbol]
+            row = match.iloc[0] if isinstance(match, pd.DataFrame) else match
+            return row if isinstance(row, pd.Series) else None
         matches = day_bars[day_bars["symbol"] == symbol]
         if matches.empty:
             return None
@@ -215,19 +227,18 @@ class FactorRankResearchRunner:
         max_position: float,
         scenario: SensitivityScenario,
     ) -> dict[str, int]:
-        selected = [
-            symbol
-            for symbol in factors["symbol"].astype(str).tolist()
-            if self._bar_for_symbol(day_bars, symbol) is not None
-        ][:top_n]
-        if not selected:
-            return {}
-        weight = min(1.0 / len(selected), max_position)
-        targets: dict[str, int] = {}
-        for symbol in selected:
+        selected_bars: list[tuple[str, pd.Series]] = []
+        for symbol in factors["symbol"].astype(str).tolist():
             bar = self._bar_for_symbol(day_bars, symbol)
-            if bar is None:
-                continue
+            if bar is not None:
+                selected_bars.append((symbol, bar))
+            if len(selected_bars) >= top_n:
+                break
+        if not selected_bars:
+            return {}
+        weight = min(1.0 / len(selected_bars), max_position)
+        targets: dict[str, int] = {}
+        for symbol, bar in selected_bars:
             price = fixed_bps_slippage(
                 float(bar["open"]),
                 Side.BUY,
@@ -240,10 +251,19 @@ class FactorRankResearchRunner:
     def _mark_to_market(positions: dict[str, int], day_bars: pd.DataFrame) -> float:
         market_value = 0.0
         for symbol, quantity in positions.items():
-            matches = day_bars[day_bars["symbol"] == symbol]
-            if matches.empty:
+            if day_bars.empty:
                 continue
-            market_value += quantity * float(matches.iloc[0].close)
+            if day_bars.index.name == "symbol":
+                if symbol not in day_bars.index:
+                    continue
+                match = day_bars.loc[symbol]
+                row = match.iloc[0] if isinstance(match, pd.DataFrame) else match
+            else:
+                matches = day_bars[day_bars["symbol"] == symbol]
+                if matches.empty:
+                    continue
+                row = matches.iloc[0]
+            market_value += quantity * float(row.close)
         return market_value
 
     @staticmethod
