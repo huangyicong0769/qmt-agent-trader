@@ -1,6 +1,8 @@
 import pandas as pd
 
 from qmt_agent_trader.data.bars import (
+    CANONICAL_BAR_COLUMNS,
+    _apply_historical_st_flags,
     enrich_trade_states,
     load_daily_bars,
     normalize_tushare_daily,
@@ -201,3 +203,138 @@ def test_load_daily_bars_enriches_trade_states_from_lake(tmp_path) -> None:
 
     assert bars.iloc[0]["suspended"]
     assert bars.iloc[0]["limit_up"]
+
+
+def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    calls: list[dict[str, object]] = []
+
+    def fake_read_filtered(layer, name, **kwargs):
+        calls.append({"layer": layer, "name": name, **kwargs})
+        if name == "tushare_daily":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": "20240102",
+                        "open": 10.0,
+                        "high": 10.5,
+                        "low": 9.5,
+                        "close": 10.2,
+                    }
+                ]
+            )
+        if name == "tushare_fund_daily":
+            return pd.DataFrame(columns=["ts_code", "trade_date", "open", "high", "low", "close"])
+        if name == "tushare_suspend":
+            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102"}])
+        if name == "tushare_stk_limit":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": "20240102",
+                        "up_limit": 10.2,
+                        "down_limit": 9.0,
+                    }
+                ]
+            )
+        if name == "tushare_namechange":
+            return pd.DataFrame()
+        if name == "tushare_stock_basic":
+            return pd.DataFrame([{"ts_code": "000001.SZ", "name": "Ping An"}])
+        raise AssertionError(name)
+
+    monkeypatch.setattr(lake, "read_parquet_filtered", fake_read_filtered)
+
+    bars = load_daily_bars(
+        lake,
+        start="20240101",
+        end="20240131",
+        symbols=["000001.SZ"],
+    )
+
+    assert bars.iloc[0]["suspended"]
+    assert bars.iloc[0]["limit_up"]
+    assert all(call["start"] == "20240101" for call in calls[:4])
+    assert all(call["end"] == "20240131" for call in calls[:4])
+    assert all(call["symbols"] == ["000001.SZ"] for call in calls)
+
+
+def test_load_daily_bars_can_skip_trade_state_enrichment(tmp_path, monkeypatch) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    calls: list[str] = []
+
+    def fake_read_filtered(layer, name, **kwargs):
+        calls.append(name)
+        if name == "tushare_daily":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": "20240102",
+                        "open": 10.0,
+                        "high": 10.5,
+                        "low": 9.5,
+                        "close": 10.2,
+                    }
+                ]
+            )
+        return pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+
+    monkeypatch.setattr(lake, "read_parquet_filtered", fake_read_filtered)
+
+    bars = load_daily_bars(lake, include_trade_state=False)
+
+    assert not bars.empty
+    assert calls == ["tushare_daily", "tushare_fund_daily"]
+
+
+def test_historical_st_flags_handle_multiple_periods_without_cross_symbol_bleed() -> None:
+    bars = normalize_tushare_daily(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": symbol,
+                    "trade_date": trade_date,
+                    "open": 10.0,
+                    "high": 10.0,
+                    "low": 10.0,
+                    "close": 10.0,
+                }
+                for symbol in ["000001.SZ", "000002.SZ"]
+                for trade_date in ["20240102", "20240103", "20240201"]
+            ]
+        )
+    )
+    namechange = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "name": "ST First",
+                "start_date": "20240101",
+                "end_date": "20240115",
+            },
+            {
+                "ts_code": "000001.SZ",
+                "name": "*ST Second",
+                "start_date": "20240201",
+                "end_date": "",
+            },
+            {
+                "ts_code": "000002.SZ",
+                "name": "Normal Name",
+                "start_date": "20240101",
+                "end_date": "",
+            },
+        ]
+    )
+
+    enriched = _apply_historical_st_flags(bars, namechange).set_index(["symbol", "trade_date"])
+
+    assert enriched.loc[("000001.SZ", pd.Timestamp("2024-01-02").date()), "st"]
+    assert enriched.loc[("000001.SZ", pd.Timestamp("2024-02-01").date()), "st"]
+    assert not enriched.loc[("000002.SZ", pd.Timestamp("2024-01-02").date()), "st"]

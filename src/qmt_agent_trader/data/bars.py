@@ -64,10 +64,37 @@ def load_daily_bars(
     start: str | date | None = None,
     end: str | date | None = None,
     symbols: list[str] | None = None,
+    include_trade_state: bool = True,
 ) -> pd.DataFrame:
+    daily_columns = [
+        "ts_code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "vol",
+        "volume",
+        "amount",
+        "turnover",
+    ]
     raw_frames = [
-        _read_optional_dataset(lake, "raw", "tushare_daily"),
-        _read_optional_dataset(lake, "raw", "tushare_fund_daily"),
+        lake.read_parquet_filtered(
+            "raw",
+            "tushare_daily",
+            columns=daily_columns,
+            start=start,
+            end=end,
+            symbols=symbols,
+        ),
+        lake.read_parquet_filtered(
+            "raw",
+            "tushare_fund_daily",
+            columns=daily_columns,
+            start=start,
+            end=end,
+            symbols=symbols,
+        ),
     ]
     normalized = [normalize_tushare_daily(frame) for frame in raw_frames if not frame.empty]
     bars = (
@@ -77,24 +104,45 @@ def load_daily_bars(
     )
     if bars.empty:
         return bars
-
-    start_date = _parse_date(start) if start is not None else None
-    end_date = _parse_date(end) if end is not None else None
-    if start_date is not None:
-        bars = bars[bars["trade_date"] >= start_date]
-    if end_date is not None:
-        bars = bars[bars["trade_date"] <= end_date]
-    if symbols:
-        bars = bars[bars["symbol"].isin(symbols)]
+    if not include_trade_state:
+        return bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     if bars.empty:
         return bars.reset_index(drop=True)
 
     bars = enrich_trade_states(
         bars,
-        suspend=_read_optional_dataset(lake, "raw", "tushare_suspend"),
-        stk_limit=_read_optional_dataset(lake, "raw", "tushare_stk_limit"),
-        namechange=_read_optional_dataset(lake, "raw", "tushare_namechange"),
-        stock_basic=_read_optional_dataset(lake, "raw", "tushare_stock_basic"),
+        suspend=lake.read_parquet_filtered(
+            "raw",
+            "tushare_suspend",
+            columns=["ts_code", "trade_date", "suspend_type"],
+            start=start,
+            end=end,
+            symbols=symbols,
+        ),
+        stk_limit=lake.read_parquet_filtered(
+            "raw",
+            "tushare_stk_limit",
+            columns=["ts_code", "trade_date", "up_limit", "down_limit"],
+            start=start,
+            end=end,
+            symbols=symbols,
+        ),
+        namechange=_filter_namechange_overlap(
+            lake.read_parquet_filtered(
+                "raw",
+                "tushare_namechange",
+                columns=["ts_code", "name", "start_date", "end_date"],
+                symbols=symbols,
+            ),
+            start=start,
+            end=end,
+        ),
+        stock_basic=lake.read_parquet_filtered(
+            "raw",
+            "tushare_stock_basic",
+            columns=["ts_code", "name"],
+            symbols=symbols,
+        ),
     )
 
     return bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
@@ -137,6 +185,28 @@ def _read_optional_dataset(lake: DataLake, layer: str, name: str) -> pd.DataFram
     if not lake.dataset_path(layer, name).exists():
         return pd.DataFrame()
     return lake.read_parquet(layer, name)
+
+
+def _filter_namechange_overlap(
+    namechange: pd.DataFrame,
+    *,
+    start: str | date | None,
+    end: str | date | None,
+) -> pd.DataFrame:
+    if namechange.empty or not {"start_date", "end_date"}.intersection(namechange.columns):
+        return namechange
+    data = namechange.copy()
+    requested_start = _parse_date(start) if start is not None else date(1900, 1, 1)
+    requested_end = _parse_date(end) if end is not None else date(2099, 12, 31)
+    if "start_date" in data.columns:
+        period_start = _coerce_date_series(data["start_date"], default="19000101")
+    else:
+        period_start = pd.Series([date(1900, 1, 1)] * len(data), index=data.index)
+    if "end_date" in data.columns:
+        period_end = _coerce_date_series(data["end_date"], default="20991231")
+    else:
+        period_end = pd.Series([date(2099, 12, 31)] * len(data), index=data.index)
+    return data[(period_start <= requested_end) & (period_end >= requested_start)]
 
 
 def _state_key_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -208,13 +278,17 @@ def _apply_historical_st_flags(bars: pd.DataFrame, namechange: pd.DataFrame) -> 
     if st_periods.empty:
         return bars
     enriched = bars.copy()
-    for row in st_periods.itertuples(index=False):
-        mask = (
-            (enriched["symbol"] == row.symbol)
-            & (enriched["trade_date"] >= row.start_date)
-            & (enriched["trade_date"] <= row.end_date)
-        )
-        enriched.loc[mask, "st"] = True
+    symbol_indices = enriched.groupby("symbol", sort=False).indices
+    for symbol, periods in st_periods.groupby("symbol", sort=False):
+        index = symbol_indices.get(symbol)
+        if index is None or len(index) == 0:
+            continue
+        dates = enriched.iloc[index]["trade_date"]
+        mask = pd.Series(False, index=dates.index)
+        for row in periods.itertuples(index=False):
+            mask |= (dates >= row.start_date) & (dates <= row.end_date)
+        if mask.any():
+            enriched.loc[mask[mask].index, "st"] = True
     return enriched
 
 

@@ -19,7 +19,10 @@ from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ
-from qmt_agent_trader.data.bars import load_daily_bars, normalize_tushare_daily
+from qmt_agent_trader.data.bars import (
+    enrich_trade_states,
+    normalize_tushare_daily,
+)
 from qmt_agent_trader.data.catalog import visible_dataset_names
 from qmt_agent_trader.data.fundamentals import (
     DAILY_BASIC_DATASET,
@@ -39,6 +42,8 @@ from qmt_agent_trader.data.transforms.macro_pit import (
 
 MAX_FUNDAMENTAL_ROWS = 500
 MAX_MACRO_ROWS = 500
+DEFAULT_BAR_LIMIT = 2000
+MAX_BAR_LIMIT = 10000
 
 _lake: DataLake | None = None
 _lake_var: ContextVar[DataLake | None] = ContextVar("query_tool_lake", default=None)
@@ -418,15 +423,45 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
         ["symbol", "trade_date", "open", "high", "low", "close", "volume"],
     )
     fields = _bar_output_fields(requested_fields)
+    limit = _bar_limit(input_data.get("limit", DEFAULT_BAR_LIMIT))
+    if limit is None:
+        return {
+            "rows": [],
+            "metadata": {
+                "status": "INVALID_REQUEST",
+                "message": f"limit must be between 1 and {MAX_BAR_LIMIT}",
+            },
+        }
+    include_trade_state = bool(input_data.get("include_trade_state", True))
+    if "enrich" in input_data:
+        include_trade_state = bool(input_data["enrich"])
+    order = str(input_data.get("order", "asc")).lower()
+    if order not in {"asc", "desc"}:
+        return {
+            "rows": [],
+            "metadata": {"status": "INVALID_REQUEST", "message": "order must be asc or desc"},
+        }
 
     try:
-        bars = load_daily_bars(lake, start=start, end=end, symbols=symbols or None)
+        bars = _load_bars_for_query(
+            lake,
+            start=start,
+            end=end,
+            symbols=symbols or None,
+            limit=limit,
+            include_trade_state=include_trade_state,
+            order=order,
+        )
         if bars.empty:
             coverage_metadata = _bars_coverage_metadata(symbols, bars, end)
             metadata: dict[str, Any] = {
                 "requested_start_date": str(start),
                 "requested_end_date": str(end),
                 "returned": 0,
+                "limit": limit,
+                "backend_limited": True,
+                "include_trade_state": include_trade_state,
+                "read_strategy": "predicate_pushdown",
                 **coverage_metadata,
             }
             if symbols:
@@ -436,8 +471,7 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
                 metadata["status"] = "NO_MATCHING_BARS"
             return {"rows": [], "metadata": metadata}
         cols = [c for c in fields if c in bars.columns]
-        # Limit rows for agent safety
-        output = bars[cols].head(2000).to_dict(orient="records")
+        output = bars[cols].head(limit).to_dict(orient="records")
         coverage_metadata = _bars_coverage_metadata(symbols, bars, end)
         return {
             "rows": output,
@@ -451,6 +485,10 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
                 "data_freshness": _freshness(str(bars["trade_date"].max()), str(end)),
                 "returned": len(output),
                 "total_rows": len(bars),
+                "limit": limit,
+                "backend_limited": True,
+                "include_trade_state": include_trade_state,
+                "read_strategy": "predicate_pushdown",
                 "identity_fields_forced": True,
                 **coverage_metadata,
             },
@@ -466,6 +504,158 @@ def _bar_output_fields(requested_fields: Any) -> list[str]:
         if field not in fields:
             fields.append(field)
     return fields
+
+
+def _bar_limit(value: Any) -> int | None:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return None
+    if limit < 1 or limit > MAX_BAR_LIMIT:
+        return None
+    return limit
+
+
+def _load_bars_for_query(
+    lake: DataLake,
+    *,
+    start: str,
+    end: str,
+    symbols: list[str] | None,
+    limit: int,
+    include_trade_state: bool,
+    order: str,
+) -> pd.DataFrame:
+    raw = _read_limited_raw_bars(
+        lake,
+        start=start,
+        end=end,
+        symbols=symbols,
+        limit=limit,
+        order=order,
+    )
+    bars = normalize_tushare_daily(raw)
+    if bars.empty:
+        return bars
+    ascending = order == "asc"
+    bars = bars.sort_values(["trade_date", "symbol"], ascending=[ascending, True]).head(limit)
+    if not include_trade_state:
+        return bars.reset_index(drop=True)
+
+    returned_symbols = sorted(bars["symbol"].astype(str).unique())
+    returned_start = min(bars["trade_date"])
+    returned_end = max(bars["trade_date"])
+    return enrich_trade_states(
+        bars,
+        suspend=lake.read_parquet_filtered(
+            "raw",
+            "tushare_suspend",
+            columns=["ts_code", "trade_date", "suspend_type"],
+            start=returned_start,
+            end=returned_end,
+            symbols=returned_symbols,
+        ),
+        stk_limit=lake.read_parquet_filtered(
+            "raw",
+            "tushare_stk_limit",
+            columns=["ts_code", "trade_date", "up_limit", "down_limit"],
+            start=returned_start,
+            end=returned_end,
+            symbols=returned_symbols,
+        ),
+        namechange=lake.read_parquet_filtered(
+            "raw",
+            "tushare_namechange",
+            columns=["ts_code", "name", "start_date", "end_date"],
+            symbols=returned_symbols,
+        ),
+        stock_basic=lake.read_parquet_filtered(
+            "raw",
+            "tushare_stock_basic",
+            columns=["ts_code", "name"],
+            symbols=returned_symbols,
+        ),
+    ).reset_index(drop=True)
+
+
+def _read_limited_raw_bars(
+    lake: DataLake,
+    *,
+    start: str,
+    end: str,
+    symbols: list[str] | None,
+    limit: int,
+    order: str,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for dataset in ("tushare_daily", "tushare_fund_daily"):
+        path = lake.dataset_path("raw", dataset)
+        if not path.exists():
+            continue
+        escaped_path = str(path).replace("'", "''")
+        columns = _available_bar_columns(lake, escaped_path)
+        if not {"ts_code", "trade_date", "open", "high", "low", "close"}.issubset(columns):
+            continue
+        selected = [
+            column
+            for column in [
+                "ts_code",
+                "trade_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "vol",
+                "volume",
+                "amount",
+                "turnover",
+            ]
+            if column in columns
+        ]
+        predicates = [
+            _bar_date_key_sql("trade_date") + " >= $start_date",
+            _bar_date_key_sql("trade_date") + " <= $end_date",
+        ]
+        params: dict[str, Any] = {
+            "start_date": _date_key(str(start)),
+            "end_date": _date_key(str(end)),
+        }
+        if symbols:
+            symbol_values = ", ".join(_sql_string_literal(symbol) for symbol in symbols)
+            predicates.append(f"ts_code IN ({symbol_values})")
+        sort_direction = "ASC" if order == "asc" else "DESC"
+        sql = f"""
+            SELECT {", ".join(selected)}
+            FROM read_parquet('{escaped_path}')
+            WHERE {" AND ".join(predicates)}
+            ORDER BY {_bar_date_key_sql("trade_date")} {sort_direction}, ts_code ASC
+            LIMIT {int(limit)}
+        """
+        frame = lake.query_parquet(sql, params)
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _available_bar_columns(lake: DataLake, escaped_path: str) -> set[str]:
+    schema = lake.query_parquet(f"DESCRIBE SELECT * FROM read_parquet('{escaped_path}')")
+    return {str(item) for item in schema["column_name"].tolist()}
+
+
+def _bar_date_key_sql(column: str) -> str:
+    return (
+        "COALESCE("
+        f"strftime(try_strptime(CAST({column} AS VARCHAR), '%Y%m%d'), '%Y%m%d'), "
+        f"strftime(TRY_CAST({column} AS DATE), '%Y%m%d'), "
+        f"substr(regexp_replace(CAST({column} AS VARCHAR), '[^0-9]', '', 'g'), 1, 8)"
+        ")"
+    )
+
+
+def _sql_string_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _requested_symbols(input_data: dict[str, Any]) -> list[str]:

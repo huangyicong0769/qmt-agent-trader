@@ -147,3 +147,78 @@ def test_fetch_state_and_events_are_persisted(tmp_path) -> None:
     ]
     assert len(events) == 1
     assert events[0]["status"] == "success"
+
+
+def test_read_parquet_filtered_returns_empty_for_missing_dataset(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+
+    loaded = lake.read_parquet_filtered("raw", "missing", start="20240101")
+
+    assert loaded.empty
+
+
+def test_read_parquet_filtered_pushes_date_symbol_and_column_filters(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": 20240102, "close": 10.0, "open": 9.5},
+                {"ts_code": "000002.SZ", "trade_date": 20240103, "close": 20.0, "open": 19.5},
+                {"ts_code": "000001.SZ", "trade_date": 20240104, "close": 11.0, "open": 10.5},
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+
+    loaded = lake.read_parquet_filtered(
+        "raw",
+        "tushare_daily",
+        columns=["ts_code", "trade_date", "close"],
+        start="20240103",
+        end="20240104",
+        symbols=["000001.SZ"],
+    )
+
+    assert list(loaded.columns) == ["ts_code", "trade_date", "close"]
+    assert loaded.to_dict("records") == [
+        {"ts_code": "000001.SZ", "trade_date": 20240104, "close": 11.0}
+    ]
+
+
+def test_read_parquet_filtered_handles_string_and_date_like_trade_dates(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": pd.Timestamp("2024-01-02").date(),
+                    "close": 10.0,
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": pd.Timestamp("2024-01-03").date(),
+                    "close": 11.0,
+                },
+            ]
+        ),
+        "raw",
+        "date_dates",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240102", "close": 20.0},
+                {"ts_code": "000001.SZ", "trade_date": "20240103", "close": 21.0},
+            ]
+        ),
+        "raw",
+        "string_dates",
+    )
+
+    loaded_dates = lake.read_parquet_filtered("raw", "date_dates", start="20240103")
+    loaded_strings = lake.read_parquet_filtered("raw", "string_dates", start="20240103")
+
+    assert loaded_dates["close"].tolist() == [11.0]
+    assert loaded_strings["close"].tolist() == [21.0]

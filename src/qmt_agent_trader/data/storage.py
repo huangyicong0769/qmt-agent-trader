@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -91,6 +91,57 @@ class DataLake:
 
     def read_parquet(self, layer: str, name: str) -> pd.DataFrame:
         return pd.read_parquet(self.dataset_path(layer, name))
+
+    def read_parquet_filtered(
+        self,
+        layer: str,
+        name: str,
+        *,
+        columns: list[str] | None = None,
+        start: str | date | None = None,
+        end: str | date | None = None,
+        date_column: str = "trade_date",
+        symbols: list[str] | None = None,
+        symbol_column: str = "ts_code",
+    ) -> pd.DataFrame:
+        path = self.dataset_path(layer, name)
+        if not path.exists():
+            return pd.DataFrame()
+
+        escaped_path = str(path).replace("'", "''")
+        with self.connect() as con:
+            schema = con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{escaped_path}')"
+            ).fetchdf()
+            available_columns = [str(item) for item in schema["column_name"].tolist()]
+            available = set(available_columns)
+            selected_columns = (
+                [column for column in columns if column in available]
+                if columns is not None
+                else available_columns
+            )
+            if columns is not None and not selected_columns:
+                return pd.DataFrame(columns=columns)
+
+            predicates: list[str] = []
+            params: list[object] = []
+            if date_column in available and start is not None:
+                predicates.append(f"{_date_key_sql(date_column)} >= ?")
+                params.append(_date_key(start))
+            if date_column in available and end is not None:
+                predicates.append(f"{_date_key_sql(date_column)} <= ?")
+                params.append(_date_key(end))
+            normalized_symbols = _normalized_symbols(symbols)
+            if symbol_column in available and normalized_symbols:
+                placeholders = ", ".join("?" for _ in normalized_symbols)
+                predicates.append(f"{_quote_identifier(symbol_column)} IN ({placeholders})")
+                params.extend(normalized_symbols)
+
+            select_sql = ", ".join(_quote_identifier(column) for column in selected_columns)
+            sql = f"SELECT {select_sql} FROM read_parquet('{escaped_path}')"
+            if predicates:
+                sql += " WHERE " + " AND ".join(predicates)
+            return con.execute(sql, params).fetchdf()
 
     def list_dataset_names(self, layer: str, prefix: str | None = None) -> list[str]:
         layer_dir = self.root / layer
@@ -306,3 +357,44 @@ class DataLake:
                 [source, dataset],
             ).fetchdf()
         return cast(list[dict[str, Any]], rows.to_dict(orient="records"))
+
+
+def _quote_identifier(identifier: str) -> str:
+    if "\x00" in identifier:
+        raise ValueError("identifier contains null byte")
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _date_key(value: str | date) -> str:
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    text = str(value)
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y%m%d")
+        except ValueError:
+            continue
+    return datetime.fromisoformat(text).strftime("%Y%m%d")
+
+
+def _date_key_sql(column: str) -> str:
+    column_sql = _quote_identifier(column)
+    text = f"CAST({column_sql} AS VARCHAR)"
+    return (
+        "COALESCE("
+        f"strftime(try_strptime({text}, '%Y%m%d'), '%Y%m%d'), "
+        f"strftime(TRY_CAST({column_sql} AS DATE), '%Y%m%d'), "
+        f"substr(regexp_replace({text}, '[^0-9]', '', 'g'), 1, 8)"
+        ")"
+    )
+
+
+def _normalized_symbols(symbols: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for raw in symbols or []:
+        symbol = str(raw).strip()
+        if not symbol:
+            continue
+        if symbol not in normalized:
+            normalized.append(symbol)
+    return normalized

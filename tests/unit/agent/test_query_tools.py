@@ -299,6 +299,64 @@ def test_query_bars_reports_stale_symbols_when_end_is_not_covered(tmp_path) -> N
     )
 
 
+def test_query_bars_pushes_limit_and_can_skip_trade_state(tmp_path, monkeypatch) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    set_data_lake(lake)
+    calls: list[dict[str, object]] = []
+
+    def fake_limited(lake_arg, **kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": "000001.SZ",
+                    "trade_date": pd.Timestamp("2024-01-02").date(),
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.2,
+                    "volume": 100.0,
+                    "amount": 1000.0,
+                    "turnover": 1.0,
+                    "suspended": False,
+                    "limit_up": False,
+                    "limit_down": False,
+                    "st": False,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.tools.query_tools._load_bars_for_query",
+        fake_limited,
+    )
+
+    result = query_bars_tool.run(
+        {
+            "start_date": "20200101",
+            "end_date": "20250101",
+            "limit": 1,
+            "include_trade_state": False,
+        },
+        ToolContext(run_id="bars-limit"),
+    )
+
+    assert result["metadata"]["limit"] == 1
+    assert result["metadata"]["backend_limited"] is True
+    assert result["metadata"]["include_trade_state"] is False
+    assert calls[0]["limit"] == 1
+    assert calls[0]["include_trade_state"] is False
+
+
+def test_query_bars_rejects_limit_above_maximum(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    set_data_lake(lake)
+
+    result = query_bars_tool.run({"limit": 10001}, ToolContext(run_id="bars-bad-limit"))
+
+    assert result["metadata"]["status"] == "INVALID_REQUEST"
+
+
 def test_query_universe_builds_reproducible_cyclical_basket_from_stock_basic(
     tmp_path,
 ) -> None:
