@@ -94,6 +94,41 @@ def test_strategy_spec_draft_can_be_saved_and_resolved_by_strategy_id(registry) 
     assert result["static_checks"] == "NOT_RUN"
 
 
+def test_strategy_spec_draft_can_be_upgraded_with_generated_code(registry) -> None:
+    context = ToolContext(run_id="strategy-spec-draft-upgrade")
+    spec = registry.run_tool(
+        "create_strategy_spec",
+        {
+            "strategy_idea": "draft strategy with generated implementation",
+            "selected_factors": [
+                {"factor_id": "momentum_20d", "weight": 0.6, "ascending": False},
+                {"factor_id": "volatility_20d", "weight": 0.4, "ascending": True},
+            ],
+        },
+        context,
+    )["strategy_spec"]
+    registry.run_tool("save_strategy_spec_draft", {"strategy_spec": spec}, context)
+    generated = registry.run_tool("generate_strategy_code", {"strategy_spec": spec}, context)
+
+    saved = registry.run_tool(
+        "save_strategy_candidate",
+        {
+            "strategy_spec": spec,
+            "code_path": generated["code_path"],
+            "tests_path": generated["tests_path"],
+        },
+        context,
+    )
+
+    assert saved["status"] == "updated"
+    assert saved["registry_action"] == "attached_generated_implementation"
+    assert saved["saved_strategy"]["implementation_ref"] == f"file:{generated['code_path']}"
+    assert saved["saved_strategy"]["code_path"] == generated["code_path"]
+    assert saved["saved_strategy"]["tests_path"] == generated["tests_path"]
+    assert saved["review_required"] is True
+    assert saved["live_trading_allowed"] is False
+
+
 def test_unknown_strategy_id_returns_structured_error(registry) -> None:
     result = registry.run_tool(
         "run_backtest",

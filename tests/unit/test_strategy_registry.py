@@ -37,6 +37,42 @@ def test_strategy_registry_rejects_duplicate_id(tmp_path) -> None:
         registry.save_candidate(_saved("strat_test"))
 
 
+def test_strategy_registry_attaches_generated_implementation_to_agent_draft(tmp_path) -> None:
+    registry = StrategyRegistry(tmp_path)
+    draft = _saved("strat_test").model_copy(
+        update={
+            "implementation_ref": "spec:draft",
+            "code_path": None,
+            "tests_path": None,
+        }
+    )
+    registry.save_candidate(draft)
+
+    updated = registry.attach_generated_implementation(
+        "strat_test",
+        spec=draft.spec,
+        code_path="/tmp/strategy.py",
+        tests_path="/tmp/test_strategy.py",
+    )
+
+    assert updated.implementation_ref == "file:/tmp/strategy.py"
+    assert updated.code_path == "/tmp/strategy.py"
+    assert updated.tests_path == "/tmp/test_strategy.py"
+    assert registry.get_strategy("strat_test") == updated
+
+
+def test_strategy_registry_rejects_generated_implementation_for_builtin(tmp_path) -> None:
+    registry = StrategyRegistry(tmp_path)
+
+    with pytest.raises(ValueError, match="built-in"):
+        registry.attach_generated_implementation(
+            "factor_rank_long_only_v1",
+            spec=StrategySpec(strategy_id="factor_rank_long_only_v1", name="builtin"),
+            code_path="/tmp/strategy.py",
+            tests_path=None,
+        )
+
+
 def test_strategy_registry_rejects_direct_approved_candidate(tmp_path) -> None:
     registry = StrategyRegistry(tmp_path)
 

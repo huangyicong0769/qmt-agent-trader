@@ -304,6 +304,24 @@ def _save_strategy_candidate(input_data: dict[str, Any], context: ToolContext) -
     registry = _strategy_registry()
     existing = registry.get_strategy(spec.strategy_id)
     if existing is not None:
+        if (
+            existing.source == StrategySource.AGENT_GENERATED
+            and (existing.implementation_ref == "spec:draft" or existing.code_path is None)
+        ):
+            stored = registry.attach_generated_implementation(
+                spec.strategy_id,
+                spec=spec,
+                code_path=code_path,
+                tests_path=tests_path,
+            )
+            return {
+                "status": "updated",
+                "registry_action": "attached_generated_implementation",
+                "strategy_id": spec.strategy_id,
+                "saved_strategy": stored.model_dump(mode="json"),
+                "review_required": True,
+                "live_trading_allowed": False,
+            }
         return {
             "status": "already_saved",
             "strategy_id": spec.strategy_id,

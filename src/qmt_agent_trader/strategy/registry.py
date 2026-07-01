@@ -106,6 +106,34 @@ class StrategyRegistry:
         self._persist_file_registry()
         return updated
 
+    def attach_generated_implementation(
+        self,
+        strategy_id: str,
+        *,
+        spec: StrategySpec,
+        code_path: str,
+        tests_path: str | None,
+    ) -> SavedStrategy:
+        saved = self._require_mutable(strategy_id)
+        if saved.source != StrategySource.AGENT_GENERATED:
+            raise ValueError("generated implementations can only update agent-generated drafts")
+        if saved.status == ApprovalStatus.APPROVED:
+            raise ValueError("APPROVED strategies require trusted approval workflow")
+        updated = saved.model_copy(
+            update={
+                "name": spec.name,
+                "version": spec.version,
+                "spec": spec,
+                "implementation_ref": f"file:{code_path}",
+                "code_path": code_path,
+                "tests_path": tests_path,
+                "updated_at": shanghai_now_iso(),
+            }
+        )
+        self._saved[strategy_id] = updated
+        self._persist_file_registry()
+        return updated
+
     def attach_approval(self, strategy_id: str, approval_file: str) -> SavedStrategy:
         saved = self._require_mutable(strategy_id)
         updated = saved.model_copy(
