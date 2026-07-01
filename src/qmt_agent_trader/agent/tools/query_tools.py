@@ -6,19 +6,39 @@ return `NOT_AVAILABLE` rather than crashing the Agent loop.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import date, datetime
 from typing import Any
+
+import pandas as pd
 
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ
-from qmt_agent_trader.data.bars import load_daily_bars
+from qmt_agent_trader.data.bars import load_daily_bars, normalize_tushare_daily
 from qmt_agent_trader.data.catalog import visible_dataset_names
+from qmt_agent_trader.data.fundamentals import (
+    DAILY_BASIC_DATASET,
+    DEFAULT_FUNDAMENTAL_FIELDS,
+    FINANCIAL_DATASETS,
+    load_fundamentals_asof,
+    records_jsonable,
+)
+from qmt_agent_trader.data.macro import MACRO_DATASETS
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.transforms.macro_pit import (
+    load_macro_series_asof,
+)
+from qmt_agent_trader.data.transforms.macro_pit import (
+    records_jsonable as macro_records_jsonable,
+)
+
+MAX_FUNDAMENTAL_ROWS = 500
+MAX_MACRO_ROWS = 500
 
 _lake: DataLake | None = None
 _lake_var: ContextVar[DataLake | None] = ContextVar("query_tool_lake", default=None)
@@ -81,19 +101,29 @@ def _query_universe(input_data: dict[str, Any], _context: ToolContext) -> dict[s
     if lake is None:
         return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
 
-    as_of = input_data.get("as_of_date", "20200101")
+    as_of = input_data.get("as_of_date", _today_yyyymmdd())
     universe_type = input_data.get("universe_type", "stock")
     filters = input_data.get("filters", {})
+    theme = str(filters.get("theme", "")).lower()
     exclude_st = filters.get("exclude_st", True)
     exclude_suspended = filters.get("exclude_suspended", True)
-    filters.get("min_listed_days", 60)
+    min_listed_days = int(filters.get("min_listed_days", 60))
 
     try:
-        bars = load_daily_bars(lake, end=as_of)
+        if theme == "cyclical":
+            return build_theme_universe(
+                lake,
+                as_of=as_of,
+                theme=theme,
+                exclude_st=bool(exclude_st),
+                exclude_suspended=bool(exclude_suspended),
+                min_listed_days=min_listed_days,
+            )
+        bars = _load_recent_bars_for_universe(lake, end=str(as_of))
         if bars.empty:
             return {"status": "NOT_AVAILABLE", "symbols": [], "metadata": {"reason": "no data"}}
 
-        recent = bars[bars["trade_date"] == bars["trade_date"].max()]
+        recent = bars
         symbols = recent["symbol"].astype(str).tolist()
         if exclude_st:
             st_mask = recent.set_index("symbol")["st"]
@@ -103,6 +133,7 @@ def _query_universe(input_data: dict[str, Any], _context: ToolContext) -> dict[s
             symbols = [s for s in symbols if not susp_mask.get(s, False)]
 
         return {
+            "status": "OK",
             "symbols": symbols[:2000],
             "metadata": {
                 "as_of_date": str(recent["trade_date"].iloc[0]),
@@ -117,12 +148,259 @@ def _query_universe(input_data: dict[str, Any], _context: ToolContext) -> dict[s
 query_universe_tool: AgentTool = tool(
     ToolSpec(
         name="query_universe",
-        description="查询某日可投资股票池 / ETF 池。",
+        description=(
+            "查询某日可投资股票池 / ETF 池。支持 filters.theme='cyclical' "
+            "基于 tushare_stock_basic 行业/名称映射构造可复现顺周期篮子。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "as_of_date": {"type": "string"},
+                "universe_type": {"type": "string"},
+                "filters": {
+                    "type": "object",
+                    "properties": {
+                        "theme": {
+                            "type": "string",
+                            "description": "Use 'cyclical' for the reproducible cyclical basket.",
+                        },
+                        "exclude_st": {"type": "boolean"},
+                        "exclude_suspended": {"type": "boolean"},
+                        "min_listed_days": {"type": "integer"},
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            "additionalProperties": False,
+        },
         permission=PermissionLevel.READ_ONLY,
         deterministic=False,
     ),
     fn=_query_universe,
 )
+
+
+CYCLICAL_INDUSTRIES = {
+    "银行",
+    "证券",
+    "保险",
+    "多元金融",
+    "房地产",
+    "钢铁",
+    "煤炭",
+    "有色金属",
+    "工业金属",
+    "贵金属",
+    "基础化工",
+    "化工",
+    "建筑材料",
+    "建材",
+    "建筑装饰",
+    "机械设备",
+    "汽车",
+    "石油石化",
+    "交通运输",
+    "航运港口",
+}
+
+
+def _load_recent_bars_for_universe(lake: DataLake, *, end: str) -> Any:
+    frames: list[Any] = []
+    end_key = _date_key(end)
+    for dataset in ("tushare_daily", "tushare_fund_daily"):
+        path = lake.dataset_path("raw", dataset)
+        if not path.exists():
+            continue
+        escaped_path = str(path).replace("'", "''")
+        frame = lake.query_parquet(
+            f"""
+            WITH source AS (
+                SELECT *
+                FROM read_parquet('{escaped_path}')
+                WHERE CAST(trade_date AS VARCHAR) <= $end_date
+            ),
+            latest AS (
+                SELECT max(CAST(trade_date AS VARCHAR)) AS trade_date
+                FROM source
+            )
+            SELECT source.*
+            FROM source, latest
+            WHERE CAST(source.trade_date AS VARCHAR) = latest.trade_date
+            """,
+            {"end_date": end_key},
+        )
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return normalize_tushare_daily(pd.DataFrame())
+    recent = normalize_tushare_daily(pd.concat(frames, ignore_index=True))
+    return _apply_fast_universe_state(lake, recent)
+
+
+def build_theme_universe(
+    lake: DataLake,
+    *,
+    as_of: str,
+    theme: str,
+    exclude_st: bool = True,
+    exclude_suspended: bool = True,
+    min_listed_days: int = 60,
+) -> dict[str, Any]:
+    recent = _load_recent_bars_for_universe(lake, end=as_of)
+    if recent.empty:
+        return {"status": "NOT_AVAILABLE", "symbols": [], "metadata": {"reason": "no data"}}
+    if theme == "cyclical":
+        return _query_theme_universe(
+            lake,
+            recent,
+            as_of=as_of,
+            theme=theme,
+            exclude_st=exclude_st,
+            exclude_suspended=exclude_suspended,
+            min_listed_days=min_listed_days,
+        )
+    return {
+        "status": "INVALID_REQUEST",
+        "symbols": [],
+        "metadata": {"reason": "unsupported_theme", "theme": theme},
+    }
+
+
+def _apply_fast_universe_state(lake: DataLake, recent: Any) -> Any:
+    if recent.empty or "symbol" not in recent.columns:
+        return recent
+    stock_basic_path = lake.dataset_path("raw", "tushare_stock_basic")
+    if not stock_basic_path.exists():
+        return recent
+    stock_basic = lake.read_parquet("raw", "tushare_stock_basic")
+    if stock_basic.empty or not {"ts_code", "name"}.issubset(stock_basic.columns):
+        return recent
+    st_symbols = set(
+        stock_basic.loc[
+            stock_basic["name"].astype(str).str.contains("ST", case=False, na=False),
+            "ts_code",
+        ].astype(str)
+    )
+    if not st_symbols:
+        return recent
+    enriched = recent.copy()
+    enriched["st"] = enriched["st"] | enriched["symbol"].astype(str).isin(st_symbols)
+    return enriched
+
+
+def _query_theme_universe(
+    lake: DataLake,
+    recent: Any,
+    *,
+    as_of: str,
+    theme: str,
+    exclude_st: bool,
+    exclude_suspended: bool,
+    min_listed_days: int,
+) -> dict[str, Any]:
+    if not lake.dataset_path("raw", "tushare_stock_basic").exists():
+        return {
+            "status": "BLOCKED",
+            "symbols": [],
+            "metadata": {
+                "theme": theme,
+                "reason": "missing_stock_basic",
+                "next_repair_tool": "run_remote_data_update",
+            },
+        }
+    stock_basic = lake.read_parquet("raw", "tushare_stock_basic")
+    if stock_basic.empty or "ts_code" not in stock_basic.columns:
+        return {
+            "status": "BLOCKED",
+            "symbols": [],
+            "metadata": {
+                "theme": theme,
+                "reason": "invalid_stock_basic",
+                "next_repair_tool": "run_remote_data_update",
+            },
+        }
+
+    recent_by_symbol = recent.set_index("symbol")
+    as_of_date = _parse_date(as_of)
+    selected: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
+    for row in stock_basic.to_dict(orient="records"):
+        symbol = str(row.get("ts_code", ""))
+        name = str(row.get("name", ""))
+        industry = str(row.get("industry", ""))
+        reason = _theme_exclusion_reason(
+            symbol=symbol,
+            name=name,
+            industry=industry,
+            row=row,
+            recent_by_symbol=recent_by_symbol,
+            as_of_date=as_of_date,
+            exclude_st=exclude_st,
+            exclude_suspended=exclude_suspended,
+            min_listed_days=min_listed_days,
+        )
+        if reason is not None:
+            excluded.append({"symbol": symbol, "reason": reason, "industry": industry})
+            continue
+        selected.append({"symbol": symbol, "name": name, "industry": industry})
+
+    selected = sorted(selected, key=lambda item: item["symbol"])
+    industries = Counter(item["industry"] for item in selected)
+    return {
+        "status": "OK",
+        "symbols": [item["symbol"] for item in selected][:2000],
+        "metadata": {
+            "theme": theme,
+            "as_of_date": str(recent["trade_date"].iloc[0]),
+            "count": len(selected),
+            "industry_distribution": dict(sorted(industries.items())),
+            "selection_rules": {
+                "industry_source": "tushare_stock_basic",
+                "included_industries": sorted(CYCLICAL_INDUSTRIES),
+                "exclude_st": exclude_st,
+                "exclude_suspended": exclude_suspended,
+                "min_listed_days": min_listed_days,
+            },
+            "excluded_symbols": excluded[:2000],
+        },
+    }
+
+
+def _theme_exclusion_reason(
+    *,
+    symbol: str,
+    name: str,
+    industry: str,
+    row: dict[str, Any],
+    recent_by_symbol: Any,
+    as_of_date: date,
+    exclude_st: bool,
+    exclude_suspended: bool,
+    min_listed_days: int,
+) -> str | None:
+    if not symbol:
+        return "missing_symbol"
+    if str(row.get("list_status", "L")) not in {"L", "上市"}:
+        return "not_listed"
+    if industry not in CYCLICAL_INDUSTRIES:
+        return "industry_not_in_theme"
+    if symbol not in recent_by_symbol.index:
+        return "no_bar_coverage"
+    recent = recent_by_symbol.loc[symbol]
+    if exclude_st and (bool(recent.get("st", False)) or "ST" in name.upper()):
+        return "st"
+    if exclude_suspended and bool(recent.get("suspended", False)):
+        return "suspended"
+    list_date_raw = row.get("list_date")
+    if list_date_raw:
+        listed_days = (as_of_date - _parse_date(str(list_date_raw))).days
+        if listed_days < min_listed_days:
+            return "listed_days_below_minimum"
+    return None
+
+
+def _date_key(value: str) -> str:
+    return _parse_date(value).strftime("%Y%m%d")
 
 # ── query_bars ───────────────────────────────────────────────────────────────
 
@@ -320,12 +598,134 @@ query_bars_tool: AgentTool = tool(
 def _query_fundamentals_pit(
     input_data: dict[str, Any], _context: ToolContext
 ) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {
+            "rows": [],
+            "metadata": {
+                "point_in_time": True,
+                "status": "NOT_AVAILABLE",
+                "message": "data lake not wired",
+            },
+        }
+
+    as_of = input_data.get("as_of_date")
+    if not as_of:
+        return {
+            "rows": [],
+            "metadata": {
+                "point_in_time": True,
+                "status": "INVALID_REQUEST",
+                "message": "as_of_date is required",
+            },
+        }
+    symbols = _requested_symbols(input_data)
+    requested_fields = input_data.get("fields")
+    fields = (
+        [str(field) for field in requested_fields]
+        if isinstance(requested_fields, list)
+        else DEFAULT_FUNDAMENTAL_FIELDS
+    )
+    include_daily_basic = bool(input_data.get("include_daily_basic", True))
+    include_financials = bool(input_data.get("include_financials", True))
+
+    datasets_used = _fundamental_datasets_used(lake, include_daily_basic, include_financials)
+    if not datasets_used:
+        return {
+            "rows": [],
+            "metadata": {
+                "point_in_time": True,
+                "status": "NO_DATA",
+                "as_of_date": str(as_of),
+                "requested_symbols": symbols,
+                "datasets_used": [],
+                "coverage_status": "NO_DATA",
+                "missing_ranges": [{"start_date": str(as_of), "end_date": str(as_of)}],
+                "next_repair_tool": "run_fundamental_data_update",
+                "pit_rule": "visible_date <= as_of_date",
+            },
+        }
+
+    try:
+        frame = load_fundamentals_asof(
+            lake,
+            as_of_date=str(as_of),
+            symbols=symbols or None,
+            fields=fields,
+            include_daily_basic=include_daily_basic,
+            include_financials=include_financials,
+        )
+    except Exception as exc:
+        return {
+            "rows": [],
+            "metadata": {
+                "point_in_time": True,
+                "status": "ERROR",
+                "message": str(exc),
+                "as_of_date": str(as_of),
+                "requested_symbols": symbols,
+                "datasets_used": datasets_used,
+            },
+        }
+
+    if frame.empty:
+        return {
+            "rows": [],
+            "metadata": {
+                "point_in_time": True,
+                "status": "NO_DATA",
+                "as_of_date": str(as_of),
+                "requested_symbols": symbols,
+                "datasets_used": datasets_used,
+                "coverage_status": "NO_DATA",
+                "missing_ranges": [{"start_date": str(as_of), "end_date": str(as_of)}],
+                "next_repair_tool": "run_fundamental_data_update",
+                "pit_rule": "visible_date <= as_of_date",
+            },
+        }
+
+    total_rows = len(frame)
+    output = frame.head(MAX_FUNDAMENTAL_ROWS).reset_index(drop=True)
+    returned_symbols = (
+        output["symbol"].dropna().astype(str).tolist()
+        if "symbol" in output.columns
+        else []
+    )
+    missing_symbols = [symbol for symbol in symbols if symbol not in set(returned_symbols)]
+    missing_fields = {
+        field: returned_symbols
+        for field in fields
+        if field not in output.columns or output[field].isna().all()
+    }
+    status = "OK"
+    if missing_symbols or missing_fields:
+        status = "PARTIAL_COVERAGE"
     return {
-        "rows": [],
+        "rows": records_jsonable(output),
         "metadata": {
             "point_in_time": True,
-            "status": "NOT_IMPLEMENTED",
-            "message": "PIT fundamentals data is not yet available; use daily bars for now.",
+            "status": status,
+            "as_of_date": str(as_of),
+            "requested_symbols": symbols,
+            "returned": len(output),
+            "total_rows": total_rows,
+            "truncated": total_rows > len(output),
+            "missing_symbols": missing_symbols,
+            "missing_fields": missing_fields,
+            "pit_rule": (
+                "financial visible_date <= as_of_date; "
+                "daily_basic trade_date <= as_of_date"
+            ),
+            "datasets_used": datasets_used,
+            "coverage_status": status,
+            "missing_ranges": (
+                [{"start_date": str(as_of), "end_date": str(as_of)}]
+                if status == "PARTIAL_COVERAGE"
+                else []
+            ),
+            "next_repair_tool": (
+                "run_fundamental_data_update" if status == "PARTIAL_COVERAGE" else None
+            ),
         },
     }
 
@@ -335,10 +735,125 @@ query_fundamentals_pit_tool: AgentTool = tool(
         name="query_fundamentals_pit",
         description="按 point-in-time 语义查询财务数据。",
         permission=PermissionLevel.READ_ONLY,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "symbols": {"type": "array", "items": {"type": "string"}},
+                "symbol": {"type": "string"},
+                "as_of_date": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "include_daily_basic": {"type": "boolean"},
+                "include_financials": {"type": "boolean"},
+            },
+            "required": ["as_of_date"],
+        },
         deterministic=False,
         timeout_seconds=30,
     ),
     fn=_query_fundamentals_pit,
+)
+
+# ── query_macro_series_pit ───────────────────────────────────────────────────
+
+
+def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {
+            "rows": [],
+            "metadata": {
+                "status": "NOT_AVAILABLE",
+                "point_in_time": True,
+                "message": "data lake not wired",
+            },
+        }
+    dataset = str(input_data.get("dataset") or "").strip()
+    if not dataset:
+        return {
+            "rows": [],
+            "metadata": {
+                "status": "INVALID_REQUEST",
+                "point_in_time": True,
+                "message": "dataset is required",
+            },
+        }
+    fields_value = input_data.get("fields")
+    fields = [str(field) for field in fields_value] if isinstance(fields_value, list) else None
+    strict_pit = bool(input_data.get("strict_pit", True))
+    frame, metadata = load_macro_series_asof(
+        lake,
+        dataset=dataset,
+        as_of_date=str(input_data.get("as_of_date", _today_yyyymmdd())),
+        start_date=input_data.get("start_date"),
+        end_date=input_data.get("end_date"),
+        fields=fields,
+    )
+    if metadata.get("status") == "INVALID_REQUEST":
+        metadata = {
+            **metadata,
+            "known_datasets": sorted(MACRO_DATASETS),
+            "next_repair_tool": "run_macro_data_update",
+        }
+    if metadata.get("status") == "NO_DATA":
+        start = str(input_data.get("start_date") or input_data.get("as_of_date", _today_yyyymmdd()))
+        end = str(input_data.get("end_date") or input_data.get("as_of_date", _today_yyyymmdd()))
+        metadata = {
+            **metadata,
+            "coverage_status": "NO_DATA",
+            "missing_ranges": [{"start_date": start, "end_date": end}],
+            "next_repair_tool": "run_macro_data_update",
+            "known_datasets": sorted(MACRO_DATASETS),
+        }
+    if metadata.get("pit_safe") is False and strict_pit:
+        metadata = {
+            **metadata,
+            "status": "PIT_NOT_VALIDATED",
+            "warning": (
+                "This dataset uses conservative visibility approximation; do not use "
+                "for production backtests unless release timing is validated."
+            ),
+        }
+        return {"rows": [], "metadata": metadata}
+    if metadata.get("pit_safe") is False:
+        metadata = {
+            **metadata,
+            "warning": (
+                "This dataset uses conservative visibility approximation; use for "
+                "explanatory research only unless release timing is validated."
+            ),
+        }
+    total_rows = len(frame)
+    output = frame.head(MAX_MACRO_ROWS).reset_index(drop=True)
+    metadata = {
+        **metadata,
+        "returned": len(output),
+        "total_rows": total_rows,
+        "truncated": total_rows > len(output),
+    }
+    return {"rows": macro_records_jsonable(output), "metadata": metadata}
+
+
+query_macro_series_pit_tool: AgentTool = tool(
+    ToolSpec(
+        name="query_macro_series_pit",
+        description="按 point-in-time 语义查询结构化宏观时间序列。",
+        permission=PermissionLevel.READ_ONLY,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "dataset": {"type": "string"},
+                "as_of_date": {"type": "string"},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "strict_pit": {"type": "boolean"},
+            },
+            "required": ["dataset", "as_of_date"],
+        },
+        deterministic=False,
+        timeout_seconds=30,
+    ),
+    fn=_query_macro_series_pit,
 )
 
 
@@ -362,4 +877,31 @@ def build_query_tools(deps: AgentToolDependencies) -> list[AgentTool]:
                 deps, _query_bars, input_data, context
             ),
         ),
+        tool(
+            query_fundamentals_pit_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _query_fundamentals_pit, input_data, context
+            ),
+        ),
+        tool(
+            query_macro_series_pit_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _query_macro_series_pit, input_data, context
+            ),
+        ),
     ]
+
+
+def _fundamental_datasets_used(
+    lake: DataLake,
+    include_daily_basic: bool,
+    include_financials: bool,
+) -> list[str]:
+    datasets: list[str] = []
+    if include_daily_basic and lake.dataset_path("raw", DAILY_BASIC_DATASET).exists():
+        datasets.append(DAILY_BASIC_DATASET)
+    if include_financials:
+        for dataset in FINANCIAL_DATASETS.values():
+            if lake.dataset_path("raw", dataset).exists():
+                datasets.append(dataset)
+    return datasets

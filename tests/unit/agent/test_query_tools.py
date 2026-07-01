@@ -6,6 +6,7 @@ from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools.query_tools import (
     list_data_catalog_tool,
     query_bars_tool,
+    query_universe_tool,
     set_data_lake,
 )
 from qmt_agent_trader.data.storage import DataLake
@@ -296,3 +297,156 @@ def test_query_bars_reports_stale_symbols_when_end_is_not_covered(tmp_path) -> N
     assert metadata["coverage_by_symbol"]["000001.SZ"]["data_freshness"] == (
         "stale_vs_requested_end"
     )
+
+
+def test_query_universe_builds_reproducible_cyclical_basket_from_stock_basic(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "600019.SH",
+                    "trade_date": "20240628",
+                    "open": 5.0,
+                    "high": 5.2,
+                    "low": 4.9,
+                    "close": 5.1,
+                },
+                {
+                    "ts_code": "600036.SH",
+                    "trade_date": "20240628",
+                    "open": 30.0,
+                    "high": 31.0,
+                    "low": 29.0,
+                    "close": 30.5,
+                },
+                {
+                    "ts_code": "600519.SH",
+                    "trade_date": "20240628",
+                    "open": 1500.0,
+                    "high": 1510.0,
+                    "low": 1490.0,
+                    "close": 1505.0,
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240628",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                },
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "600019.SH",
+                    "name": "宝钢股份",
+                    "industry": "钢铁",
+                    "list_date": "20001212",
+                    "list_status": "L",
+                },
+                {
+                    "ts_code": "600036.SH",
+                    "name": "招商银行",
+                    "industry": "银行",
+                    "list_date": "20020409",
+                    "list_status": "L",
+                },
+                {
+                    "ts_code": "600519.SH",
+                    "name": "贵州茅台",
+                    "industry": "白酒",
+                    "list_date": "20010827",
+                    "list_status": "L",
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "*ST平安",
+                    "industry": "银行",
+                    "list_date": "19910403",
+                    "list_status": "L",
+                },
+                {
+                    "ts_code": "600999.SH",
+                    "name": "无行情周期股",
+                    "industry": "煤炭",
+                    "list_date": "20000101",
+                    "list_status": "L",
+                },
+            ]
+        ),
+        "raw",
+        "tushare_stock_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_universe_tool.run(
+        {
+            "as_of_date": "20240628",
+            "filters": {"theme": "cyclical", "min_listed_days": 60},
+        },
+        ToolContext(run_id="cyclical-universe"),
+    )
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["600019.SH", "600036.SH"]
+    assert result["metadata"]["theme"] == "cyclical"
+    assert result["metadata"]["selection_rules"]["industry_source"] == "tushare_stock_basic"
+    assert result["metadata"]["industry_distribution"] == {"钢铁": 1, "银行": 1}
+    excluded = {item["symbol"]: item["reason"] for item in result["metadata"]["excluded_symbols"]}
+    assert excluded["600519.SH"] == "industry_not_in_theme"
+    assert excluded["000001.SZ"] == "st"
+    assert excluded["600999.SH"] == "no_bar_coverage"
+
+
+def test_query_universe_defaults_to_current_date_for_cyclical_theme(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "600036.SH",
+                    "trade_date": "20240628",
+                    "open": 30.0,
+                    "high": 31.0,
+                    "low": 29.0,
+                    "close": 30.5,
+                }
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "600036.SH",
+                    "name": "招商银行",
+                    "industry": "银行",
+                    "list_date": "20020409",
+                    "list_status": "L",
+                }
+            ]
+        ),
+        "raw",
+        "tushare_stock_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_universe_tool.run(
+        {"filters": {"theme": "cyclical", "min_listed_days": 60}},
+        ToolContext(run_id="cyclical-universe-default-date"),
+    )
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["600036.SH"]
+    assert result["metadata"]["as_of_date"] == "2024-06-28"
