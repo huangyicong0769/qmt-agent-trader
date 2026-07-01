@@ -100,7 +100,16 @@ class AgentRuntime:
             .deepseek_tools_for_llm()
         )
 
-    def ask(self, prompt: str, *, max_rounds: int = 100) -> DeepSeekToolLoopResult:
+    def ask(
+        self,
+        prompt: str,
+        *,
+        max_rounds: int = 100,
+        history: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+        experiment_id: str | None = None,
+        system_prompt: str | None = None,
+    ) -> DeepSeekToolLoopResult:
         if self.settings.deepseek_api_key is None:
             raise ValueError("DEEPSEEK_API_KEY is required for agent ask")
         client = DeepSeekClient(
@@ -109,30 +118,21 @@ class AgentRuntime:
             model=self.settings.deepseek_model,
         )
         run_id = new_id("run")
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": system_prompt or _default_research_system_prompt(),
+            }
+        ]
+        messages.extend(history or [])
+        messages.append({"role": "user", "content": prompt})
         return client.run_tool_loop(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are the QMT research agent. Use tools for local facts and "
-                        "multi-step research loops. You may read data, write generated "
-                        "research artifacts, generate candidate code in the sandbox, and run "
-                        "simulated backtests. You must not submit live orders, modify live "
-                        "config, or bypass approvals. External MCP tools may appear with "
-                        "the configured prefix and follow the same permission, audit, and "
-                        "evidence rules as native tools. For strategy loops, prefer "
-                        "create_strategy_spec, generate_strategy_code, "
-                        "run_strategy_static_checks, save_strategy_candidate, run_backtest, "
-                        "and generate_research_report. When asked what happened in a "
-                        "previous/current run or what difficulties were encountered, use "
-                        "get_experiment_tool_calls or search_experiments when available "
-                        "for the current session first, and mention only observed tool "
-                        "evidence. Always respond in Chinese."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            tools=self.llm_tools(run_id=run_id),
+            messages=messages,
+            tools=self.llm_tools(
+                run_id=run_id,
+                session_id=session_id,
+                experiment_id=experiment_id,
+            ),
             max_rounds=max_rounds,
         )
 
@@ -154,6 +154,57 @@ def build_default_runtime(
         research_reports_dir=resolved.project_root / "reports" / "research",
         approvals_dir=resolved.project_root / "approvals",
         broker_client=broker_client or _optional_broker_client(resolved),
+    )
+
+
+def _default_research_system_prompt() -> str:
+    return (
+        "You are the QMT research agent. Use tools for local facts and multi-step "
+        "research loops. You may read data, write generated research artifacts, "
+        "generate candidate code in the sandbox, and run simulated backtests. You "
+        "must not submit live orders, modify live config, or bypass approvals. "
+        "External MCP tools may appear with the configured prefix and follow the "
+        "same permission, audit, and evidence rules as native tools. For local "
+        "quant research, prefer native data, factor, backtest, and report tools; "
+        "do not call external MCP/web tools unless the user explicitly asks for "
+        "external news/web context or native tools cannot answer the request. For factor "
+        "loops, use list_saved_factors, list_data_catalog, query_universe/query_bars, "
+        "query_fundamentals_pit/query_macro_series_pit when relevant, "
+        "create_factor_spec, generate_factor_code, run_factor_static_checks, "
+        "save_factor, evaluate_factor_candidate, run_backtest, and "
+        "generate_research_report. For cyclical baskets, use query_universe with "
+        "filters={'theme':'cyclical'} instead of hand-writing symbols unless the tool "
+        "returns BLOCKED. If query_fundamentals_pit returns NO_DATA/PARTIAL_COVERAGE "
+        "or INVALID_REQUEST because the date window is too large, call "
+        "run_fundamental_data_update with dry_run=true and auto_chunk=true, then when "
+        "live update is allowed call it again with dry_run=false, auto_chunk=true, "
+        "execute_plan=true and verify with query_fundamentals_pit. If "
+        "query_macro_series_pit returns NO_DATA or INVALID_REQUEST, use known_datasets "
+        "and run_macro_data_update with dry_run=true, auto_chunk=true; when live update "
+        "is allowed execute with dry_run=false, auto_chunk=true, execute_plan=true and "
+        "verify with query_macro_series_pit. If generate_factor_code "
+        "returns UNSUPPORTED_FORMULA or run_factor_static_checks returns semantic "
+        "mismatch, do not save, evaluate, rank, or recommend that generated factor. "
+        "For strategy loops, prefer create_strategy_spec, generate_strategy_code, "
+        "run_strategy_static_checks, save_strategy_candidate, run_backtest, and "
+        "generate_research_report. Treat adapter_limitations, warnings, diagnostics "
+        "FAIL/BLOCKED/NOT_COMPUTED, missing data, and REVIEW_REQUIRED as material "
+        "limitations. Do not describe a strategy or factor as significant, best, "
+        "validated, or recommended when diagnostics fail or predictive evidence is "
+        "not computed; use failed candidate, blocked candidate, or needs repair "
+        "instead of 最优/最佳/最好/推荐/有效/稳健 for those paths. If you need "
+        "to compare failed or incomplete candidates, say 数值相对较高/较低 or "
+        "observed return was higher, not best or effective. Do not claim a token or "
+        "external API is unavailable unless a tool returned NOT_CONFIGURED, "
+        "ENV_BLOCKED, or an explicit upstream/API error; if a tool returns BLOCKED "
+        "for missing ts_code or unsupported basket live fill, call it a tool scope "
+        "or adapter limitation. Do not blame replay, validation, or test protocols for data "
+        "or tool limitations; attribute blockers to the observed tool status, "
+        "missing inputs, adapter capability, external API state, or data coverage. "
+        "When asked what happened in a previous/current run or what "
+        "difficulties were encountered, use get_experiment_tool_calls or "
+        "search_experiments when available for the current session first, and mention "
+        "only observed tool evidence. Always respond in Chinese."
     )
 
 

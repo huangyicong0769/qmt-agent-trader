@@ -77,11 +77,11 @@ def test_execute_stream_includes_recent_natural_session_history(monkeypatch, tmp
     assert "stale_symbols" in system_prompt
     assert "For data acquisition or coverage-check requests" in system_prompt
     assert "do not stop after a dry_run plan or ask whether to fetch" in system_prompt
-    assert "loop over each requested symbol" in system_prompt
     assert "For large-basket or bulk data pulls" in system_prompt
-    assert "prefer one batch or market-wide remote update without ts_code" in system_prompt
-    assert "passing the full symbols=[...] list" in system_prompt
-    assert "verify the full requested symbols list with query_bars" in system_prompt
+    assert "pass the full symbols=[...] list" in system_prompt
+    assert "obey the update tool's live-execution scope" in system_prompt
+    assert "If a live basket fill is not supported" in system_prompt
+    assert "Do not blame replay, validation, or test protocols" in system_prompt
     assert "Do not expand the user-requested date window" in system_prompt
     assert "Do not validate only a sample symbol" in system_prompt
     assert "intent has been classified" not in system_prompt
@@ -302,7 +302,7 @@ def test_execute_stream_guides_large_batch_data_pull_without_hiding_agent_tools(
     assert events[-1].type == "done"
     system_prompt = CapturingDeepSeekClient.seen_messages[0]["content"]
     assert "For large-basket or bulk data pulls" in system_prompt
-    assert "prefer one batch or market-wide remote update without ts_code" in system_prompt
+    assert "obey the update tool's live-execution scope" in system_prompt
     assert "run_remote_data_update" in CapturingDeepSeekClient.seen_tool_names
     assert "query_bars" in CapturingDeepSeekClient.seen_tool_names
     assert "run_backtest" in CapturingDeepSeekClient.seen_tool_names

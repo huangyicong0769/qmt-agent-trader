@@ -165,6 +165,8 @@ def _get_experiment_tool_calls(
             continue
         if session_id and entry.get("session_id") != session_id:
             continue
+        if entry.get("status") == "started":
+            continue
         calls.append(_summarize_audit_entry(entry))
     return {
         "status": "ok",

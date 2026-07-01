@@ -11,6 +11,7 @@ A generous safety cap (100 rounds) prevents runaway processes.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +25,9 @@ from openai.types.chat import (
 
 _MAX_ROUNDS_SAFETY_CAP = 100
 _MAX_REPEAT_BEFORE_BREAK = 3
+_MAX_TOOL_RESULT_CONTENT_CHARS = 12_000
+_MAX_TOOL_RESULT_LIST_ITEMS = 30
+_MAX_TOOL_RESULT_SYMBOL_ITEMS = 500
 
 
 @dataclass(frozen=True)
@@ -184,10 +188,11 @@ class DeepSeekClient:
         executions: list[ToolExecution] = []
         request_tools = [_to_openai_tool(tool) for tool in tools]
         call_history: list[tuple[str, str]] = []
+        force_final_answer = False
 
         for _ in range(max_rounds):
             kwargs: dict[str, Any] = {"model": self.model, "messages": conversation}
-            if request_tools:
+            if request_tools and not force_final_answer:
                 kwargs["tools"] = request_tools
 
             response = self.client.chat.completions.create(**kwargs)
@@ -195,11 +200,21 @@ class DeepSeekClient:
             tool_calls = list(getattr(message, "tool_calls", None) or [])
 
             assistant_dict = _assistant_message_dict(message)
+            has_failed_evidence = _has_failed_or_incomplete_evidence(conversation)
+            if not tool_calls and force_final_answer and assistant_dict.get("content"):
+                assistant_dict["content"] = _strip_tool_call_markup(
+                    str(assistant_dict["content"])
+                ).strip()
+            if not tool_calls and assistant_dict.get("content"):
+                assistant_dict["content"] = _neutralize_overclaimed_failed_evidence(
+                    str(assistant_dict["content"]),
+                    has_failed_evidence=has_failed_evidence,
+                )
             conversation.append(assistant_dict)
 
             if not tool_calls:
                 return DeepSeekToolLoopResult(
-                    content=str(getattr(message, "content", "") or ""),
+                    content=str(assistant_dict.get("content", "") or ""),
                     messages=conversation,
                     tool_calls=executions,
                 )
@@ -216,6 +231,8 @@ class DeepSeekClient:
                     raise RuntimeError(break_msg)
 
                 result = tool_map[name].fn(**arguments)
+                if name == "generate_research_report":
+                    force_final_answer = True
                 executions.append(
                     ToolExecution(
                         tool_call_id=str(_attr_or_item(call, "id")),
@@ -229,6 +246,23 @@ class DeepSeekClient:
                         "role": "tool",
                         "tool_call_id": str(_attr_or_item(call, "id")),
                         "content": _tool_result_content(result),
+                    }
+                )
+            if force_final_answer:
+                conversation.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Research report has been generated. Do not call more tools; "
+                            "do not emit tool-call markup, DSML, JSON function calls, or "
+                            "pseudo read_file requests. Answer the user in natural "
+                            "language from the observed evidence and report path. Do not "
+                            "label FAIL/BLOCKED/NOT_COMPUTED strategies as best, optimal, "
+                            "recommended, validated, or effective; call them failed, "
+                            "blocked, or repair-required candidates. For Chinese final "
+                            "answers, avoid 最优/最佳/最好/推荐/有效/稳健 for failed "
+                            "or incomplete candidates; say 数值相对较高 or 仍需修复."
+                        ),
                     }
                 )
 
@@ -401,6 +435,12 @@ class DeepSeekClient:
             if not finished_tool_calls:
                 final_content = "".join(content_parts) if content_parts else None
                 if final_content:
+                    final_content = _neutralize_overclaimed_failed_evidence(
+                        final_content,
+                        has_failed_evidence=_has_failed_or_incomplete_evidence(
+                            conversation
+                        ),
+                    )
                     yield FinalMessage(content=final_content)
                 final_msg: dict[str, Any] = {"role": "assistant"}
                 if final_content:
@@ -490,7 +530,127 @@ def _function_arguments_raw(call: Any) -> str:
 def _tool_result_content(result: Any) -> str:
     if isinstance(result, str):
         return result
-    return json.dumps(result, ensure_ascii=False, default=str)
+    compact = _compact_tool_result(result)
+    content = json.dumps(compact, ensure_ascii=False, default=str)
+    if len(content) <= _MAX_TOOL_RESULT_CONTENT_CHARS:
+        return content
+    return json.dumps(
+        _fallback_tool_result_summary(result, content),
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _strip_tool_call_markup(content: str) -> str:
+    patterns = [
+        r"<｜｜DSML｜｜tool_calls>.*?</｜｜DSML｜｜tool_calls>",
+        r"<tool_calls>.*?</tool_calls>",
+    ]
+    cleaned = content
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned
+
+
+def _has_failed_or_incomplete_evidence(messages: list[Any]) -> bool:
+    markers = (
+        "FAIL",
+        "BLOCKED",
+        "NOT_COMPUTED",
+        "REVIEW_REQUIRED",
+        "ADAPTER_LIMITATION",
+        "UNSUPPORTED_FORMULA",
+    )
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in {"assistant", "tool"}:
+            continue
+        content = message.get("content")
+        if content is None:
+            continue
+        text = str(content)
+        if any(marker in text for marker in markers):
+            return True
+    return False
+
+
+def _neutralize_overclaimed_failed_evidence(
+    content: str,
+    *,
+    has_failed_evidence: bool,
+) -> str:
+    if not has_failed_evidence:
+        return content
+    replacements = {
+        "显著有效": "未通过诊断",
+        "强烈推荐": "不建议直接采用",
+        "最佳": "相对数值较高",
+        "最优": "相对数值较高",
+        "最好": "相对数值较高",
+        "收益最高": "观测收益数值较高",
+        "表现最高": "观测数值较高",
+        "表现最佳": "观测数值较高",
+        "表现最优": "观测数值较高",
+        "表现最好": "观测数值较高",
+        "具有稳健性": "稳定性仍待验证",
+        "稳健的": "稳定性待验证的",
+    }
+    neutralized = content
+    for needle, replacement in replacements.items():
+        neutralized = neutralized.replace(needle, replacement)
+    return neutralized
+
+
+def _compact_tool_result(value: Any, *, key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(item_key): _compact_tool_result(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        limit = (
+            _MAX_TOOL_RESULT_SYMBOL_ITEMS
+            if key in {"symbols", "requested_symbols", "covered_symbols", "missing_symbols"}
+            else _MAX_TOOL_RESULT_LIST_ITEMS
+        )
+        items = [_compact_tool_result(item) for item in value[:limit]]
+        omitted = len(value) - len(items)
+        if omitted <= 0:
+            return items
+        return {
+            "items": items,
+            "omitted_count": omitted,
+            "truncated": True,
+        }
+    return value
+
+
+def _fallback_tool_result_summary(result: Any, content: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "truncated": True,
+        "content_chars": len(content),
+        "preview": content[:_MAX_TOOL_RESULT_CONTENT_CHARS],
+    }
+    if isinstance(result, dict):
+        for key in (
+            "status",
+            "reason",
+            "message",
+            "run_id",
+            "strategy_id",
+            "factor_id",
+            "report_path",
+            "code_path",
+            "diagnostics",
+            "metrics",
+            "data_window",
+            "coverage_status",
+            "next_repair_tool",
+        ):
+            if key in result:
+                summary[key] = _compact_tool_result(result[key])
+    return summary
 
 
 def _attr_or_item(value: Any, key: str, default: Any = None) -> Any:

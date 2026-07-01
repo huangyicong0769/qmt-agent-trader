@@ -106,6 +106,33 @@ def test_run_tool_with_audit(tmp_path) -> None:
     assert json.loads(lines[0])["output_data"] == {"echo": {"x": 1}, "run_id": "r2"}
 
 
+def test_run_tool_writes_started_audit_for_llm_calls(tmp_path) -> None:
+    audit = AuditLogger(tmp_path / "audit.jsonl")
+    reg = _registry("echo")
+    reg.audit_logger = audit
+
+    reg.run_tool(
+        "echo",
+        {"x": 1},
+        ToolContext(
+            run_id="r-started",
+            requested_by_llm=True,
+            session_id="session-started",
+        ),
+    )
+
+    entries = [
+        json.loads(line)
+        for line in audit.log_path.read_text(encoding="utf-8").strip().split("\n")
+    ]
+    assert [entry["status"] for entry in entries] == ["started", "ok"]
+    assert entries[0]["output_data"] == {
+        "status": "STARTED",
+        "tool_name": "echo",
+        "timeout_seconds": 60,
+    }
+
+
 # ── Execution — permissions ──────────────────────────────────────────────────
 
 

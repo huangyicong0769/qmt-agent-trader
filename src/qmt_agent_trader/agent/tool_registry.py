@@ -185,6 +185,25 @@ class AgentToolRegistry:
             context,
             default=spec.timeout_seconds,
         )
+        if context.requested_by_llm and (context.session_id or context.experiment_id):
+            self._audit_entry(
+                tool_name=name,
+                run_id=context.run_id,
+                session_id=context.session_id,
+                experiment_id=context.experiment_id,
+                permission=spec.permission.value,
+                requested_by_llm=context.requested_by_llm,
+                call_mode=call_mode.value,
+                input_data=input_data,
+                output_data={
+                    "status": "STARTED",
+                    "tool_name": name,
+                    "timeout_seconds": timeout_seconds,
+                },
+                status="started",
+                error_message=None,
+                duration_ms=0,
+            )
 
         # 3. Execute
         status = "ok"
