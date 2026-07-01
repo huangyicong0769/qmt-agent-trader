@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -231,6 +232,15 @@ def _trunc(s: str, n: int) -> str:
     return s[:n] + ("…" if len(s) > n else "")
 
 
+def _format_elapsed(total_seconds: int) -> str:
+    seconds = max(0, int(total_seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
 def _build_pending_message(level: str, raw_content: str) -> _PendingMessage | None:
     content = raw_content.strip()
     if not content:
@@ -244,13 +254,20 @@ def _mark_pending_ready(pending: _PendingMessage) -> _PendingMessage:
     return replace(pending, ready_to_send=True)
 
 
-def _pending_message_status(pending: _PendingMessage) -> _PendingMessageStatus:
+def _pending_message_status(
+    pending: _PendingMessage,
+    *,
+    queue_depth: int | None = None,
+) -> _PendingMessageStatus:
     label = INTERRUPT_LEVELS[pending.level]
     preview = _trunc(pending.content, 80)
+    depth = max(1, queue_depth) if queue_depth is not None else None
+    depth_suffix = f" · {depth}" if depth is not None else ""
+    depth_detail = f"队列深度 {depth}。" if depth is not None else ""
     if pending.ready_to_send:
         return _PendingMessageStatus(
-            badge=f"{label}待确认",
-            detail=f"{label}消息已就绪：{preview}。发送前可撤销。",
+            badge=f"{label}待确认{depth_suffix}",
+            detail=f"{depth_detail}{label}消息已就绪：{preview}。发送前可撤销。",
             can_undo=True,
             can_send=True,
         )
@@ -258,8 +275,8 @@ def _pending_message_status(pending: _PendingMessage) -> _PendingMessageStatus:
         "排队消息" if pending.level == "queue" else "引导消息"
     )
     return _PendingMessageStatus(
-        badge=f"{label}中",
-        detail=f"{detail_prefix}等待当前任务完成：{preview}",
+        badge=f"{label}中{depth_suffix}",
+        detail=f"{depth_detail}{detail_prefix}等待当前任务完成：{preview}",
         can_undo=True,
         can_send=False,
     )
@@ -513,11 +530,13 @@ def register() -> None:
 
         # Interrupt state
         cancel_event = asyncio.Event()
-        pending_message: _PendingMessage | None = None
+        pending_messages: list[_PendingMessage] = []
         is_running: bool = False
+        run_started_at: float | None = None
         pending_card: Any = None
         pending_label: Any = None
         pending_send_button: Any = None
+        run_timer_badge: Any = None
 
         def activate_session(sid: str) -> None:
             nonlocal active_sid
@@ -567,7 +586,7 @@ def register() -> None:
         def render_pending_status() -> None:
             if pending_card is None or pending_label is None:
                 return
-            if pending_message is None:
+            if not pending_messages:
                 queue_badge.visible = False
                 pending_card.visible = False
                 if pending_send_button is not None:
@@ -576,34 +595,46 @@ def register() -> None:
                 pending_card.update()
                 return
 
-            status = _pending_message_status(pending_message)
+            status = _pending_message_status(
+                pending_messages[0],
+                queue_depth=len(pending_messages),
+            )
             queue_badge.set_text(status.badge)
             queue_badge.visible = True
             pending_label.set_text(status.detail)
             pending_card.visible = True
             if pending_send_button is not None:
-                pending_send_button.visible = status.can_send
+                pending_send_button.visible = status.can_send and not is_running
                 pending_send_button.update()
             queue_badge.update()
             pending_card.update()
 
-        def cancel_pending_message() -> None:
-            nonlocal pending_message
-            if pending_message is None:
+        def render_run_timer() -> None:
+            if run_timer_badge is None:
                 return
-            pending_message = None
+            if not is_running or run_started_at is None:
+                run_timer_badge.visible = False
+                run_timer_badge.update()
+                return
+            elapsed = int(time.monotonic() - run_started_at)
+            run_timer_badge.set_text(f"运行 {_format_elapsed(elapsed)}")
+            run_timer_badge.visible = True
+            run_timer_badge.update()
+
+        def cancel_pending_message() -> None:
+            if not pending_messages:
+                return
+            pending_messages.pop(0)
             render_pending_status()
-            ui.notify("已撤销待发送消息。", type="info")
+            ui.notify("已撤销当前待发送消息。", type="info")
 
         async def send_pending_message() -> None:
-            nonlocal pending_message
-            if pending_message is None:
+            if not pending_messages:
                 return
             if is_running:
                 ui.notify("当前任务仍在运行，稍后再确认发送。", type="warning")
                 return
-            content = pending_message.content
-            pending_message = None
+            content = pending_messages.pop(0).content
             render_pending_status()
             message.value = content
             await run_send_handler(from_pending=True)
@@ -612,12 +643,12 @@ def register() -> None:
             await run_send_handler(from_pending=False)
 
         async def run_send_handler(*, from_pending: bool) -> None:
-            nonlocal active_sid, is_running, pending_message
+            nonlocal active_sid, is_running, run_started_at
             if not active_sid or active_sid not in sessions:
                 ui.notify("No active session.", type="warning")
                 return
 
-            if pending_message is not None and pending_message.ready_to_send and not from_pending:
+            if pending_messages and pending_messages[0].ready_to_send and not from_pending:
                 ui.notify("请先发送或撤销待处理消息。", type="warning")
                 return
 
@@ -638,7 +669,7 @@ def register() -> None:
                     if pending is None:
                         ui.notify("Enter a message first.", type="warning")
                         return
-                    pending_message = pending
+                    pending_messages.append(pending)
                     message.value = ""
                     render_pending_status()
                     ui.notify("已排队，当前任务完成后等待你确认发送。", type="info")
@@ -648,14 +679,16 @@ def register() -> None:
                     if pending is None:
                         ui.notify("Enter a message first.", type="warning")
                         return
-                    pending_message = pending
+                    pending_messages.append(pending)
                     message.value = ""
                     render_pending_status()
                     ui.notify("已加入引导，当前任务完成后等待你确认发送。", type="info")
                     return
 
             is_running = True
+            run_started_at = time.monotonic()
             render_pending_status()
+            render_run_timer()
 
             try:
                 await _send(
@@ -669,10 +702,17 @@ def register() -> None:
                 )
             finally:
                 is_running = False
-                if pending_message is not None:
-                    pending_message = _mark_pending_ready(pending_message)
+                run_started_at = None
+                render_run_timer()
+                if pending_messages:
+                    pending_messages[:] = [
+                        _mark_pending_ready(pending) for pending in pending_messages
+                    ]
                     render_pending_status()
-                    ui.notify("待发送消息已就绪，请确认发送或撤销。", type="info")
+                    ui.notify(
+                        f"{len(pending_messages)} 条待发送消息已就绪，请确认发送或撤销。",
+                        type="info",
+                    )
                 else:
                     render_pending_status()
 
@@ -795,10 +835,15 @@ def register() -> None:
                         value="引导",
                     ).classes("w-20").props("dense outlined")
 
+                    run_timer_badge = ui.badge("", color="green")
+                    run_timer_badge.visible = False
+
                     queue_badge = ui.badge("", color="orange")
                     queue_badge.visible = False
 
                     ui.button("Send", on_click=send_handler).props("color=primary")
+
+                ui.timer(1.0, render_run_timer)
 
                 with ui.expansion("Advanced", icon="tune").classes("w-full px-4"):
                     with ui.row().classes("gap-4"):

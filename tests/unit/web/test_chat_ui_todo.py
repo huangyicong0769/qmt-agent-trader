@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from qmt_agent_trader.web.ui.pages.chat import (
     _build_pending_message,
+    _format_elapsed,
     _mark_pending_ready,
     _pending_message_status,
     _todo_status_markdown,
@@ -56,6 +57,19 @@ def test_pending_queue_message_waits_for_confirmation_before_send() -> None:
     assert ready.can_send is True
 
 
+def test_pending_queue_status_includes_depth() -> None:
+    pending = _build_pending_message("queue", "当前任务后检查数据覆盖")
+    assert pending is not None
+
+    waiting = _pending_message_status(pending, queue_depth=2)
+    ready = _pending_message_status(_mark_pending_ready(pending), queue_depth=1)
+
+    assert waiting.badge == "排队中 · 2"
+    assert "队列深度 2" in waiting.detail
+    assert ready.badge == "排队待确认 · 1"
+    assert "队列深度 1" in ready.detail
+
+
 def test_pending_guide_message_has_distinct_visible_status() -> None:
     pending = _build_pending_message("guide", "补充用全市场ETF一起验证")
     assert pending is not None
@@ -71,3 +85,9 @@ def test_pending_guide_message_has_distinct_visible_status() -> None:
 
 def test_empty_pending_message_is_ignored() -> None:
     assert _build_pending_message("queue", "   ") is None
+
+
+def test_format_elapsed_uses_compact_clock_units() -> None:
+    assert _format_elapsed(0) == "00:00"
+    assert _format_elapsed(65) == "01:05"
+    assert _format_elapsed(3661) == "01:01:01"
