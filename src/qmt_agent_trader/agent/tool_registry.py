@@ -6,6 +6,8 @@ small adapter that converts runtime tools into the DeepSeek client tool shape.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +15,6 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from multiprocessing import get_context
 from pathlib import Path
-from queue import Empty
 from typing import Any
 
 from qmt_agent_trader.agent.audit import AuditLogger
@@ -30,6 +31,8 @@ from qmt_agent_trader.agent.permissions import (
 )
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tools.base import AgentTool
+
+_PROCESS_PAYLOAD_SPILL_BYTES = 1_000_000
 
 # ── Original ToolDefinition + ToolRegistry (preserved) ───────────────────────
 
@@ -386,40 +389,63 @@ def _run_with_process_timeout(
         process_context = get_context("fork")
     except ValueError:
         return _run_with_thread_timeout_payload(tool, input_data, context, timeout_seconds)
-    queue = process_context.Queue(maxsize=1)
+    recv_conn, send_conn = process_context.Pipe(duplex=False)
     process = process_context.Process(
         target=_process_tool_runner,
-        args=(tool, input_data, context, queue),
+        args=(tool, input_data, context, send_conn),
     )
     started_at = time.monotonic()
     process.start()
-    process.join(max(timeout_seconds, 0))
-    duration_ms = int((time.monotonic() - started_at) * 1000)
-    if process.is_alive():
-        process.terminate()
-        process.join(1)
-        if process.is_alive():
-            process.kill()
+    send_conn.close()
+    timeout_at = started_at + max(float(timeout_seconds), 0.0)
+    payload: dict[str, Any] | None = None
+    while True:
+        if recv_conn.poll(0.05):
+            payload = recv_conn.recv()
+            break
+        if not process.is_alive():
+            break
+        if time.monotonic() >= timeout_at:
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            process.terminate()
             process.join(1)
-        return {
-            "status": "TIMEOUT",
-            "tool_name": tool.spec.name,
-            "timeout_seconds": timeout_seconds,
-            "duration_ms": duration_ms,
-            "kill_attempted": True,
-        }
-    try:
-        payload = queue.get_nowait()
-    except Empty as exc:
+            if process.is_alive():
+                process.kill()
+                process.join(1)
+            recv_conn.close()
+            return {
+                "status": "TIMEOUT",
+                "tool_name": tool.spec.name,
+                "timeout_seconds": timeout_seconds,
+                "duration_ms": duration_ms,
+                "kill_attempted": True,
+                "exitcode": process.exitcode,
+                "partial_payload": payload is not None,
+            }
+
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    process.join(1)
+    recv_conn.close()
+    if payload is None:
         if process.exitcode == 0:
             return {}
-        raise RuntimeError(f"tool process exited with code {process.exitcode}") from exc
+        raise RuntimeError(f"tool process exited with code {process.exitcode}")
+    try:
+        payload = _resolve_process_payload(payload)
+    except Exception as exc:
+        raise RuntimeError(f"failed to read tool process payload: {exc}") from exc
     if not isinstance(payload, dict):
         return {"value": payload}
     if payload.get("__error__"):
         raise RuntimeError(str(payload.get("message", "tool process failed")))
     result = payload.get("result")
-    return result if isinstance(result, dict) else {"value": result}
+    if isinstance(result, dict):
+        if payload.get("__payload_file__"):
+            result.setdefault("payload_file", payload["__payload_file__"])
+            result.setdefault("payload_size_bytes", payload.get("payload_size_bytes"))
+        result.setdefault("duration_ms", duration_ms)
+        return result
+    return {"value": result, "duration_ms": duration_ms}
 
 
 def _run_with_thread_timeout_payload(
@@ -445,22 +471,79 @@ def _run_with_thread_timeout_payload(
         executor.shutdown(wait=False, cancel_futures=True)
 
 
+def _prepare_process_payload(
+    payload: dict[str, Any],
+    *,
+    tool: AgentTool,
+    context: ToolContext,
+) -> dict[str, Any]:
+    raw = json.dumps(payload, ensure_ascii=False, default=str)
+    size = len(raw.encode("utf-8"))
+    if size <= _PROCESS_PAYLOAD_SPILL_BYTES:
+        return payload
+    path = _process_payload_path(tool.spec.name, context.run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw, encoding="utf-8")
+    result = payload.get("result")
+    summary = _payload_summary(result)
+    return {
+        "__payload_file__": str(path),
+        "payload_size_bytes": size,
+        "summary": summary,
+    }
+
+
+def _resolve_process_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    payload_file = payload.get("__payload_file__")
+    if not payload_file:
+        return payload
+    path = Path(str(payload_file))
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(loaded, dict):
+        loaded["__payload_file__"] = str(path)
+        loaded["payload_size_bytes"] = payload.get("payload_size_bytes")
+        loaded["summary"] = payload.get("summary")
+        return loaded
+    return {"result": loaded, "__payload_file__": str(path)}
+
+
+def _process_payload_path(tool_name: str, run_id: str) -> Path:
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id or "run")
+    safe_tool = re.sub(r"[^A-Za-z0-9_.-]+", "_", tool_name or "tool")
+    return Path("reports/tool_payloads") / f"{safe_run_id}_{safe_tool}.json"
+
+
+def _payload_summary(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return {
+            "type": "dict",
+            "keys": sorted(str(key) for key in result.keys())[:20],
+            "key_count": len(result),
+        }
+    if isinstance(result, list):
+        return {"type": "list", "length": len(result)}
+    return {"type": type(result).__name__}
+
+
 def _process_tool_runner(
     tool: AgentTool,
     input_data: dict[str, Any],
     context: ToolContext,
-    queue: Any,
+    conn: Any,
 ) -> None:
     try:
-        queue.put({"result": tool.run(input_data, context)})
+        payload = {"result": tool.run(input_data, context)}
+        conn.send(_prepare_process_payload(payload, tool=tool, context=context))
     except Exception as exc:
-        queue.put(
+        conn.send(
             {
                 "__error__": True,
                 "type": type(exc).__name__,
                 "message": str(exc),
             }
         )
+    finally:
+        conn.close()
 
 
 def _timeout_seconds_for_call(
