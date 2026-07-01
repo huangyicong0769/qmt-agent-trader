@@ -20,6 +20,17 @@ from qmt_agent_trader.factors.library.price_volume import (
     turnover_20d,
     volatility_20d,
 )
+from qmt_agent_trader.factors.library.quality import (
+    debt_to_assets_rank,
+    gross_margin_rank,
+    roe_rank,
+)
+from qmt_agent_trader.factors.library.value import (
+    dividend_yield,
+    pb_rank,
+    pe_ttm_rank,
+    size_log_mktcap,
+)
 
 FactorFunction = Callable[[pd.DataFrame], pd.Series]
 
@@ -218,6 +229,13 @@ def _builtin_saved_factors() -> dict[str, SavedFactor]:
         "volatility_20d": (20, ("symbol", "trade_date", "close")),
         "turnover_20d": (20, ("symbol", "trade_date", "turnover")),
         "amount_zscore_20d": (20, ("symbol", "trade_date", "amount")),
+        "size_log_mktcap": (0, ("symbol", "trade_date", "total_mv")),
+        "pe_ttm_rank": (0, ("symbol", "trade_date", "pe_ttm")),
+        "pb_rank": (0, ("symbol", "trade_date", "pb")),
+        "dividend_yield": (0, ("symbol", "trade_date", "dv_ttm")),
+        "roe_rank": (0, ("symbol", "trade_date", "roe")),
+        "gross_margin_rank": (0, ("symbol", "trade_date", "gross_margin")),
+        "debt_to_assets_rank": (0, ("symbol", "trade_date", "debt_to_assets")),
     }
     now = "builtin"
     return {
@@ -248,6 +266,20 @@ def _compute_builtin(name: str, bars: pd.DataFrame) -> pd.Series:
         return turnover_20d(bars)
     if name == "amount_zscore_20d":
         return amount_zscore_20d(bars)
+    if name == "size_log_mktcap":
+        return size_log_mktcap(bars)
+    if name == "pe_ttm_rank":
+        return pe_ttm_rank(bars)
+    if name == "pb_rank":
+        return pb_rank(bars)
+    if name == "dividend_yield":
+        return dividend_yield(bars)
+    if name == "roe_rank":
+        return roe_rank(bars)
+    if name == "gross_margin_rank":
+        return gross_margin_rank(bars)
+    if name == "debt_to_assets_rank":
+        return debt_to_assets_rank(bars)
     raise ValueError(f"unsupported built-in factor: {name}")
 
 

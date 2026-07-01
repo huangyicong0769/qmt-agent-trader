@@ -11,6 +11,7 @@ import pandas as pd
 
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.factors.context import load_factor_context
 from qmt_agent_trader.factors.registry import FactorRegistry
 
 
@@ -150,12 +151,16 @@ def compute_factor_to_lake(
     registry_root: str | None = None,
 ) -> FactorComputeResult:
     target_date = pd.to_datetime(date).date()
-    bars = load_daily_bars(lake, end=target_date)
-    if bars.empty:
-        raise ValueError("no daily bars found in data lake; run data update first")
-
     registry = FactorRegistry(Path(registry_root)) if registry_root is not None else None
-    factor_frame = compute_factor_frame(bars, name, registry=registry)
+    factor_registry = registry or FactorRegistry()
+    saved = factor_registry.get_factor(name)
+    if saved is None:
+        raise ValueError(f"factor is not saved in registry: {name}")
+    bars = _load_factor_input(lake, name=name, date=target_date, registry=factor_registry)
+    if bars.empty:
+        raise ValueError("no factor input data found; run data update first")
+
+    factor_frame = compute_factor_frame(bars, name, registry=factor_registry)
     output = factor_frame[factor_frame["trade_date"] == target_date].reset_index(drop=True)
     if output.empty:
         raise ValueError(f"no factor rows for {target_date}")
@@ -170,6 +175,43 @@ def compute_factor_to_lake(
         rows=len(output),
         non_null=int(output["factor_value"].notna().sum()),
     )
+
+
+def _load_factor_input(
+    lake: DataLake,
+    *,
+    name: str,
+    date: pd.Timestamp | Any,
+    registry: FactorRegistry,
+) -> pd.DataFrame:
+    saved = registry.get_factor(name)
+    if saved is None:
+        return pd.DataFrame()
+    bar_columns = {
+        "symbol",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "turnover",
+        "suspended",
+        "limit_up",
+        "limit_down",
+        "st",
+    }
+    if set(saved.required_columns).issubset(bar_columns):
+        return load_daily_bars(lake, end=date)
+    frame = load_factor_context(lake, as_of_date=date)
+    missing = [column for column in saved.required_columns if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"factor '{name}' missing fundamentals data columns: {missing}; "
+            "run data update-fundamentals first"
+        )
+    return frame
 
 
 def validate_factor(

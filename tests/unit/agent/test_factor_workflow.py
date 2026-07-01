@@ -145,6 +145,25 @@ def test_generated_factor_must_be_saved_before_evaluation(registry) -> None:
     assert evaluated["non_null"] > 0
 
 
+def test_factor_evaluation_blocks_unbounded_long_window_without_symbols(registry) -> None:
+    context = ToolContext(run_id="factor-unbounded", experiment_id="exp_test")
+
+    result = registry.run_tool(
+        "evaluate_factor_candidate",
+        {
+            "factor_id": "momentum_20d",
+            "start_date": "20200101",
+            "end_date": "20260630",
+        },
+        context,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "UNBOUNDED_FACTOR_EVALUATION"
+    assert result["missing_inputs"] == ["symbols"]
+    assert result["next_repair_tool"] == "query_universe"
+
+
 def test_agent_can_list_saved_factors_and_duplicate_saves_are_rejected(registry) -> None:
     context = ToolContext(run_id="run_test", experiment_id="exp_test")
     spec_result = registry.run_tool(
@@ -201,3 +220,186 @@ def test_agent_can_list_saved_factors_and_duplicate_saves_are_rejected(registry)
     )
     assert duplicate["status"] == "DUPLICATE_FACTOR_NAME"
     assert duplicate["existing_factors"][0]["factor_id"] == factor_id
+
+
+def test_unknown_factor_formula_is_blocked_instead_of_momentum_fallback(registry) -> None:
+    context = ToolContext(run_id="factor-unsupported", experiment_id="exp_test")
+    spec = registry.run_tool(
+        "create_factor_spec",
+        {
+            "factor_name": "unsupported_custom_signal",
+            "formula_sketch": "combine three proprietary qualitative channel checks",
+            "lookback": 20,
+        },
+        context,
+    )["factor_spec"]
+
+    result = registry.run_tool("generate_factor_code", {"factor_spec": spec}, context)
+
+    assert result["status"] == "UNSUPPORTED_FORMULA"
+    assert result["review_required"] is True
+    assert "code_path" not in result
+
+
+@pytest.mark.parametrize(
+    ("factor_name", "formula", "expected_tokens", "forbidden_tokens"),
+    [
+        (
+            "cyclical_low_volatility",
+            "low volatility smart beta: negative rolling standard deviation of daily returns",
+            [".std(", "pct_change()"],
+            ["pct_change(lookback)"],
+        ),
+        (
+            "cyclical_low_turnover",
+            "low turnover smart beta: negative rolling mean of turnover",
+            ['"turnover"', ".rolling(lookback).mean()"],
+            ["pct_change(lookback)"],
+        ),
+        (
+            "cyclical_low_vol_low_turnover",
+            "composite low volatility plus low turnover smart beta",
+            ['"turnover"', ".std(", "composite"],
+            ["pct_change(lookback)"],
+        ),
+        (
+            "cyclical_sector_neutral_low_vol",
+            "sector neutral low volatility smart beta grouped by industry",
+            ["industry", ".std(", "groupby"],
+            ["pct_change(lookback)"],
+        ),
+        (
+            "cyclical_macro_timed_momentum",
+            "macro timed momentum using macro_cycle_score to gate price momentum",
+            ["macro_cycle_score", "pct_change(lookback)"],
+            [],
+        ),
+    ],
+)
+def test_smart_beta_factor_templates_are_semantic(
+    registry,
+    factor_name: str,
+    formula: str,
+    expected_tokens: list[str],
+    forbidden_tokens: list[str],
+) -> None:
+    context = ToolContext(run_id=f"factor-template-{factor_name}", experiment_id="exp_test")
+    spec = registry.run_tool(
+        "create_factor_spec",
+        {
+            "factor_name": factor_name,
+            "formula_sketch": formula,
+            "lookback": 20,
+        },
+        context,
+    )["factor_spec"]
+
+    result = registry.run_tool("generate_factor_code", {"factor_spec": spec}, context)
+
+    assert result["status"] == "generated"
+    code = Path(result["code_path"]).read_text(encoding="utf-8")
+    for token in expected_tokens:
+        assert token in code
+    for token in forbidden_tokens:
+        assert token not in code
+    checks = registry.run_tool(
+        "run_factor_static_checks",
+        {"code_path": result["code_path"], "factor_id": spec["factor_id"]},
+        context,
+    )
+    assert checks["status"] == "PASSED"
+    assert checks["semantic_status"] == "PASSED"
+
+
+@pytest.mark.parametrize(
+    ("factor_name", "formula", "expected_tokens"),
+    [
+        (
+            "low_vol_inverse_20d",
+            "1.0 / (std(log_return, 20) + 1e-9)",
+            ["log_return", ".rolling(lookback).std()", "1.0 /"],
+        ),
+        (
+            "low_vol_20d",
+            "-std(close, 20)",
+            ['bars["close"]', ".rolling(lookback).std()", "return -"],
+        ),
+        (
+            "price_position_60d",
+            "(close - min(close,60)) / (max(close,60) - min(close,60) + 1e-9)",
+            ["rolling_min", "rolling_max", "price_position"],
+        ),
+    ],
+)
+def test_formula_dsl_generates_basic_rolling_arithmetic(
+    registry,
+    factor_name: str,
+    formula: str,
+    expected_tokens: list[str],
+) -> None:
+    context = ToolContext(run_id=f"factor-dsl-{factor_name}", experiment_id="exp_test")
+    spec = registry.run_tool(
+        "create_factor_spec",
+        {
+            "factor_name": factor_name,
+            "formula_sketch": formula,
+            "lookback": 20 if "60" not in factor_name else 60,
+        },
+        context,
+    )["factor_spec"]
+
+    result = registry.run_tool("generate_factor_code", {"factor_spec": spec}, context)
+
+    assert result["status"] == "generated"
+    assert result["formula_ast"]["kind"] in {
+        "low_vol_inverse",
+        "negative_rolling_std",
+        "price_position",
+    }
+    code = Path(result["code_path"]).read_text(encoding="utf-8")
+    for token in expected_tokens:
+        assert token in code
+    checks = registry.run_tool(
+        "run_factor_static_checks",
+        {"code_path": result["code_path"], "factor_id": spec["factor_id"]},
+        context,
+    )
+    assert checks["status"] == "PASSED"
+    assert checks["semantic_status"] == "PASSED"
+
+
+def test_factor_static_checks_reject_formula_code_semantic_mismatch(registry) -> None:
+    context = ToolContext(run_id="factor-semantic-mismatch", experiment_id="exp_test")
+    spec = registry.run_tool(
+        "create_factor_spec",
+        {
+            "factor_name": "semantic_low_volatility",
+            "formula_sketch": "low volatility: negative rolling standard deviation of returns",
+            "lookback": 20,
+        },
+        context,
+    )["factor_spec"]
+    generated = registry.run_tool("generate_factor_code", {"factor_spec": spec}, context)
+    Path(generated["code_path"]).write_text(
+        """
+from typing import Any
+
+import pandas as pd
+
+
+def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Series:
+    lookback = int((params or {}).get("lookback", 20))
+    return bars.groupby("symbol")["close"].pct_change(lookback)
+""",
+        encoding="utf-8",
+    )
+
+    checks = registry.run_tool(
+        "run_factor_static_checks",
+        {"code_path": generated["code_path"], "factor_id": spec["factor_id"]},
+        context,
+    )
+
+    assert checks["status"] == "FAILED"
+    assert checks["semantic_status"] == "FAILED"
+    assert any("semantic mismatch" in issue.lower() for issue in checks["issues"])

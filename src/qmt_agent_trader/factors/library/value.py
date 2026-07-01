@@ -7,7 +7,8 @@ import pandas as pd
 
 
 def size_log_mktcap(frame: pd.DataFrame) -> pd.Series:
-    return np.log(frame["mkt_cap"].clip(lower=1))
+    column = "total_mv" if "total_mv" in frame.columns else "circ_mv"
+    return np.log(frame[column].clip(lower=1))
 
 
 def pe_ttm_rank(frame: pd.DataFrame) -> pd.Series:
@@ -19,4 +20,5 @@ def pb_rank(frame: pd.DataFrame) -> pd.Series:
 
 
 def dividend_yield(frame: pd.DataFrame) -> pd.Series:
-    return frame["dividend_yield"]
+    column = "dv_ttm" if "dv_ttm" in frame.columns else "dividend_yield"
+    return frame[column]

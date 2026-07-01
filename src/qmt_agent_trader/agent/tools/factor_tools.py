@@ -135,7 +135,20 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
     formula = spec_data.get("formula", "return")
     warnings: list[str] = []
 
+    formula_ast = _formula_ast_for_supported_formula(name, formula)
     factor_code = _render_factor_code(name, lookback, formula)
+    if factor_code is None:
+        return {
+            "status": "UNSUPPORTED_FORMULA",
+            "factor_id": factor_id,
+            "review_required": True,
+            "message": (
+                "factor formula is not supported by the deterministic generator; "
+                "no fallback code was written"
+            ),
+            "unsupported_formula": formula,
+            "warnings": ["unsupported formula; create a narrower supported formula sketch"],
+        }
     test_code = _render_factor_test_code(name)
     spec_code = json.dumps(spec_data, ensure_ascii=False, indent=2, default=str)
 
@@ -159,6 +172,7 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
             "tests_path": str(tests_path),
             "spec_path": str(spec_path),
             "status": "generated",
+            "formula_ast": formula_ast,
             "warnings": warnings,
         }
     except Exception as exc:
@@ -201,10 +215,16 @@ def _run_factor_static_checks(input_data: dict[str, Any], context: ToolContext) 
         return {"status": "FAILED", "issues": [f"file not found: {code_path_str}"]}
     if not code_path.is_file():
         return {"status": "INVALID_REQUEST", "issues": [f"not a file: {code_path_str}"]}
-    issues = sb.static_scan_code(code_path.read_text(encoding="utf-8"))
+    code_text = code_path.read_text(encoding="utf-8")
+    issues = sb.static_scan_code(code_text)
+    spec_path = code_path.with_name("factor_spec.json")
+    spec_data = _load_factor_spec(str(spec_path), sb) if spec_path.exists() else {}
+    semantic_issues = _semantic_issues_for_factor_code(code_text, spec_data)
+    issues.extend(semantic_issues)
     return {
         "status": "PASSED" if not issues else "FAILED",
         "issues": issues,
+        "semantic_status": "FAILED" if semantic_issues else "PASSED",
         "code_path": str(code_path),
         "path_recovered": recovered,
     }
@@ -253,14 +273,20 @@ def _save_factor(input_data: dict[str, Any], context: ToolContext) -> dict[str, 
     if not code_path.exists():
         return {"status": "INVALID_REQUEST", "message": f"file not found: {code_path}"}
 
-    issues = sb.static_scan_code(code_path.read_text(encoding="utf-8"))
-    if issues:
-        return {"status": "FAILED", "issues": issues}
-
     if not spec_path_raw:
         sibling_spec = code_path.with_name("factor_spec.json")
         spec_path_raw = str(sibling_spec) if sibling_spec.exists() else ""
     spec_data = _load_factor_spec(spec_path_raw, sb) if spec_path_raw else {}
+    code_text = code_path.read_text(encoding="utf-8")
+    issues = sb.static_scan_code(code_text)
+    semantic_issues = _semantic_issues_for_factor_code(code_text, spec_data)
+    issues.extend(semantic_issues)
+    if issues:
+        return {
+            "status": "FAILED",
+            "issues": issues,
+            "semantic_status": "FAILED" if semantic_issues else "PASSED",
+        }
     if spec_data.get("factor_id") and spec_data["factor_id"] != factor_id:
         return {
             "status": "INVALID_REQUEST",
@@ -376,6 +402,19 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
     start = input_data.get("start_date", "20200101")
     end = input_data.get("end_date", _today_yyyymmdd())
     symbols = _requested_symbols(input_data)
+    if not symbols and _date_span_days(str(start), str(end)) > 366:
+        return {
+            "status": "BLOCKED",
+            "reason": "UNBOUNDED_FACTOR_EVALUATION",
+            "message": (
+                "factor evaluation over more than 366 days requires explicit symbols; "
+                "call query_universe/query_bars first or narrow the date window"
+            ),
+            "start_date": start,
+            "end_date": end,
+            "missing_inputs": ["symbols"],
+            "next_repair_tool": "query_universe",
+        }
 
     lake = _get_lake()
     if lake is None:
@@ -567,9 +606,24 @@ def _load_factor_spec(spec_path_raw: str, sb: CodeSandbox) -> dict[str, Any]:
 def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
     formula = json.dumps(spec_data, ensure_ascii=False).lower()
     columns = ["symbol", "trade_date", "close"]
-    for candidate in ("open", "high", "low", "volume", "amount", "turnover"):
+    for candidate in (
+        "open",
+        "high",
+        "low",
+        "volume",
+        "amount",
+        "turnover",
+        "industry",
+        "macro_cycle_score",
+    ):
         if candidate in formula and candidate not in columns:
             columns.append(candidate)
+    if "换手" in formula and "turnover" not in columns:
+        columns.append("turnover")
+    if "行业" in formula and "industry" not in columns:
+        columns.append("industry")
+    if "宏观" in formula and "macro_cycle_score" not in columns:
+        columns.append("macro_cycle_score")
     return tuple(columns)
 
 
@@ -597,10 +651,12 @@ def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
     return normalized
 
 
-def _render_factor_code(name: str, lookback: int, formula: str) -> str:
+def _render_factor_code(name: str, lookback: int, formula: str) -> str | None:
     safe_name = name.replace(" ", "_").replace("-", "_").lower()
     formula_lower = formula.lower()
     body = _factor_compute_body(safe_name, formula_lower, lookback)
+    if body is None:
+        return None
     return f'''"""Candidate factor: {name}.
 Auto-generated by Agent. REVIEW_REQUIRED before promotion.
 """
@@ -608,6 +664,7 @@ Auto-generated by Agent. REVIEW_REQUIRED before promotion.
 from typing import Any
 
 import pandas as pd
+import numpy as np
 
 
 def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Series:
@@ -619,10 +676,98 @@ def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Seri
         return pd.Series(dtype="float64")
     lookback = int((params or {{}}).get("lookback", {lookback}))
 {body}
+
+
+def _zscore(values: pd.Series) -> pd.Series:
+    std = values.std(ddof=0)
+    if pd.isna(std) or float(std) == 0.0:
+        return values * 0.0
+    return (values - values.mean()) / std
 '''
 
 
-def _factor_compute_body(name: str, formula: str, lookback: int) -> str:
+def _factor_compute_body(name: str, formula: str, lookback: int) -> str | None:
+    formula_ast = _formula_ast_for_supported_formula(name, formula)
+    if formula_ast and formula_ast["kind"] == "low_vol_inverse":
+        return '''    previous_close = bars.groupby("symbol")["close"].shift(1)
+    log_return = np.log(
+        pd.to_numeric(bars["close"], errors="coerce")
+        / pd.to_numeric(previous_close, errors="coerce")
+    )
+    volatility = log_return.groupby(bars["symbol"]).transform(
+        lambda item: item.rolling(lookback).std()
+    )
+    return 1.0 / (volatility + 1e-9)'''
+    if formula_ast and formula_ast["kind"] == "negative_rolling_std":
+        return '''    close = pd.to_numeric(bars["close"], errors="coerce")
+    rolling_std = close.groupby(bars["symbol"]).transform(
+        lambda item: item.rolling(lookback).std()
+    )
+    return -rolling_std'''
+    if formula_ast and formula_ast["kind"] == "price_position":
+        return '''    close = pd.to_numeric(bars["close"], errors="coerce")
+    rolling_min = close.groupby(bars["symbol"]).transform(
+        lambda item: item.rolling(lookback).min()
+    )
+    rolling_max = close.groupby(bars["symbol"]).transform(
+        lambda item: item.rolling(lookback).max()
+    )
+    price_position = (close - rolling_min) / (rolling_max - rolling_min + 1e-9)
+    return price_position'''
+    if _is_low_vol_low_turnover_formula(name, formula):
+        return '''    if "turnover" not in bars.columns:
+        raise ValueError("low-volatility + low-turnover factor requires turnover column")
+    returns = bars.groupby("symbol")["close"].pct_change()
+    volatility = returns.groupby(bars["symbol"]).transform(
+        lambda item: item.rolling(lookback).std()
+    )
+    rolling_turnover = pd.to_numeric(bars["turnover"], errors="coerce").groupby(
+        bars["symbol"]
+    ).transform(lambda item: item.rolling(lookback).mean())
+    vol_component = -volatility
+    turnover_component = -rolling_turnover
+    if "trade_date" in bars.columns:
+        vol_z = vol_component.groupby(bars["trade_date"]).transform(_zscore)
+        turnover_z = turnover_component.groupby(bars["trade_date"]).transform(_zscore)
+    else:
+        vol_z = _zscore(vol_component)
+        turnover_z = _zscore(turnover_component)
+    composite = (vol_z.fillna(0.0) + turnover_z.fillna(0.0)) / 2.0
+    return composite'''
+    if _is_sector_neutral_low_vol_formula(name, formula):
+        return '''    if "industry" not in bars.columns:
+        raise ValueError("sector-neutral low-volatility factor requires industry column")
+    returns = bars.groupby("symbol")["close"].pct_change()
+    volatility = returns.groupby(bars["symbol"]).transform(
+        lambda item: item.rolling(lookback).std()
+    )
+    raw_score = -volatility
+    if "trade_date" in bars.columns:
+        neutralized = raw_score - raw_score.groupby(
+            [bars["trade_date"], bars["industry"]]
+        ).transform("mean")
+    else:
+        neutralized = raw_score - raw_score.groupby(bars["industry"]).transform("mean")
+    return neutralized'''
+    if _is_low_vol_formula(name, formula):
+        return '''    returns = bars.groupby("symbol")["close"].pct_change()
+    volatility = returns.groupby(bars["symbol"]).transform(
+        lambda item: item.rolling(lookback).std()
+    )
+    return -volatility'''
+    if _is_low_turnover_formula(name, formula):
+        return '''    if "turnover" not in bars.columns:
+        raise ValueError("low-turnover factor requires turnover column")
+    rolling_turnover = pd.to_numeric(bars["turnover"], errors="coerce").groupby(
+        bars["symbol"]
+    ).transform(lambda item: item.rolling(lookback).mean())
+    return -rolling_turnover'''
+    if _is_macro_timed_momentum_formula(name, formula):
+        return '''    if "macro_cycle_score" not in bars.columns:
+        raise ValueError("macro-timed momentum factor requires macro_cycle_score column")
+    momentum = bars.groupby("symbol")["close"].pct_change(lookback)
+    gate = pd.to_numeric(bars["macro_cycle_score"], errors="coerce").clip(lower=0.0)
+    return momentum * gate'''
     if _is_rsi_formula(name, formula):
         return '''    delta = bars.groupby("symbol")["close"].diff()
     gain = delta.clip(lower=0)
@@ -654,7 +799,73 @@ def _factor_compute_body(name: str, formula: str, lookback: int) -> str:
         lambda item: item.rolling(lookback).mean()
     )
     return bars["close"] / moving_average - 1'''
-    return '    return bars.groupby("symbol")["close"].pct_change(lookback)'
+    if _is_momentum_formula(name, formula):
+        return '    return bars.groupby("symbol")["close"].pct_change(lookback)'
+    return None
+
+
+def _is_low_vol_low_turnover_formula(name: str, formula: str) -> bool:
+    text = f"{name} {formula}"
+    return _has_low_vol(text) and _has_turnover(text)
+
+
+def _formula_ast_for_supported_formula(name: str, formula: str) -> dict[str, Any] | None:
+    text = f"{name} {formula}".lower().replace(" ", "")
+    if "std(log_return" in text and ("1.0/" in text or "1/" in text):
+        return {
+            "kind": "low_vol_inverse",
+            "operators": ["log_return", "rolling_std", "inverse"],
+        }
+    if text.startswith("low_vol") and "std(close" in text:
+        return {
+            "kind": "negative_rolling_std",
+            "operators": ["rolling_std", "negate"],
+        }
+    if "price_position" in text and "min(close" in text and "max(close" in text:
+        return {
+            "kind": "price_position",
+            "operators": ["rolling_min", "rolling_max", "arithmetic_ratio"],
+        }
+    return None
+
+
+def _is_sector_neutral_low_vol_formula(name: str, formula: str) -> bool:
+    text = f"{name} {formula}"
+    return _has_low_vol(text) and ("sector neutral" in text or "industry" in text or "行业" in text)
+
+
+def _is_low_vol_formula(name: str, formula: str) -> bool:
+    return _has_low_vol(f"{name} {formula}")
+
+
+def _is_low_turnover_formula(name: str, formula: str) -> bool:
+    text = f"{name} {formula}"
+    return _has_turnover(text) and ("low" in text or "低" in text)
+
+
+def _is_macro_timed_momentum_formula(name: str, formula: str) -> bool:
+    text = f"{name} {formula}"
+    has_macro_gate = "macro" in text or "宏观" in text or "macro_cycle_score" in text
+    return has_macro_gate and _is_momentum_formula(name, formula)
+
+
+def _is_momentum_formula(name: str, formula: str) -> bool:
+    text = f"{name} {formula}"
+    return "momentum" in text or "pct_change" in text or "动量" in text
+
+
+def _has_low_vol(text: str) -> bool:
+    return (
+        "low volatility" in text
+        or "low-volatility" in text
+        or "low_vol" in text
+        or ("volatility" in text and "low" in text)
+        or "低波" in text
+    )
+
+
+def _has_turnover(text: str) -> bool:
+    return "turnover" in text or "换手" in text
 
 
 def _is_rsi_formula(name: str, formula: str) -> bool:
@@ -666,8 +877,44 @@ def _is_rsi_formula(name: str, formula: str) -> bool:
     return "rsi" in tokens or "relative strength" in formula or "rs =" in formula
 
 
+def _semantic_issues_for_factor_code(code: str, spec_data: dict[str, Any]) -> list[str]:
+    if not spec_data:
+        return []
+    formula = str(spec_data.get("formula") or "").lower()
+    name = str(spec_data.get("name") or "").lower()
+    text = f"{name} {formula}"
+    code_lower = code.lower()
+    issues: list[str] = []
+    if _has_low_vol(text):
+        if ".std(" not in code_lower:
+            issues.append("semantic mismatch: low volatility formula must compute rolling std")
+        if 'pct_change(lookback)' in code_lower and ".std(" not in code_lower:
+            issues.append("semantic mismatch: low volatility formula generated momentum fallback")
+    if _has_turnover(text) and '"turnover"' not in code_lower and "'turnover'" not in code_lower:
+        issues.append("semantic mismatch: turnover formula must reference turnover column")
+    has_sector_neutral = "sector neutral" in text or "industry" in text or "行业" in text
+    if has_sector_neutral and "industry" not in code_lower:
+        issues.append("semantic mismatch: sector-neutral formula must reference industry")
+    if ("macro" in text or "宏观" in text) and "macro_cycle_score" not in code_lower:
+        issues.append("semantic mismatch: macro-timed formula must reference macro_cycle_score")
+    return issues
+
+
 def _today_yyyymmdd() -> str:
     return datetime.now(tz=SHANGHAI_TZ).strftime("%Y%m%d")
+
+
+def _date_span_days(start: str, end: str) -> int:
+    return abs((_parse_factor_date(end) - _parse_factor_date(start)).days)
+
+
+def _parse_factor_date(value: str) -> datetime:
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return datetime.fromisoformat(value)
 
 
 def _render_factor_test_code(name: str) -> str:

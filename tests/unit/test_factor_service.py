@@ -35,6 +35,51 @@ def test_compute_factor_to_lake(tmp_path) -> None:
     assert lake.dataset_path("gold", "factor_momentum_20d_20240121").exists()
 
 
+def test_compute_fundamental_factor_to_lake_uses_pit_context(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240131",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "trade_date": "20240131",
+                    "open": 20.0,
+                    "high": 21.0,
+                    "low": 19.0,
+                    "close": 20.5,
+                },
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.0},
+                {"ts_code": "000002.SZ", "trade_date": "20240131", "pe_ttm": 8.0},
+            ]
+        ),
+        "raw",
+        "tushare_daily_basic",
+    )
+
+    result = compute_factor_to_lake(lake, name="pe_ttm_rank", date="20240131")
+
+    assert result.rows == 2
+    assert result.non_null == 2
+    output = lake.read_parquet("gold", "factor_pe_ttm_rank_20240131")
+    assert output["factor_value"].tolist() == [0.5, 1.0]
+
+
 def test_validate_factor_computes_ic(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     start = date(2024, 1, 1)

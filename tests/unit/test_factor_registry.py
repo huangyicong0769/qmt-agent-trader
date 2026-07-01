@@ -52,6 +52,45 @@ def test_builtin_factors_are_saved_registry_entries() -> None:
     assert compute_factor_frame(_bars(), "momentum_20d", registry=registry).shape[0] == 48
 
 
+def test_value_and_quality_factors_are_registered_and_compute() -> None:
+    registry = FactorRegistry()
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "trade_date": date(2024, 1, 31),
+                "pe_ttm": 4.0,
+                "pb": 0.5,
+                "dv_ttm": 3.0,
+                "total_mv": 1000.0,
+                "roe": 0.12,
+                "gross_margin": 32.0,
+                "debt_to_assets": 50.0,
+            },
+            {
+                "symbol": "000002.SZ",
+                "trade_date": date(2024, 1, 31),
+                "pe_ttm": 8.0,
+                "pb": 1.0,
+                "dv_ttm": 1.0,
+                "total_mv": 2000.0,
+                "roe": 0.08,
+                "gross_margin": 20.0,
+                "debt_to_assets": 70.0,
+            },
+        ]
+    )
+
+    assert registry.get_factor("pe_ttm_rank").required_columns == (
+        "symbol",
+        "trade_date",
+        "pe_ttm",
+    )
+    assert registry.compute("pe_ttm_rank", frame).tolist() == [0.5, 1.0]
+    assert registry.compute("roe_rank", frame).tolist() == [0.5, 1.0]
+    assert registry.compute("debt_to_assets_rank", frame).tolist() == [0.5, 1.0]
+
+
 def test_saved_file_factor_uses_same_compute_path(tmp_path) -> None:
     factor_file = tmp_path / "factor.py"
     factor_file.write_text(
