@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import json
 import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+
+import numpy as np
+import pandas as pd
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
@@ -124,32 +130,50 @@ create_factor_spec_tool: AgentTool = tool(
 
 
 def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
-    spec_data = input_data.get("factor_spec", {})
+    spec_data = _factor_spec_payload(input_data)
     if not isinstance(spec_data, dict) or not spec_data.get("factor_id"):
         return {
             "status": "INVALID_REQUEST",
             "message": "factor_spec with factor_id is required",
         }
-    name = spec_data.get("name", "candidate")
-    factor_id = spec_data.get("factor_id", new_id("factor"))
-    lookback = spec_data.get("lookback", 20)
-    formula = spec_data.get("formula", "return")
+    name = str(spec_data.get("name", "candidate"))
+    factor_id = str(spec_data.get("factor_id", new_id("factor")))
+    lookback = int(spec_data.get("lookback", 20))
+    formula = str(spec_data.get("formula", "return"))
     warnings: list[str] = []
+    python_function = str(input_data.get("python_function") or "").strip()
+    formula_ast: dict[str, Any] | None
+    factor_code: str | None
 
-    formula_ast = _formula_ast_for_supported_formula(name, formula)
-    factor_code = _render_factor_code(name, lookback, formula)
-    if factor_code is None:
-        return {
-            "status": "UNSUPPORTED_FORMULA",
-            "factor_id": factor_id,
-            "review_required": True,
-            "message": (
-                "factor formula is not supported by the deterministic generator; "
-                "no fallback code was written"
-            ),
-            "unsupported_formula": formula,
-            "warnings": ["unsupported formula; create a narrower supported formula sketch"],
-        }
+    if python_function:
+        authoring_issues = _factor_python_authoring_issues(python_function)
+        if authoring_issues:
+            return {
+                "status": "STATIC_CHECK_FAILED",
+                "factor_id": factor_id,
+                "review_required": True,
+                "issues": authoring_issues,
+                "message": "agent-authored factor function failed static safety checks",
+            }
+        formula_ast = {"kind": "agent_python_function", "operators": ["python_function"]}
+        factor_code = _render_agent_factor_code(spec_data, python_function)
+    else:
+        formula_ast = _formula_ast_for_supported_formula(name, formula)
+        factor_code = _render_factor_code(name, lookback, formula)
+        if factor_code is None:
+            return {
+                "status": "NEEDS_PYTHON_FUNCTION",
+                "factor_id": factor_id,
+                "review_required": True,
+                "message": (
+                    "formula sketch is not supported by deterministic generator; "
+                    "provide python_function for unrestricted agent-authored factor code"
+                ),
+                "unsupported_formula": formula,
+                "next_required_input": "python_function",
+                "suggested_next_tools": ["generate_factor_code"],
+                "warnings": ["formula_sketch fallback unsupported; retry with python_function"],
+            }
     test_code = _render_factor_test_code(name)
     spec_code = json.dumps(spec_data, ensure_ascii=False, indent=2, default=str)
 
@@ -167,6 +191,18 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
             f"factors/drafts/{factor_id}/factor_spec.json",
             spec_code,
         )
+        sample_result = _run_factor_sample_test(code_path, spec_data)
+        if sample_result["status"] != "PASSED":
+            return {
+                "status": "SAMPLE_TEST_FAILED",
+                "factor_id": factor_id,
+                "code_path": str(code_path),
+                "tests_path": str(tests_path),
+                "spec_path": str(spec_path),
+                "review_required": True,
+                "sample_test": sample_result,
+                "warnings": [*warnings, "generated factor failed sample execution"],
+            }
         return {
             "factor_id": factor_id,
             "code_path": str(code_path),
@@ -174,20 +210,43 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
             "spec_path": str(spec_path),
             "status": "generated",
             "formula_ast": formula_ast,
+            "static_check_status": "PASSED",
+            "sample_test_status": sample_result["status"],
+            "sample_test": sample_result,
+            "review_required": True,
+            "research_only": True,
+            "live_trading_allowed": False,
             "warnings": warnings,
         }
     except Exception as exc:
-        return {"status": "error", "warnings": [str(exc)]}
+        return {
+            "status": "STATIC_CHECK_FAILED",
+            "factor_id": factor_id,
+            "review_required": True,
+            "issues": [str(exc)],
+            "warnings": [str(exc)],
+        }
 
 
 generate_factor_code_tool: AgentTool = tool(
     ToolSpec(
         name="generate_factor_code",
-        description="根据 factor spec 生成候选因子代码和测试。",
+        description=(
+            "根据 factor spec 生成候选因子代码和测试。主路径支持传入 python_function，"
+            "由 Agent 编写 compute_factor(data: pd.DataFrame, context: FactorContext) "
+            "函数；工具负责包装、保存、静态检查和样本运行。只传 formula_sketch 时会尝试"
+            "旧 deterministic fallback，不支持时返回 NEEDS_PYTHON_FUNCTION。"
+        ),
         input_schema={
             "type": "object",
-            "properties": {"factor_spec": {"type": "object"}},
-            "required": ["factor_spec"],
+            "properties": {
+                "factor_spec": {"type": "object"},
+                "factor_name": {"type": "string"},
+                "factor_description": {"type": "string"},
+                "python_function": {"type": "string"},
+                "tests": {"type": "object"},
+            },
+            "anyOf": [{"required": ["factor_spec"]}, {"required": ["python_function"]}],
         },
         permission=PermissionLevel.CODE_GENERATION,
         side_effect_level="write_generated",
@@ -218,6 +277,7 @@ def _run_factor_static_checks(input_data: dict[str, Any], context: ToolContext) 
         return {"status": "INVALID_REQUEST", "issues": [f"not a file: {code_path_str}"]}
     code_text = code_path.read_text(encoding="utf-8")
     issues = sb.static_scan_code(code_text)
+    issues.extend(_factor_python_authoring_issues(code_text, require_compute_factor=False))
     spec_path = code_path.with_name("factor_spec.json")
     spec_data = _load_factor_spec(str(spec_path), sb) if spec_path.exists() else {}
     semantic_issues = _semantic_issues_for_factor_code(code_text, spec_data)
@@ -545,6 +605,31 @@ def _bind_tool(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+def _factor_spec_payload(input_data: dict[str, Any]) -> dict[str, Any]:
+    raw = input_data.get("factor_spec")
+    if isinstance(raw, dict):
+        payload = dict(raw)
+    else:
+        payload = {}
+    payload.setdefault("factor_id", new_id("factor"))
+    payload.setdefault(
+        "name",
+        input_data.get("factor_name") or payload["factor_id"],
+    )
+    payload.setdefault(
+        "description",
+        input_data.get("factor_description") or payload.get("formula") or "",
+    )
+    payload.setdefault("formula", payload.get("description", "agent-authored python function"))
+    payload.setdefault("version", "0.1.0")
+    payload.setdefault("lookback", 20)
+    if "inputs" not in payload and "required_columns" in payload:
+        payload["inputs"] = list(payload["required_columns"])
+    if "required_columns" not in payload:
+        payload["required_columns"] = list(_required_columns_for_spec(payload))
+    return payload
+
+
 def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
 
@@ -651,6 +736,26 @@ def _load_factor_spec(spec_path_raw: str, sb: CodeSandbox) -> dict[str, Any]:
 
 
 def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
+    explicit = spec_data.get("required_columns") or spec_data.get("inputs")
+    if isinstance(explicit, list):
+        columns = ["symbol", "trade_date"]
+        data_sources = {
+            "daily_bars",
+            "tushare_daily",
+            "bars",
+            "fundamentals",
+            "macro",
+            "macro_series",
+        }
+        for item in explicit:
+            text = str(item)
+            if text in data_sources:
+                continue
+            if text and text not in columns:
+                columns.append(text)
+        if "close" not in columns:
+            columns.append("close")
+        return tuple(columns)
     formula = json.dumps(spec_data, ensure_ascii=False).lower()
     columns = ["symbol", "trade_date", "close"]
     for candidate in (
@@ -672,6 +777,231 @@ def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
     if "宏观" in formula and "macro_cycle_score" not in columns:
         columns.append("macro_cycle_score")
     return tuple(columns)
+
+
+def _render_agent_factor_code(spec_data: dict[str, Any], python_function: str) -> str:
+    spec_literal = json.dumps(spec_data, ensure_ascii=False, indent=2, default=str)
+    return f'''"""Agent-generated factor. REVIEW_REQUIRED before promotion."""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from qmt_agent_trader.factors.context import FactorContext
+
+
+FACTOR_SPEC = {spec_literal}
+
+
+{python_function}
+
+
+def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Series:
+    """Compatibility wrapper for FactorRegistry."""
+    params = params or {{}}
+    context = FactorContext(
+        factor_id=str(FACTOR_SPEC.get("factor_id", "agent_factor")),
+        lookback=int(params.get("lookback", FACTOR_SPEC.get("lookback", 20))),
+        params=params,
+        as_of_date=params.get("as_of_date"),
+        research_only=True,
+    )
+    result = compute_factor(bars.copy(deep=True), context)
+    if not isinstance(result, pd.Series):
+        raise ValueError("compute_factor must return pandas Series")
+    return pd.to_numeric(result.reindex(bars.index), errors="coerce")
+'''
+
+
+_FACTOR_FORBIDDEN_IMPORT_ROOTS = {
+    "os",
+    "sys",
+    "subprocess",
+    "socket",
+    "requests",
+    "httpx",
+    "urllib",
+    "multiprocessing",
+    "threading",
+    "pickle",
+    "joblib",
+}
+_FACTOR_FORBIDDEN_CALLS = {"open", "exec", "eval", "compile", "input", "__import__"}
+_FACTOR_LIVE_TRADING_NAMES = {
+    "broker",
+    "gateway",
+    "xtquant",
+    "submit_order",
+    "submit_live_order",
+    "approve_strategy",
+}
+
+
+def _factor_python_authoring_issues(
+    code: str,
+    *,
+    require_compute_factor: bool = True,
+) -> list[str]:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return [f"syntax error: {exc.msg}"]
+
+    issues: list[str] = []
+    has_compute_factor = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "compute_factor":
+            has_compute_factor = True
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root in _FACTOR_FORBIDDEN_IMPORT_ROOTS:
+                    issues.append(f"forbidden import: {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            root = module.split(".", 1)[0]
+            if root in _FACTOR_FORBIDDEN_IMPORT_ROOTS:
+                issues.append(f"forbidden import: {module}")
+            if module.startswith("qmt_agent_trader.broker") or module.startswith(
+                "qmt_agent_trader.gateway"
+            ):
+                issues.append(f"forbidden live trading import: {module}")
+        elif isinstance(node, ast.Call):
+            call_name = _call_name(node.func)
+            if call_name in _FACTOR_FORBIDDEN_CALLS:
+                issues.append(f"forbidden call: {call_name}")
+            if call_name.endswith(".shift") and _has_negative_numeric_arg(node):
+                issues.append("future data access: negative shift")
+            if call_name.endswith(".pct_change") and _has_negative_numeric_arg(node):
+                issues.append("future data access: negative pct_change")
+            if call_name.endswith(".rolling") and _has_true_keyword(node, "center"):
+                issues.append("future data risk: rolling(center=True)")
+        elif isinstance(node, ast.Attribute) and node.attr == "environ":
+            issues.append("forbidden environment access")
+
+    lowered = code.lower()
+    for token in _FACTOR_LIVE_TRADING_NAMES:
+        if token in lowered:
+            issues.append(f"forbidden live trading reference: {token}")
+    if require_compute_factor and not has_compute_factor:
+        issues.append("missing required function: compute_factor")
+    return sorted(set(issues))
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _call_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _has_negative_numeric_arg(node: ast.Call) -> bool:
+    for arg in node.args:
+        if _is_negative_numeric(arg):
+            return True
+    for keyword in node.keywords:
+        if _is_negative_numeric(keyword.value):
+            return True
+    return False
+
+
+def _is_negative_numeric(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, int | float)
+    )
+
+
+def _has_true_keyword(node: ast.Call, name: str) -> bool:
+    for keyword in node.keywords:
+        if keyword.arg == name and isinstance(keyword.value, ast.Constant):
+            return keyword.value.value is True
+    return False
+
+
+def _run_factor_sample_test(code_path: Path, spec_data: dict[str, Any]) -> dict[str, Any]:
+    try:
+        module = _load_generated_factor_module(code_path)
+        compute = getattr(module, "compute", None)
+        compute_factor = getattr(module, "compute_factor", None)
+        if not callable(compute) or not callable(compute_factor):
+            return {"status": "FAILED", "issues": ["compute and compute_factor must be callable"]}
+        sample = _sample_factor_data(spec_data)
+        before = sample.copy(deep=True)
+        result = compute(sample)
+        issues = _factor_sample_issues(result, sample, before)
+        return {
+            "status": "PASSED" if not issues else "FAILED",
+            "issues": issues,
+            "rows": len(sample),
+            "non_null": int(pd.to_numeric(result, errors="coerce").notna().sum())
+            if isinstance(result, pd.Series)
+            else 0,
+        }
+    except Exception as exc:
+        return {"status": "FAILED", "issues": [str(exc)]}
+
+
+def _load_generated_factor_module(path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(f"agent_factor_{path.parent.name}", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"unable to load generated factor: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _sample_factor_data(spec_data: dict[str, Any]) -> pd.DataFrame:
+    required = _required_columns_for_spec(spec_data)
+    rows: list[dict[str, Any]] = []
+    for symbol_index, symbol in enumerate(["000001.SZ", "000002.SZ"]):
+        for offset in range(80):
+            row: dict[str, Any] = {
+                "symbol": symbol,
+                "trade_date": f"202401{offset + 1:02d}",
+                "open": 10.0 + symbol_index + offset * 0.1,
+                "high": 10.5 + symbol_index + offset * 0.1,
+                "low": 9.5 + symbol_index + offset * 0.1,
+                "close": 10.2 + symbol_index + offset * (0.2 if symbol_index == 0 else 0.05),
+                "volume": 1000 + offset * 10 + symbol_index,
+                "vol": 1000 + offset * 10 + symbol_index,
+                "amount": 10_000 + offset * 100 + symbol_index,
+                "turnover": 0.01 + offset * 0.001 + symbol_index * 0.002,
+                "industry": "bank" if symbol_index == 0 else "software",
+                "macro_cycle_score": 1.0,
+            }
+            for column in required:
+                row.setdefault(column, 1.0)
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _factor_sample_issues(
+    result: Any,
+    sample: pd.DataFrame,
+    before: pd.DataFrame,
+) -> list[str]:
+    issues: list[str] = []
+    if not sample.equals(before):
+        issues.append("compute_factor mutated input DataFrame")
+    if not isinstance(result, pd.Series):
+        return [*issues, "compute_factor must return pandas Series"]
+    if not result.index.equals(sample.index):
+        issues.append("result index must match input index")
+    numeric = pd.to_numeric(result, errors="coerce")
+    if numeric.notna().sum() == 0:
+        issues.append("result must not be entirely null")
+    if np.isinf(numeric.to_numpy(dtype="float64", na_value=np.nan)).any():
+        issues.append("result must not contain infinite values")
+    return issues
 
 
 def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
@@ -713,16 +1043,31 @@ from typing import Any
 import pandas as pd
 import numpy as np
 
+from qmt_agent_trader.factors.context import FactorContext
 
-def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Series:
+
+def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:
     """{formula}
 
     Lookback: {lookback} days.
     """
+    bars = data
     if bars.empty:
         return pd.Series(dtype="float64")
-    lookback = int((params or {{}}).get("lookback", {lookback}))
+    lookback = int(context.lookback)
 {body}
+
+
+def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Series:
+    context = FactorContext(
+        factor_id="{safe_name}",
+        lookback=int((params or {{}}).get("lookback", {lookback})),
+        params=params or {{}},
+        as_of_date=(params or {{}}).get("as_of_date"),
+        research_only=True,
+    )
+    result = compute_factor(bars.copy(deep=True), context)
+    return pd.to_numeric(result.reindex(bars.index), errors="coerce")
 
 
 def _zscore(values: pd.Series) -> pd.Series:

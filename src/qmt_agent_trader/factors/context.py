@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 
 import pandas as pd
 
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.fundamentals import load_fundamentals_asof, parse_date
 from qmt_agent_trader.data.storage import DataLake
+
+
+@dataclass(frozen=True)
+class FactorContext:
+    """Research-only context passed to agent-authored factor functions."""
+
+    factor_id: str
+    lookback: int = 20
+    params: dict[str, Any] = field(default_factory=dict)
+    as_of_date: str | None = None
+    research_only: bool = True
 
 
 def load_factor_context(

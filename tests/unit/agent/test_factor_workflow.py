@@ -222,7 +222,7 @@ def test_agent_can_list_saved_factors_and_duplicate_saves_are_rejected(registry)
     assert duplicate["existing_factors"][0]["factor_id"] == factor_id
 
 
-def test_unknown_factor_formula_is_blocked_instead_of_momentum_fallback(registry) -> None:
+def test_unknown_factor_formula_requests_python_function_instead_of_fallback(registry) -> None:
     context = ToolContext(run_id="factor-unsupported", experiment_id="exp_test")
     spec = registry.run_tool(
         "create_factor_spec",
@@ -236,8 +236,9 @@ def test_unknown_factor_formula_is_blocked_instead_of_momentum_fallback(registry
 
     result = registry.run_tool("generate_factor_code", {"factor_spec": spec}, context)
 
-    assert result["status"] == "UNSUPPORTED_FORMULA"
+    assert result["status"] == "NEEDS_PYTHON_FUNCTION"
     assert result["review_required"] is True
+    assert result["next_required_input"] == "python_function"
     assert "code_path" not in result
 
 
@@ -245,38 +246,38 @@ def test_unknown_factor_formula_is_blocked_instead_of_momentum_fallback(registry
     ("factor_name", "formula", "expected_tokens", "forbidden_tokens"),
     [
         (
-            "cyclical_low_volatility",
-            "low volatility smart beta: negative rolling standard deviation of daily returns",
+            "low_volatility_template",
+            "low volatility factor: negative rolling standard deviation of daily returns",
             [".std(", "pct_change()"],
             ["pct_change(lookback)"],
         ),
         (
-            "cyclical_low_turnover",
-            "low turnover smart beta: negative rolling mean of turnover",
+            "low_turnover_template",
+            "low turnover factor: negative rolling mean of turnover",
             ['"turnover"', ".rolling(lookback).mean()"],
             ["pct_change(lookback)"],
         ),
         (
-            "cyclical_low_vol_low_turnover",
-            "composite low volatility plus low turnover smart beta",
+            "low_vol_low_turnover_template",
+            "composite low volatility plus low turnover factor",
             ['"turnover"', ".std(", "composite"],
             ["pct_change(lookback)"],
         ),
         (
-            "cyclical_sector_neutral_low_vol",
-            "sector neutral low volatility smart beta grouped by industry",
+            "sector_neutral_low_vol_template",
+            "sector neutral low volatility factor grouped by industry",
             ["industry", ".std(", "groupby"],
             ["pct_change(lookback)"],
         ),
         (
-            "cyclical_macro_timed_momentum",
+            "macro_timed_momentum_template",
             "macro timed momentum using macro_cycle_score to gate price momentum",
             ["macro_cycle_score", "pct_change(lookback)"],
             [],
         ),
     ],
 )
-def test_smart_beta_factor_templates_are_semantic(
+def test_factor_formula_templates_are_semantic(
     registry,
     factor_name: str,
     formula: str,
