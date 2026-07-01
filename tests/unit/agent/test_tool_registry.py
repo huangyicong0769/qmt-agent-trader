@@ -200,11 +200,11 @@ def test_run_tool_timeout_returns_structured_result_and_audits(tmp_path) -> None
 
     result = reg.run_tool("slow", {}, ToolContext(run_id="r-timeout"))
 
-    assert result == {
-        "status": "TIMEOUT",
-        "tool_name": "slow",
-        "timeout_seconds": 0,
-    }
+    assert result["status"] == "TIMEOUT"
+    assert result["tool_name"] == "slow"
+    assert result["timeout_seconds"] == 0
+    assert result["kill_attempted"] is True
+    assert isinstance(result["duration_ms"], int)
     assert '"status": "timeout"' in audit.log_path.read_text(encoding="utf-8")
 
 
@@ -260,11 +260,10 @@ def test_run_tool_timeout_reports_dynamic_timeout_used(tmp_path) -> None:
         ToolContext(run_id="r-dynamic-timeout-result"),
     )
 
-    assert result == {
-        "status": "TIMEOUT",
-        "tool_name": "dynamic_timeout_slow",
-        "timeout_seconds": 0,
-    }
+    assert result["status"] == "TIMEOUT"
+    assert result["tool_name"] == "dynamic_timeout_slow"
+    assert result["timeout_seconds"] == 0
+    assert result["kill_attempted"] is True
     audit_entry = json.loads(audit.log_path.read_text(encoding="utf-8").strip())
     assert audit_entry["output_data"]["timeout_seconds"] == 0
 

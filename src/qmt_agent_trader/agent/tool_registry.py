@@ -11,7 +11,9 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
+from multiprocessing import get_context
 from pathlib import Path
+from queue import Empty
 from typing import Any
 
 from qmt_agent_trader.agent.audit import AuditLogger
@@ -213,12 +215,16 @@ class AgentToolRegistry:
             result = _run_with_timeout(tool, input_data, context, timeout_seconds)
             if not isinstance(result, dict):
                 result = {"value": result}
+            if result.get("status") == "TIMEOUT":
+                status = "timeout"
         except FutureTimeoutError:
             status = "timeout"
             result = {
                 "status": "TIMEOUT",
                 "tool_name": name,
                 "timeout_seconds": timeout_seconds,
+                "duration_ms": int(time.monotonic() * 1000) - start_ms,
+                "kill_attempted": False,
             }
         except Exception as exc:
             status = "permission_denied" if "PermissionDenied" in type(exc).__name__ else "error"
@@ -354,12 +360,107 @@ def _run_with_timeout(
     context: ToolContext,
     timeout_seconds: int | float,
 ) -> dict[str, Any]:
+    if _should_use_process_timeout(tool, timeout_seconds):
+        return _run_with_process_timeout(tool, input_data, context, timeout_seconds)
+
     executor = ThreadPoolExecutor(max_workers=1)
     try:
         future = executor.submit(tool.run, input_data, context)
         return future.result(timeout=max(timeout_seconds, 0))
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _should_use_process_timeout(tool: AgentTool, timeout_seconds: int | float) -> bool:
+    heavy_tools = {"run_backtest", "evaluate_factor_candidate", "query_bars"}
+    return tool.spec.name in heavy_tools or timeout_seconds <= 0
+
+
+def _run_with_process_timeout(
+    tool: AgentTool,
+    input_data: dict[str, Any],
+    context: ToolContext,
+    timeout_seconds: int | float,
+) -> dict[str, Any]:
+    try:
+        process_context = get_context("fork")
+    except ValueError:
+        return _run_with_thread_timeout_payload(tool, input_data, context, timeout_seconds)
+    queue = process_context.Queue(maxsize=1)
+    process = process_context.Process(
+        target=_process_tool_runner,
+        args=(tool, input_data, context, queue),
+    )
+    started_at = time.monotonic()
+    process.start()
+    process.join(max(timeout_seconds, 0))
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    if process.is_alive():
+        process.terminate()
+        process.join(1)
+        if process.is_alive():
+            process.kill()
+            process.join(1)
+        return {
+            "status": "TIMEOUT",
+            "tool_name": tool.spec.name,
+            "timeout_seconds": timeout_seconds,
+            "duration_ms": duration_ms,
+            "kill_attempted": True,
+        }
+    try:
+        payload = queue.get_nowait()
+    except Empty as exc:
+        if process.exitcode == 0:
+            return {}
+        raise RuntimeError(f"tool process exited with code {process.exitcode}") from exc
+    if not isinstance(payload, dict):
+        return {"value": payload}
+    if payload.get("__error__"):
+        raise RuntimeError(str(payload.get("message", "tool process failed")))
+    result = payload.get("result")
+    return result if isinstance(result, dict) else {"value": result}
+
+
+def _run_with_thread_timeout_payload(
+    tool: AgentTool,
+    input_data: dict[str, Any],
+    context: ToolContext,
+    timeout_seconds: int | float,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(tool.run, input_data, context)
+        return future.result(timeout=max(timeout_seconds, 0))
+    except FutureTimeoutError:
+        return {
+            "status": "TIMEOUT",
+            "tool_name": tool.spec.name,
+            "timeout_seconds": timeout_seconds,
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+            "kill_attempted": False,
+        }
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _process_tool_runner(
+    tool: AgentTool,
+    input_data: dict[str, Any],
+    context: ToolContext,
+    queue: Any,
+) -> None:
+    try:
+        queue.put({"result": tool.run(input_data, context)})
+    except Exception as exc:
+        queue.put(
+            {
+                "__error__": True,
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+        )
 
 
 def _timeout_seconds_for_call(
