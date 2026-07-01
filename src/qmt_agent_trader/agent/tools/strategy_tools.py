@@ -914,7 +914,12 @@ run_backtest_tool: AgentTool = tool(
 
 
 def _generate_research_report(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
-    exp_id = input_data.get("experiment_id") or context.experiment_id or "unknown"
+    exp_id = (
+        input_data.get("experiment_id")
+        or context.experiment_id
+        or context.session_id
+        or "unknown"
+    )
     run_ids = input_data.get("run_ids", [])
     sections = input_data.get("include_sections", ["summary", "metrics"])
 
@@ -947,6 +952,10 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
     ]
 
     run_artifacts = [_load_run_artifact(str(run_id)) for run_id in run_ids]
+    evidence_summary = [
+        _report_evidence_summary(str(run_id), artifact)
+        for run_id, artifact in zip(run_ids, run_artifacts, strict=False)
+    ]
 
     if "summary" in sections:
         lines.extend(["## Summary", "", f"Run IDs: {', '.join(run_ids)}", ""])
@@ -955,7 +964,7 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
         if artifact is None:
             lines.append(f"- {run_id}: No run artifact found")
             continue
-        status = artifact.get("status") or artifact.get("payload", {}).get("status", "unknown")
+        status = _artifact_status(artifact)
         diagnostics = artifact.get("diagnostics", {})
         diagnostic_status = (
             diagnostics.get("status", "unknown") if isinstance(diagnostics, dict) else "unknown"
@@ -1008,7 +1017,11 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
         lines.append("")
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
-    return {"report_path": str(report_path), "summary": lines[0]}
+    return {
+        "report_path": str(report_path),
+        "summary": lines[0],
+        "evidence_summary": evidence_summary,
+    }
 
 
 generate_research_report_tool: AgentTool = tool(
@@ -1290,7 +1303,7 @@ def _candidate_lines(
 def _candidate_group(artifact: dict[str, Any] | None) -> str:
     if not isinstance(artifact, dict):
         return "blocked"
-    status = str(artifact.get("status") or artifact.get("payload", {}).get("status") or "")
+    status = _artifact_status(artifact)
     diagnostic_status = _diagnostic_status(artifact)
     if status.upper() in {
         "BLOCKED",
@@ -1311,7 +1324,7 @@ def _candidate_group(artifact: dict[str, Any] | None) -> str:
 def _candidate_line(run_id: str, artifact: dict[str, Any] | None) -> str:
     if not isinstance(artifact, dict):
         return f"- {run_id}: No run artifact found"
-    status = artifact.get("status") or artifact.get("payload", {}).get("status", "unknown")
+    status = _artifact_status(artifact)
     diagnostics = _diagnostic_status(artifact)
     factor_ids = artifact.get("factor_ids") or artifact.get("requested_factor_ids") or []
     report_path = artifact.get("report_path", "")
@@ -1351,6 +1364,52 @@ def _candidate_line(run_id: str, artifact: dict[str, Any] | None) -> str:
     if isinstance(limitations, list) and limitations:
         details.append(f"adapter_limitations={limitations}")
     return f"- {run_id}: " + "; ".join(details)
+
+
+def _artifact_status(artifact: dict[str, Any]) -> str:
+    status = artifact.get("status")
+    if not status:
+        payload = artifact.get("payload")
+        status = payload.get("status") if isinstance(payload, dict) else None
+    if not status and artifact.get("artifact_type") == "strategy_backtest":
+        return "completed"
+    return str(status or "unknown")
+
+
+def _report_evidence_summary(
+    run_id: str,
+    artifact: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(artifact, dict):
+        return {"run_id": run_id, "status": "missing"}
+    data: dict[str, Any] = {
+        "run_id": run_id,
+        "status": _artifact_status(artifact),
+        "diagnostics_status": _diagnostic_status(artifact),
+    }
+    for key in (
+        "strategy_id",
+        "factor_ids",
+        "requested_factor_ids",
+        "execution_backend",
+        "composite_method",
+        "factor_weights",
+        "factor_directions",
+        "metrics",
+        "data_window",
+        "research_only",
+        "live_trading_allowed",
+        "warnings",
+        "adapter_limitations",
+    ):
+        if key in artifact:
+            data[key] = artifact[key]
+    config = artifact.get("config")
+    if isinstance(config, dict):
+        for key in ("symbols", "start_date", "end_date", "universe"):
+            if key in config:
+                data[key] = config[key]
+    return data
 
 
 def _diagnostic_status(artifact: dict[str, Any]) -> str:
