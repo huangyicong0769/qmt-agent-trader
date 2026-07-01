@@ -134,7 +134,8 @@ class _FakeReportCompletions:
                     [_ToolCall("call_report", "generate_research_report", {"run_ids": ["r1"]})],
                 )
             )
-        assert "tools" not in kwargs
+        assert kwargs["tool_choice"] == "none"
+        assert kwargs["tools"][0]["function"]["name"] == "generate_research_report"
         assert kwargs["messages"][-1]["role"] == "system"
         return _Response(
             _Message(
@@ -178,7 +179,8 @@ def test_run_tool_loop_forces_final_answer_after_research_report() -> None:
     assert "read_file" not in result.messages[-1]["content"]
     assert len(fake.chat.completions.calls) == 2
     assert "tools" in fake.chat.completions.calls[0]
-    assert "tools" not in fake.chat.completions.calls[1]
+    assert "tools" in fake.chat.completions.calls[1]
+    assert fake.chat.completions.calls[1]["tool_choice"] == "none"
     final_messages = fake.chat.completions.calls[1]["messages"]
     system_messages = [
         message["content"]
@@ -189,6 +191,62 @@ def test_run_tool_loop_forces_final_answer_after_research_report() -> None:
     assert any("pseudo read_file requests" in content for content in system_messages)
     assert any("FAIL/BLOCKED/NOT_COMPUTED" in content for content in system_messages)
     assert any("repair-required candidates" in content for content in system_messages)
+
+
+class _FakeEmptyFinalReportCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> _Response:
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return _Response(
+                _Message(
+                    None,
+                    [_ToolCall("call_report", "generate_research_report", {"run_ids": ["r1"]})],
+                )
+            )
+        assert kwargs["tool_choice"] == "none"
+        assert kwargs["tools"][0]["function"]["name"] == "generate_research_report"
+        if len(self.calls) == 2:
+            assert kwargs["messages"][-1]["role"] == "system"
+            return _Response(_Message(""))
+        assert "previous assistant final answer was empty" in kwargs["messages"][-1]["content"]
+        return _Response(_Message("最终结论：该策略候选回测失败，需要修复后再评估。"))
+
+
+class _FakeEmptyFinalReportChat:
+    def __init__(self) -> None:
+        self.completions = _FakeEmptyFinalReportCompletions()
+
+
+class _FakeEmptyFinalReportOpenAI:
+    def __init__(self) -> None:
+        self.chat = _FakeEmptyFinalReportChat()
+
+
+def test_run_tool_loop_retries_empty_final_answer_after_research_report() -> None:
+    fake = _FakeEmptyFinalReportOpenAI()
+    client = DeepSeekClient.__new__(DeepSeekClient)
+    client.model = "deepseek-v4-pro"
+    client.client = fake
+
+    result = client.run_tool_loop(
+        messages=[{"role": "user", "content": "生成报告并结论"}],
+        tools=[
+            DeepSeekTool(
+                name="generate_research_report",
+                description="generate report",
+                parameters={"type": "object", "properties": {}},
+                fn=lambda run_ids: {"report_path": "reports/r.md"},
+            )
+        ],
+    )
+
+    assert result.content == "最终结论：该策略候选回测失败，需要修复后再评估。"
+    assert len(fake.chat.completions.calls) == 3
+    assert "tools" in fake.chat.completions.calls[2]
+    assert fake.chat.completions.calls[2]["tool_choice"] == "none"
 
 
 def test_tool_result_content_compacts_large_lists_for_model_context() -> None:

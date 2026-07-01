@@ -189,10 +189,14 @@ class DeepSeekClient:
         request_tools = [_to_openai_tool(tool) for tool in tools]
         call_history: list[tuple[str, str]] = []
         force_final_answer = False
+        empty_final_answer_retries = 0
 
         for _ in range(max_rounds):
             kwargs: dict[str, Any] = {"model": self.model, "messages": conversation}
-            if request_tools and not force_final_answer:
+            if request_tools and force_final_answer:
+                kwargs["tools"] = request_tools
+                kwargs["tool_choice"] = "none"
+            elif request_tools:
                 kwargs["tools"] = request_tools
 
             response = self.client.chat.completions.create(**kwargs)
@@ -210,15 +214,36 @@ class DeepSeekClient:
                     str(assistant_dict["content"]),
                     has_failed_evidence=has_failed_evidence,
                 )
-            conversation.append(assistant_dict)
 
             if not tool_calls:
+                final_content = str(assistant_dict.get("content", "") or "")
+                if force_final_answer and not final_content.strip():
+                    assistant_dict.setdefault("content", "")
+                    conversation.append(assistant_dict)
+                    if empty_final_answer_retries >= 1:
+                        raise RuntimeError(
+                            "LLM returned an empty final answer after research report generation."
+                        )
+                    empty_final_answer_retries += 1
+                    conversation.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "The previous assistant final answer was empty. Provide a "
+                                "concise Chinese final answer now from the observed tool "
+                                "evidence and report path. Do not call tools."
+                            ),
+                        }
+                    )
+                    continue
+                conversation.append(assistant_dict)
                 return DeepSeekToolLoopResult(
-                    content=str(assistant_dict.get("content", "") or ""),
+                    content=final_content,
                     messages=conversation,
                     tool_calls=executions,
                 )
 
+            conversation.append(assistant_dict)
             for call in tool_calls:
                 name = _function_name(call)
                 if name not in tool_map:
