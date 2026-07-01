@@ -3,6 +3,8 @@ and report tool: generate_research_report."""
 
 from __future__ import annotations
 
+import ast
+import json
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime
@@ -381,11 +383,10 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     strategy_id = input_data.get("strategy_id", "")
     factor_name = input_data.get("factor_name", "")
     spec_data = input_data.get("strategy_spec")
-    strategy_spec = (
-        strategy_spec_from_agent_spec(spec_data)
-        if isinstance(spec_data, dict)
-        else None
-    )
+    strategy_spec_result = _parse_backtest_strategy_spec(spec_data, input_data)
+    if isinstance(strategy_spec_result, dict):
+        return strategy_spec_result
+    strategy_spec = strategy_spec_result
     if strategy_spec is None and strategy_id:
         saved_strategy = _strategy_registry().get_strategy(str(strategy_id))
         if saved_strategy is not None:
@@ -399,6 +400,26 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     initial_cash = float(input_data.get("initial_cash", 1_000_000))
     top_n = int(input_data.get("top_n", strategy_spec.portfolio.top_n if strategy_spec else 20))
     symbols = _requested_symbols(input_data)
+    resolved_universe: dict[str, Any] | None = None
+    if not symbols and strategy_spec is not None and _is_cyclical_universe(strategy_spec.universe):
+        universe_as_of = str(
+            input_data.get("as_of_date")
+            or input_data.get("end_date")
+            or _today_yyyymmdd()
+        )
+        resolved_universe = _resolve_cyclical_symbols_for_backtest(
+            lake,
+            as_of=universe_as_of,
+        )
+        if resolved_universe.get("status") != "OK":
+            return {
+                "status": "BLOCKED",
+                "reason": "UNIVERSE_NOT_READY",
+                "message": "cyclical universe could not be resolved for backtest",
+                "universe_resolution": resolved_universe,
+                "next_repair_tool": resolved_universe.get("metadata", {}).get("next_repair_tool"),
+            }
+        symbols = [str(item) for item in resolved_universe.get("symbols", [])]
     code_path = str(input_data.get("code_path") or "")
     if code_path:
         issues = static_check_strategy_file(Path(code_path))
@@ -416,14 +437,22 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
 
     registry_root = _factor_registry_root(lake)
     factor_registry = FactorRegistry(registry_root)
-    saved = factor_registry.get_factor(factor_name)
-    if saved is None:
+    requested_factor_ids = (
+        [factor.factor_id for factor in strategy_spec.factors]
+        if strategy_spec is not None and strategy_spec.factors
+        else [str(factor_name)]
+    )
+    missing_factor_ids = [
+        item for item in requested_factor_ids if factor_registry.get_factor(item) is None
+    ]
+    if missing_factor_ids:
         return {
             "status": "FACTOR_NOT_FOUND",
             "message": (
-                f"factor '{factor_name}' is not an exact saved factor_id/name. "
+                f"factor '{missing_factor_ids[0]}' is not an exact saved factor_id/name. "
                 "Call list_saved_factors and use an exact factor_id."
             ),
+            "missing_factor_ids": missing_factor_ids,
             "candidates": [
                 {
                     "factor_id": item.factor_id,
@@ -432,10 +461,14 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
                     "created_by": item.created_by,
                     "created_at": item.created_at,
                 }
-                for item in factor_registry.find_factors(factor_name, include_builtins=True)
+                for item in factor_registry.find_factors(
+                    missing_factor_ids[0],
+                    include_builtins=True,
+                )
             ],
         }
-    factor_name = saved.factor_id
+    saved = factor_registry.get_factor(str(factor_name))
+    factor_name = saved.factor_id if saved is not None else requested_factor_ids[0]
     if strategy_spec is None:
         strategy_spec = StrategySpec(
             strategy_id=strategy_id or f"factor_{factor_name}",
@@ -444,31 +477,43 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             factors=[{"factor_id": factor_name}],
             portfolio={"top_n": top_n},
         )
-    result = run_strategy_backtest(
-        lake,
-        _strategy_registry(),
-        StrategyBacktestConfig(
-            strategy_id=strategy_spec.strategy_id,
-            strategy_spec=strategy_spec,
-            factor_name=factor_name,
-            start_date=start_date,
-            end_date=end_date,
-            universe=str(input_data.get("universe") or strategy_spec.universe),
-            initial_cash=initial_cash,
-            top_n=top_n,
-            max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
-            slippage_bps=strategy_spec.execution.slippage_bps,
-            execution_delay_days=strategy_spec.execution.execution_delay_days,
-            symbols=symbols,
-        ),
-        reports_dir=Path("reports/research"),
+    config = StrategyBacktestConfig(
+        strategy_id=strategy_spec.strategy_id,
+        strategy_spec=strategy_spec,
+        factor_name=factor_name,
+        start_date=start_date,
+        end_date=end_date,
+        universe=str(input_data.get("universe") or strategy_spec.universe),
+        initial_cash=initial_cash,
+        top_n=top_n,
+        max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
+        slippage_bps=strategy_spec.execution.slippage_bps,
+        execution_delay_days=strategy_spec.execution.execution_delay_days,
+        symbols=symbols,
     )
+    try:
+        result = run_strategy_backtest(
+            lake,
+            _strategy_registry(),
+            config,
+            reports_dir=Path("reports/research"),
+        )
+    except ValueError as exc:
+        blocked = _blocked_backtest_from_value_error(
+            exc,
+            config=config,
+            requested_factor_ids=requested_factor_ids,
+        )
+        if blocked is not None:
+            return blocked
+        raise
     payload = result.model_dump(mode="json")
     if result.status == "completed":
         payload.update(
             {
                 "factor_name": factor_name,
                 "symbols": symbols,
+                "universe_resolution": resolved_universe,
                 "start_date": start_date,
                 "end_date": end_date,
                 "actual_data_start": result.data_window.get("actual_start"),
@@ -480,14 +525,148 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     return payload
 
 
+def _blocked_backtest_from_value_error(
+    exc: ValueError,
+    *,
+    config: StrategyBacktestConfig,
+    requested_factor_ids: list[str],
+) -> dict[str, Any] | None:
+    message = str(exc)
+    if "missing required columns" not in message:
+        return None
+    factor_id = _factor_id_from_missing_columns_error(message) or config.factor_name
+    missing_columns = _missing_columns_from_error(message)
+    return {
+        "status": "BLOCKED",
+        "reason": "MISSING_FACTOR_INPUTS",
+        "message": message,
+        "strategy_id": config.strategy_id,
+        "factor_id": factor_id,
+        "factor_ids": requested_factor_ids,
+        "requested_factor_ids": requested_factor_ids,
+        "missing_columns": missing_columns,
+        "coverage_status": "NO_DATA",
+        "missing_ranges": [
+            {
+                "start_date": config.start_date,
+                "end_date": config.end_date,
+                "symbols": config.symbols,
+                "columns": missing_columns,
+            }
+        ],
+        "datasets_used": [],
+        "next_repair_tool": _repair_tool_for_missing_columns(missing_columns),
+        "research_only": True,
+        "live_trading_allowed": False,
+        "adapter_limitations": [],
+        "diagnostics": {
+            "status": "BLOCKED",
+            "checks": [
+                {
+                    "name": "factor_input_columns",
+                    "status": "BLOCKED",
+                    "observed": missing_columns,
+                    "threshold": "all required columns present",
+                    "message": message,
+                    "evidence_source": "blocked",
+                }
+            ],
+        },
+    }
+
+
+def _factor_id_from_missing_columns_error(message: str) -> str | None:
+    prefix = "factor '"
+    if not message.startswith(prefix):
+        return None
+    return message[len(prefix):].split("'", 1)[0]
+
+
+def _missing_columns_from_error(message: str) -> list[str]:
+    marker = "missing required columns:"
+    if marker not in message:
+        return []
+    raw = message.split(marker, 1)[1].strip()
+    try:
+        value = ast.literal_eval(raw)
+    except (SyntaxError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _repair_tool_for_missing_columns(columns: list[str]) -> str:
+    fundamentals = {
+        "pb",
+        "pe",
+        "pe_ttm",
+        "roe",
+        "gross_margin",
+        "debt_to_assets",
+        "dv_ttm",
+        "total_mv",
+    }
+    macro = {"pmi", "ppi", "cpi", "macro_cycle_score", "industry_value_added"}
+    normalized = {column.lower() for column in columns}
+    if normalized & fundamentals:
+        return "run_fundamental_data_update"
+    if normalized & macro:
+        return "run_macro_data_update"
+    return "run_remote_data_update"
+
+
+def _parse_backtest_strategy_spec(
+    spec_data: Any,
+    input_data: dict[str, Any],
+) -> StrategySpec | dict[str, Any] | None:
+    if not isinstance(spec_data, dict):
+        return None
+
+    payload = dict(spec_data)
+    factors = (
+        payload.get("factors")
+        or payload.get("selected_factors")
+        or payload.get("factor_ids")
+    )
+    if factors is not None and "factors" not in payload:
+        payload["factors"] = factors
+
+    if not payload.get("strategy_id"):
+        if not payload.get("factors"):
+            return {
+                "status": "INVALID_REQUEST",
+                "message": (
+                    "strategy_spec must include strategy_id or factors so run_backtest "
+                    "can build a research-only temporary strategy."
+                ),
+                "missing_fields": ["strategy_id", "factors"],
+            }
+        payload["strategy_id"] = str(input_data.get("strategy_id") or new_id("strat"))
+        payload.setdefault("name", f"Ad hoc factor strategy: {payload['strategy_id']}")
+        payload.setdefault(
+            "description",
+            "Temporary research-only strategy_spec supplied to run_backtest.",
+        )
+
+    try:
+        return strategy_spec_from_agent_spec(payload)
+    except Exception as exc:
+        return {
+            "status": "INVALID_REQUEST",
+            "message": f"invalid strategy_spec: {exc}",
+            "strategy_spec_keys": sorted(str(key) for key in payload),
+        }
+
+
 run_backtest_tool: AgentTool = tool(
     ToolSpec(
         name="run_backtest",
         description=(
             "运行因子排名策略的基线回测。返回 total_return, sharpe, max_drawdown, "
             "turnover, trade_count。必须提供 factor_name、strategy_spec 或可映射到因子的 "
-            "strategy_id。传入多因子 strategy_spec 时，当前 baseline adapter 只用第一个"
-            "因子，并在 warnings/adapter_limitations 中说明。"
+            "strategy_id。传入多因子 strategy_spec 时会按 factor weight 生成 composite "
+            "score 并在 factor_ids/requested_factor_ids 中披露实际执行因子。"
             " 内置因子: momentum_20d, momentum_60d, reversal_5d, volatility_20d,"
             " turnover_20d, amount_zscore_20d"
         ),
@@ -556,10 +735,61 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
         "",
     ]
 
+    run_artifacts = [_load_run_artifact(str(run_id)) for run_id in run_ids]
+
     if "summary" in sections:
         lines.extend(["## Summary", "", f"Run IDs: {', '.join(run_ids)}", ""])
+    lines.extend(["## Evidence Status", ""])
+    for run_id, artifact in zip(run_ids, run_artifacts, strict=False):
+        if artifact is None:
+            lines.append(f"- {run_id}: No run artifact found")
+            continue
+        status = artifact.get("status") or artifact.get("payload", {}).get("status", "unknown")
+        diagnostics = artifact.get("diagnostics", {})
+        diagnostic_status = (
+            diagnostics.get("status", "unknown") if isinstance(diagnostics, dict) else "unknown"
+        )
+        lines.append(f"- {run_id}: status={status}, diagnostics={diagnostic_status}")
+    if not run_ids:
+        lines.append("- No run IDs supplied")
+    lines.append("")
+    lines.extend(["## Effective Candidates / 有效候选", ""])
+    lines.extend(_candidate_lines(run_ids, run_artifacts, group="effective"))
+    lines.append("")
+    lines.extend(["## Failed Candidates / 失败候选", ""])
+    lines.extend(_candidate_lines(run_ids, run_artifacts, group="failed"))
+    lines.append("")
+    lines.extend(["## Blocked Candidates / 阻断候选", ""])
+    lines.extend(_candidate_lines(run_ids, run_artifacts, group="blocked"))
+    lines.append("")
     if "metrics" in sections:
-        lines.extend(["## Metrics", "", "(see attached backtest reports for details)", ""])
+        lines.extend(["## Metrics", ""])
+        for artifact in run_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            metrics = artifact.get("metrics")
+            if isinstance(metrics, dict):
+                lines.append(f"- {artifact.get('run_id', 'unknown')}: {metrics}")
+        if not any(isinstance(item, dict) and item.get("metrics") for item in run_artifacts):
+            lines.append("(no metrics artifact available)")
+        lines.append("")
+    if "limitations" in sections:
+        lines.extend(["## Limitations", ""])
+        limitation_lines = _report_limitations(run_artifacts)
+        lines.extend(limitation_lines or ["- No explicit limitations captured in run artifacts"])
+        lines.append("")
+    if "data_gaps" in sections:
+        lines.extend(["## Data Gaps / 数据缺口", ""])
+        data_gap_lines = _report_data_gaps(run_artifacts)
+        lines.extend(data_gap_lines or ["- No explicit data gaps captured in run artifacts"])
+        lines.append("")
+    lines.extend(["## Diagnostic Gaps / 诊断缺口", ""])
+    diagnostic_gap_lines = _report_diagnostic_gaps(run_ids, run_artifacts)
+    lines.extend(diagnostic_gap_lines or ["- No NOT_COMPUTED diagnostics captured"])
+    lines.append("")
+    lines.extend(["## Next Actions / 下一步动作", ""])
+    lines.extend(_report_next_actions(run_ids, run_artifacts))
+    lines.append("")
     if "lessons" in sections and experiment_meta.get("lessons"):
         lines.extend(["## Lessons Learned", ""])
         for lesson in experiment_meta["lessons"]:
@@ -751,8 +981,178 @@ def _map_strategy_factor(strategy_id: str) -> str | None:
     return None
 
 
+def _load_run_artifact(run_id: str) -> dict[str, Any] | None:
+    for root in (Path("reports/research"), Path("reports/backtests")):
+        path = root / f"{run_id}.json"
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _candidate_lines(
+    run_ids: list[Any],
+    artifacts: list[dict[str, Any] | None],
+    *,
+    group: str,
+) -> list[str]:
+    lines: list[str] = []
+    for run_id, artifact in zip(run_ids, artifacts, strict=False):
+        if _candidate_group(artifact) != group:
+            continue
+        lines.append(_candidate_line(str(run_id), artifact))
+    return lines or ["- None"]
+
+
+def _candidate_group(artifact: dict[str, Any] | None) -> str:
+    if not isinstance(artifact, dict):
+        return "blocked"
+    status = str(artifact.get("status") or artifact.get("payload", {}).get("status") or "")
+    diagnostic_status = _diagnostic_status(artifact)
+    if status.upper() in {
+        "BLOCKED",
+        "NO_DATA",
+        "DATA_NOT_READY",
+        "INVALID_REQUEST",
+        "FACTOR_NOT_FOUND",
+        "BACKTEST_FAILED",
+    }:
+        return "blocked"
+    if diagnostic_status == "FAIL" or status.upper() == "FAILED":
+        return "failed"
+    if status.lower() == "completed" and diagnostic_status in {"PASS", "WARN"}:
+        return "effective"
+    return "blocked"
+
+
+def _candidate_line(run_id: str, artifact: dict[str, Any] | None) -> str:
+    if not isinstance(artifact, dict):
+        return f"- {run_id}: No run artifact found"
+    status = artifact.get("status") or artifact.get("payload", {}).get("status", "unknown")
+    diagnostics = _diagnostic_status(artifact)
+    factor_ids = artifact.get("factor_ids") or artifact.get("requested_factor_ids") or []
+    report_path = artifact.get("report_path", "")
+    metrics = artifact.get("metrics")
+    details = [
+        f"status={status}",
+        f"diagnostics={diagnostics}",
+        f"factor_ids={factor_ids}",
+    ]
+    if report_path:
+        details.append(f"report_path={report_path}")
+    if isinstance(metrics, dict):
+        details.append(f"metrics={metrics}")
+    return f"- {run_id}: " + "; ".join(details)
+
+
+def _diagnostic_status(artifact: dict[str, Any]) -> str:
+    diagnostics = artifact.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        return str(diagnostics.get("status", "unknown"))
+    return "unknown"
+
+
+def _report_limitations(artifacts: list[dict[str, Any] | None]) -> list[str]:
+    lines: list[str] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        for key in ("warnings", "adapter_limitations"):
+            value = artifact.get(key)
+            if isinstance(value, list):
+                lines.extend(f"- {item}" for item in value if str(item).strip())
+        diagnostics = artifact.get("diagnostics")
+        if isinstance(diagnostics, dict) and diagnostics.get("status") in {"FAIL", "WARN"}:
+            lines.append(f"- Diagnostics status: {diagnostics['status']}")
+    return lines
+
+
+def _report_data_gaps(artifacts: list[dict[str, Any] | None]) -> list[str]:
+    lines: list[str] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        data_window = artifact.get("data_window")
+        if (
+            isinstance(data_window, dict)
+            and data_window.get("data_freshness") != "covers_requested_end"
+        ):
+            lines.append(f"- {artifact.get('run_id', 'unknown')}: {data_window}")
+    return lines
+
+
+def _report_diagnostic_gaps(
+    run_ids: list[Any],
+    artifacts: list[dict[str, Any] | None],
+) -> list[str]:
+    lines: list[str] = []
+    for run_id, artifact in zip(run_ids, artifacts, strict=False):
+        if not isinstance(artifact, dict):
+            lines.append(f"- {run_id}: run artifact missing, diagnostics unavailable")
+            continue
+        diagnostics = artifact.get("diagnostics")
+        checks = diagnostics.get("checks", []) if isinstance(diagnostics, dict) else []
+        if not isinstance(checks, list):
+            continue
+        for check in checks:
+            if not isinstance(check, dict) or check.get("status") != "NOT_COMPUTED":
+                continue
+            lines.append(
+                f"- {run_id}: {check.get('name', 'unknown')} NOT_COMPUTED "
+                f"({check.get('message', 'no reason captured')})"
+            )
+    return lines
+
+
+def _report_next_actions(
+    run_ids: list[Any],
+    artifacts: list[dict[str, Any] | None],
+) -> list[str]:
+    actions: list[str] = []
+    for run_id, artifact in zip(run_ids, artifacts, strict=False):
+        group = _candidate_group(artifact)
+        if group == "effective":
+            actions.append(
+                f"- {run_id}: keep as verifiable candidate; rerun with broader "
+                "dates/cost grid before recommendation"
+            )
+        elif group == "failed":
+            actions.append(
+                f"- {run_id}: do not recommend as effective; inspect FAIL "
+                "diagnostics and revise hypothesis"
+            )
+        else:
+            actions.append(
+                f"- {run_id}: unblock missing artifact/data/factor evidence before "
+                "comparing performance"
+            )
+    return actions or ["- No run IDs supplied; run backtests or factor diagnostics first"]
+
+
 def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
+
+
+def _is_cyclical_universe(universe: str) -> bool:
+    text = universe.lower()
+    return "cyclical" in text or "顺周期" in universe
+
+
+def _resolve_cyclical_symbols_for_backtest(lake: DataLake, *, as_of: str) -> dict[str, Any]:
+    from qmt_agent_trader.agent.tools.query_tools import build_theme_universe
+
+    return build_theme_universe(
+        lake,
+        as_of=as_of,
+        theme="cyclical",
+        exclude_st=True,
+        exclude_suspended=True,
+        min_listed_days=60,
+    )
 
 
 def _strategy_registry() -> StrategyRegistry:

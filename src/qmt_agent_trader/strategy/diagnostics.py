@@ -12,15 +12,17 @@ class DiagnosticStatus(StrEnum):
     PASS = "PASS"
     WARN = "WARN"
     FAIL = "FAIL"
+    NOT_COMPUTED = "NOT_COMPUTED"
 
 
 @dataclass(frozen=True)
 class DiagnosticCheck:
     name: str
     status: DiagnosticStatus
-    observed: float | bool
-    threshold: float | bool
+    observed: float | bool | str
+    threshold: float | bool | str
     message: str
+    evidence_source: str = "computed"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -29,6 +31,7 @@ class DiagnosticCheck:
             "observed": self.observed,
             "threshold": self.threshold,
             "message": self.message,
+            "evidence_source": self.evidence_source,
         }
 
 
@@ -84,7 +87,10 @@ class StrategyDiagnosticsEvaluator:
     def _overall_status(checks: tuple[DiagnosticCheck, ...]) -> DiagnosticStatus:
         if any(check.status == DiagnosticStatus.FAIL for check in checks):
             return DiagnosticStatus.FAIL
-        if any(check.status == DiagnosticStatus.WARN for check in checks):
+        if any(
+            check.status in {DiagnosticStatus.WARN, DiagnosticStatus.NOT_COMPUTED}
+            for check in checks
+        ):
             return DiagnosticStatus.WARN
         return DiagnosticStatus.PASS
 
@@ -147,7 +153,13 @@ class StrategyDiagnosticsEvaluator:
         evidence: dict[str, Any],
         config: StrategyDiagnosticConfig,
     ) -> DiagnosticCheck:
-        observed = _float_metric(evidence, "factor_report", "coverage", default=1.0)
+        if not _has_metric(evidence, "factor_report", "coverage"):
+            return _not_computed_check(
+                "coverage",
+                config.min_coverage,
+                "factor coverage was not computed; do not infer coverage quality",
+            )
+        observed = _float_metric(evidence, "factor_report", "coverage")
         status = (
             DiagnosticStatus.PASS
             if observed >= config.min_coverage
@@ -166,7 +178,13 @@ class StrategyDiagnosticsEvaluator:
         evidence: dict[str, Any],
         config: StrategyDiagnosticConfig,
     ) -> DiagnosticCheck:
-        observed = _float_metric(evidence, "factor_report", "positive_ic_ratio", default=1.0)
+        if not _has_metric(evidence, "factor_report", "positive_ic_ratio"):
+            return _not_computed_check(
+                "positive_ic_ratio",
+                config.min_positive_ic_ratio,
+                "positive IC ratio was not computed; do not infer predictive quality",
+            )
+        observed = _float_metric(evidence, "factor_report", "positive_ic_ratio")
         status = (
             DiagnosticStatus.PASS
             if observed >= config.min_positive_ic_ratio
@@ -188,6 +206,12 @@ class StrategyDiagnosticsEvaluator:
         slices = _dig(evidence, "factor_report", "walk_forward", default=[])
         if not isinstance(slices, list):
             slices = []
+        if not slices:
+            return _not_computed_check(
+                "walk_forward_consistency",
+                config.min_walk_forward_positive_ratio,
+                "walk-forward factor direction was not computed",
+            )
         observed = _positive_walk_forward_ratio(slices)
         return DiagnosticCheck(
             name="walk_forward_consistency",
@@ -294,6 +318,22 @@ def _float_metric(evidence: dict[str, Any], *keys: str, default: float = 0.0) ->
     if isinstance(value, int | float):
         return float(value)
     return default
+
+
+def _has_metric(evidence: dict[str, Any], *keys: str) -> bool:
+    sentinel = object()
+    return _dig(evidence, *keys, default=sentinel) is not sentinel
+
+
+def _not_computed_check(name: str, threshold: float | bool, message: str) -> DiagnosticCheck:
+    return DiagnosticCheck(
+        name=name,
+        status=DiagnosticStatus.NOT_COMPUTED,
+        observed="NOT_COMPUTED",
+        threshold=threshold,
+        message=message,
+        evidence_source="not_computed",
+    )
 
 
 def _average_turnover(payload: Any) -> float:

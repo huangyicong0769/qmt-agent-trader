@@ -19,6 +19,7 @@ from qmt_agent_trader.factors.service import compute_factor_frame
 class FactorRankResearchConfig:
     factor_name: str
     factor_registry_root: Path | None = None
+    factor_registry: FactorRegistry | None = None
     top_n: int = 20
     max_single_position_pct: float = 0.10
     initial_cash: float = 1_000_000.0
@@ -62,7 +63,7 @@ class FactorRankResearchRunner:
     def __init__(self, bars: pd.DataFrame, config: FactorRankResearchConfig) -> None:
         self.bars = _prepare_bars(bars)
         self.config = config
-        registry = (
+        registry = config.factor_registry or (
             FactorRegistry(config.factor_registry_root)
             if config.factor_registry_root is not None
             else None
