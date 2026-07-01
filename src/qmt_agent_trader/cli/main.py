@@ -37,6 +37,7 @@ from qmt_agent_trader.cli.tui import run_tui
 from qmt_agent_trader.core.audit import AuditLogger
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.types import ApprovalStatus, RiskStatus
+from qmt_agent_trader.data.macro import MACRO_DATASETS
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.tushare_client import TushareClient
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
@@ -44,6 +45,8 @@ from qmt_agent_trader.services.data_update_service import (
     RequestLimiter,
     TushareDataUpdateService,
     build_data_update_plan,
+    build_fundamental_update_plan,
+    build_macro_update_plan,
 )
 from qmt_agent_trader.services.order_plan_service import (
     build_sample_paper_order_plan,
@@ -170,6 +173,90 @@ def data_update(
     print_json(result.as_dict())
 
 
+@data_app.command("update-fundamentals")
+def data_update_fundamentals(
+    from_date: Annotated[str, typer.Option("--from")],
+    to_date: Annotated[str, typer.Option("--to")],
+    ts_code: Annotated[str | None, typer.Option("--ts-code")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    skip_daily_basic: Annotated[bool, typer.Option("--skip-daily-basic")] = False,
+    skip_financial_statements: Annotated[
+        bool, typer.Option("--skip-financial-statements")
+    ] = False,
+    skip_dividend: Annotated[bool, typer.Option("--skip-dividend")] = False,
+) -> None:
+    """Update Tushare fundamentals into the raw data lake."""
+    client = _tushare_client()
+    if dry_run:
+        print_json(
+            {
+                "status": "planned",
+                "requests": build_fundamental_update_plan(
+                    client,
+                    from_date,
+                    to_date,
+                    ts_code=ts_code,
+                    include_daily_basic=not skip_daily_basic,
+                    include_financial_statements=not skip_financial_statements,
+                    include_dividend=not skip_dividend,
+                ),
+            }
+        )
+        return
+    settings = _settings()
+    result = TushareDataUpdateService(
+        client,
+        _data_lake(),
+        limiter=RequestLimiter(
+            min_interval_seconds=settings.remote_data_min_interval_seconds
+        ),
+        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+    ).update_fundamentals(
+        from_date,
+        to_date,
+        ts_code=ts_code,
+        include_daily_basic=not skip_daily_basic,
+        include_financial_statements=not skip_financial_statements,
+        include_dividend=not skip_dividend,
+    )
+    print_json(result.as_dict())
+
+
+@data_app.command("update-macro")
+def data_update_macro(
+    from_date: Annotated[str, typer.Option("--from")],
+    to_date: Annotated[str, typer.Option("--to")],
+    datasets: Annotated[str | None, typer.Option("--datasets")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Update configured Tushare macro datasets into the raw data lake."""
+    dataset_ids = _csv_values(datasets)
+    client = _tushare_client()
+    if dry_run:
+        print_json(
+            {
+                "status": "planned",
+                "requests": build_macro_update_plan(
+                    client,
+                    from_date,
+                    to_date,
+                    datasets=dataset_ids or None,
+                ),
+            }
+        )
+        return
+    settings = _settings()
+    result = TushareDataUpdateService(
+        client,
+        _data_lake(),
+        limiter=RequestLimiter(
+            min_interval_seconds=settings.remote_data_min_interval_seconds
+        ),
+        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+    ).update_macro(from_date, to_date, datasets=dataset_ids or None)
+    print_json(result.as_dict())
+
+
 @data_app.command("validate")
 def data_validate() -> None:
     """Validate local data lake artifacts."""
@@ -187,6 +274,56 @@ def data_validate() -> None:
             "duckdb_exists": lake.duckdb_path.exists(),
         }
     )
+
+
+@data_app.command("validate-fundamentals")
+def data_validate_fundamentals() -> None:
+    """Validate local fundamentals datasets and PIT columns."""
+    lake = _data_lake()
+    specs = {
+        "tushare_daily_basic": {
+            "required_columns": ["ts_code", "trade_date"],
+            "pit_columns": ["trade_date"],
+            "pit_safe": True,
+        },
+        "tushare_income": {
+            "required_columns": ["ts_code", "end_date", "ann_date"],
+            "pit_columns": ["ann_date", "f_ann_date"],
+            "pit_safe": True,
+        },
+        "tushare_balancesheet": {
+            "required_columns": ["ts_code", "end_date", "ann_date"],
+            "pit_columns": ["ann_date", "f_ann_date"],
+            "pit_safe": True,
+        },
+        "tushare_cashflow": {
+            "required_columns": ["ts_code", "end_date", "ann_date"],
+            "pit_columns": ["ann_date", "f_ann_date"],
+            "pit_safe": True,
+        },
+        "tushare_fina_indicator": {
+            "required_columns": ["ts_code", "end_date", "ann_date"],
+            "pit_columns": ["ann_date"],
+            "pit_safe": True,
+        },
+    }
+    print_json({"status": "ok", "datasets": _dataset_validation(lake, specs)})
+
+
+@data_app.command("validate-macro")
+def data_validate_macro() -> None:
+    """Validate local macro datasets and visibility metadata."""
+    lake = _data_lake()
+    specs = {
+        spec.raw_dataset: {
+            "required_columns": spec.key_columns,
+            "pit_columns": [spec.date_column],
+            "pit_safe": spec.pit_safe,
+            "visibility_rule": spec.visibility_rule,
+        }
+        for spec in MACRO_DATASETS.values()
+    }
+    print_json({"status": "ok", "datasets": _dataset_validation(lake, specs)})
 
 
 @data_app.command("migrate-legacy")
@@ -637,6 +774,74 @@ def trade_submit(
             "live submit refused unless config allows live and --confirm-live is provided"
         )
     print_json({"plan": plan, "status": "SUBMIT_READY"})
+
+
+def _csv_values(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _dataset_validation(
+    lake: DataLake,
+    specs: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    for name, spec in specs.items():
+        path = lake.dataset_path("raw", name)
+        required_columns = _string_list(spec.get("required_columns", []))
+        pit_columns = _string_list(spec.get("pit_columns", []))
+        if not path.exists():
+            results.append(
+                {
+                    "dataset": name,
+                    "exists": False,
+                    "row_count": 0,
+                    "date_range": None,
+                    "required_columns": required_columns,
+                    "pit_columns": pit_columns,
+                    "missing_required_columns": required_columns,
+                    "pit_safe": bool(spec.get("pit_safe", False)),
+                    **{
+                        key: value
+                        for key, value in spec.items()
+                        if key not in {"required_columns", "pit_columns", "pit_safe"}
+                    },
+                }
+            )
+            continue
+        frame = lake.read_parquet("raw", name)
+        missing = [column for column in required_columns if column not in frame.columns]
+        date_column = next((column for column in pit_columns if column in frame.columns), None)
+        date_range = None
+        if date_column is not None and not frame.empty:
+            values = frame[date_column].dropna().astype(str)
+            if not values.empty:
+                date_range = {"start": values.min(), "end": values.max()}
+        results.append(
+            {
+                "dataset": name,
+                "exists": True,
+                "row_count": len(frame),
+                "date_range": date_range,
+                "required_columns": required_columns,
+                "pit_columns": pit_columns,
+                "missing_required_columns": missing,
+                "pit_safe": bool(spec.get("pit_safe", False)),
+                **{
+                    key: value
+                    for key, value in spec.items()
+                    if key not in {"required_columns", "pit_columns", "pit_safe"}
+                },
+            }
+        )
+    return results
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
 
 
 def print_json(payload: object) -> None:

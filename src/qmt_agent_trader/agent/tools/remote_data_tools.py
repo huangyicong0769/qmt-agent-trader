@@ -12,12 +12,16 @@ from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import Settings, get_settings
+from qmt_agent_trader.data.macro import MACRO_DATASETS
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.tushare_client import TushareClient
 from qmt_agent_trader.services.data_update_service import (
+    FINANCIAL_TABLES,
     RequestLimiter,
     TushareDataUpdateService,
     build_data_update_plan,
+    build_fundamental_update_plan,
+    build_macro_update_plan,
 )
 
 _lake: DataLake | None = None
@@ -32,6 +36,7 @@ _client_factory_var: ContextVar[Callable[[], TushareClient] | None] = ContextVar
     "remote_data_tool_client_factory",
     default=None,
 )
+_AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS = 25
 
 
 def wire(
@@ -258,6 +263,25 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
                 "skip_reason": "requested_range_already_covered",
             },
         }
+    if (
+        context.requested_by_llm
+        and _estimated_request_count(planned) > _AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS
+    ):
+        return {
+            "status": "BLOCKED",
+            "reason": "AUTONOMOUS_REMOTE_UPDATE_TOO_LARGE",
+            "message": (
+                "Autonomous agent remote data update would require too many requests; "
+                "use dry_run planning, narrower symbols/date windows, or dedicated "
+                "fundamental/macro chunked update tools before live execution."
+            ),
+            "estimated_request_count": _estimated_request_count(planned),
+            "max_autonomous_request_count": _AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS,
+            "timeout_seconds_used": timeout_seconds_used,
+            "missing_ranges": planned.get("missing_ranges", []),
+            "missing_symbols": planned.get("missing_symbols", []),
+            "next_repair_tool": _next_remote_repair_tool(input_data),
+        }
 
     if settings.tushare_token is None and _client_factory is None:
         return {
@@ -340,6 +364,521 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
         return {"status": "error", "message": message}
 
 
+def _plan_fundamental_data_update(
+    input_data: dict[str, Any],
+    _context: ToolContext,
+) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+    try:
+        source, start, end = _parse_request(input_data)
+        if source != "tushare":
+            return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
+        ts_code = _normalize_ts_code(input_data.get("ts_code"))
+        symbols = _normalize_symbols(input_data.get("symbols"))
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+
+    datasets_used = _existing_fundamental_datasets(lake)
+    coverage_status = "NO_DATA" if not datasets_used else "PARTIAL_COVERAGE"
+    missing_ranges = [{"start_date": start, "end_date": end}] if coverage_status != "OK" else []
+    include_daily_basic = bool(input_data.get("include_daily_basic", True))
+    include_financial_statements = bool(input_data.get("include_financial_statements", True))
+    include_dividend = bool(input_data.get("include_dividend", True))
+    requests = build_fundamental_update_plan(
+        TushareClient(token=None),
+        start,
+        end,
+        ts_code=ts_code,
+        include_daily_basic=include_daily_basic,
+        include_financial_statements=include_financial_statements,
+        include_dividend=include_dividend,
+    )
+    return {
+        "status": "planned",
+        "category": "fundamentals",
+        "source": source,
+        "start_date": start,
+        "end_date": end,
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "requested_symbols": symbols or ([ts_code] if ts_code else []),
+        "datasets_used": datasets_used,
+        "coverage_status": coverage_status,
+        "data_update_needed": coverage_status != "OK",
+        "missing_ranges": missing_ranges,
+        "next_repair_tool": "run_fundamental_data_update",
+        "requests": requests,
+        "metadata": {
+            "plan_meaning": "dry_run_only_no_remote_fetch_performed",
+            "pit_rule": (
+                "financial visible_date <= as_of_date; "
+                "daily_basic trade_date <= as_of_date"
+            ),
+            "requested_symbols_count": len(symbols) if symbols else (1 if ts_code else 0),
+        },
+    }
+
+
+def _run_fundamental_data_update(
+    input_data: dict[str, Any],
+    context: ToolContext,
+) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+    settings = _get_settings()
+    try:
+        source, start, end = _parse_request(input_data)
+        if source != "tushare":
+            return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
+        ts_code = _normalize_ts_code(input_data.get("ts_code"))
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+
+    if _needs_auto_chunk(start, end, settings) and bool(input_data.get("auto_chunk", False)):
+        return _run_chunked_fundamental_data_update(
+            input_data,
+            context,
+            settings=settings,
+            start=start,
+            end=end,
+            ts_code=ts_code,
+        )
+
+    try:
+        _validate_span(start, end, settings.remote_data_max_days_per_call)
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+
+    if bool(input_data.get("dry_run", False)):
+        planned = _plan_fundamental_data_update(input_data, context)
+        planned["dry_run"] = True
+        return planned
+    scope_block = _autonomous_fundamental_live_scope_block(input_data, context, ts_code=ts_code)
+    if scope_block is not None:
+        return scope_block
+
+    if settings.tushare_token is None and _client_factory is None:
+        return {
+            "status": "NOT_CONFIGURED",
+            "message": "TUSHARE_TOKEN is required for live fundamental data update",
+            "next_repair_tool": "run_fundamental_data_update",
+        }
+
+    try:
+        service = _build_update_service(settings, lake)
+        result = service.update_fundamentals(
+            start,
+            end,
+            ts_code=ts_code,
+            include_daily_basic=bool(input_data.get("include_daily_basic", True)),
+            include_financial_statements=bool(
+                input_data.get("include_financial_statements", True)
+            ),
+            include_dividend=bool(input_data.get("include_dividend", True)),
+        ).as_dict()
+        post_update = _plan_fundamental_data_update({**input_data, "dry_run": True}, context)
+        result.update(
+            {
+                "category": "fundamentals",
+                "dry_run": False,
+                "datasets_used": _existing_fundamental_datasets(lake),
+                "coverage_status": post_update.get("coverage_status"),
+                "data_update_needed": post_update.get("data_update_needed"),
+                "missing_ranges": post_update.get("missing_ranges", []),
+                "next_repair_tool": "run_fundamental_data_update",
+            }
+        )
+        return result
+    except Exception as exc:
+        return {"status": "error", "message": _sanitize_error(str(exc), settings)}
+
+
+def _run_chunked_fundamental_data_update(
+    input_data: dict[str, Any],
+    context: ToolContext,
+    *,
+    settings: Settings,
+    start: str,
+    end: str,
+    ts_code: str | None,
+) -> dict[str, Any]:
+    chunks = _chunk_ranges(start, end, settings.remote_data_max_days_per_call)
+    batch_plans = [
+        _plan_fundamental_data_update(
+            {
+                **input_data,
+                "start_date": chunk_start,
+                "end_date": chunk_end,
+                "auto_chunk": False,
+                "dry_run": True,
+            },
+            context,
+        )
+        for chunk_start, chunk_end in chunks
+    ]
+    batches = [
+        {
+            **plan,
+            "batch_index": index,
+            "start_date": chunk_start,
+            "end_date": chunk_end,
+        }
+        for index, (plan, (chunk_start, chunk_end)) in enumerate(
+            zip(batch_plans, chunks, strict=True),
+            start=1,
+        )
+    ]
+    execute_plan = bool(input_data.get("execute_plan", False))
+    dry_run = bool(input_data.get("dry_run", False))
+    base_payload: dict[str, Any] = {
+        "status": "planned",
+        "category": "fundamentals",
+        "source": "tushare",
+        "start_date": start,
+        "end_date": end,
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "auto_chunk": True,
+        "execute_plan": execute_plan,
+        "dry_run": dry_run,
+        "batches": batches,
+        "coverage_status": _worst_coverage_status(
+            [str(batch.get("coverage_status", "NO_DATA")) for batch in batches]
+        ),
+        "missing_ranges": [
+            item
+            for batch in batches
+            for item in batch.get("missing_ranges", [])
+            if isinstance(item, dict)
+        ],
+        "next_repair_tool": "run_fundamental_data_update",
+    }
+    base_payload["remaining_missing_ranges"] = list(base_payload["missing_ranges"])
+    if dry_run or not execute_plan:
+        return base_payload
+    scope_block = _autonomous_fundamental_live_scope_block(input_data, context, ts_code=ts_code)
+    if scope_block is not None:
+        return {**base_payload, **scope_block}
+
+    if settings.tushare_token is None and _client_factory is None:
+        return {
+            **base_payload,
+            "status": "NOT_CONFIGURED",
+            "message": "TUSHARE_TOKEN is required for live fundamental data update",
+        }
+
+    batch_results: list[dict[str, Any]] = []
+    try:
+        service = _build_update_service(settings, _get_lake_required())
+        for chunk_start, chunk_end in chunks:
+            batch_results.append(
+                service.update_fundamentals(
+                    chunk_start,
+                    chunk_end,
+                    ts_code=ts_code,
+                    include_daily_basic=bool(input_data.get("include_daily_basic", True)),
+                    include_financial_statements=bool(
+                        input_data.get("include_financial_statements", True)
+                    ),
+                    include_dividend=bool(input_data.get("include_dividend", True)),
+                ).as_dict()
+            )
+    except Exception as exc:
+        return {
+            **base_payload,
+            "status": "error",
+            "message": _sanitize_error(str(exc), settings),
+            "batch_results": batch_results,
+        }
+
+    post_update = _plan_fundamental_data_update({**input_data, "dry_run": True}, context)
+    all_updated = all(item.get("status") == "updated" for item in batch_results)
+    return {
+        **base_payload,
+        "status": "updated" if all_updated else "PARTIAL_UPDATE",
+        "dry_run": False,
+        "batch_results": batch_results,
+        "post_update_coverage": {
+            "coverage_status": post_update.get("coverage_status"),
+            "datasets_used": post_update.get("datasets_used", []),
+            "missing_ranges": post_update.get("missing_ranges", []),
+        },
+        "remaining_missing_ranges": []
+        if all_updated
+        else post_update.get("missing_ranges", []),
+        "datasets_used": _existing_fundamental_datasets(_get_lake_required()),
+    }
+
+
+def _autonomous_fundamental_live_scope_block(
+    input_data: dict[str, Any],
+    context: ToolContext,
+    *,
+    ts_code: str | None,
+) -> dict[str, Any] | None:
+    if not context.requested_by_llm or ts_code:
+        return None
+    symbols = _normalize_symbols(input_data.get("symbols"))
+    return {
+        "status": "BLOCKED",
+        "reason": "AUTONOMOUS_FUNDAMENTAL_UPDATE_REQUIRES_SECURITY_SCOPE",
+        "message": (
+            "Autonomous live fundamental updates must be scoped to a single ts_code. "
+            "Basket symbols are supported for coverage checks, but live basket fills "
+            "would fall back to market-wide Tushare requests."
+        ),
+        "requested_symbols_count": len(symbols),
+        "missing_inputs": ["ts_code"],
+        "next_repair_tool": "run_fundamental_data_update",
+    }
+
+
+def _plan_macro_data_update(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+    try:
+        source, start, end = _parse_request(input_data)
+        if source != "tushare":
+            return {"status": "INVALID_REQUEST", "message": "only tushare is supported"}
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+
+    datasets = _normalize_macro_datasets(input_data.get("datasets"))
+    unknown = [item for item in datasets if item not in MACRO_DATASETS]
+    if unknown:
+        return {
+            "status": "INVALID_REQUEST",
+            "category": "macro",
+            "message": f"unknown macro dataset(s): {unknown}",
+            "requested_datasets": datasets,
+            "known_datasets": sorted(MACRO_DATASETS),
+            "next_repair_tool": "run_macro_data_update",
+        }
+    requested = datasets or sorted(MACRO_DATASETS)
+    datasets_used = [
+        dataset
+        for dataset in requested
+        if lake.dataset_path("raw", MACRO_DATASETS[dataset].raw_dataset).exists()
+    ]
+    coverage_status = "OK" if len(datasets_used) == len(requested) else "NO_DATA"
+    if datasets_used and coverage_status != "OK":
+        coverage_status = "PARTIAL_COVERAGE"
+    missing_ranges = [{"start_date": start, "end_date": end}] if coverage_status != "OK" else []
+    return {
+        "status": "planned",
+        "category": "macro",
+        "source": source,
+        "start_date": start,
+        "end_date": end,
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "requested_datasets": requested,
+        "known_datasets": sorted(MACRO_DATASETS),
+        "datasets_used": datasets_used,
+        "coverage_status": coverage_status,
+        "data_update_needed": coverage_status != "OK",
+        "missing_ranges": missing_ranges,
+        "next_repair_tool": "run_macro_data_update",
+        "requests": build_macro_update_plan(
+            TushareClient(token=None),
+            start,
+            end,
+            datasets=requested,
+        ),
+        "metadata": {"plan_meaning": "dry_run_only_no_remote_fetch_performed"},
+    }
+
+
+def _run_macro_data_update(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+    settings = _get_settings()
+    try:
+        _source, start, end = _parse_request(input_data)
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+
+    if _needs_auto_chunk(start, end, settings) and bool(input_data.get("auto_chunk", False)):
+        return _run_chunked_macro_data_update(
+            input_data,
+            context,
+            settings=settings,
+            start=start,
+            end=end,
+        )
+
+    try:
+        _validate_span(start, end, settings.remote_data_max_days_per_call)
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+
+    planned = _plan_macro_data_update(input_data, context)
+    if planned.get("status") == "INVALID_REQUEST" or bool(input_data.get("dry_run", False)):
+        planned["dry_run"] = bool(input_data.get("dry_run", False))
+        return planned
+
+    if settings.tushare_token is None and _client_factory is None:
+        return {
+            "status": "NOT_CONFIGURED",
+            "message": "TUSHARE_TOKEN is required for live macro data update",
+            "next_repair_tool": "run_macro_data_update",
+        }
+    try:
+        service = _build_update_service(settings, lake)
+        result = service.update_macro(
+            start,
+            end,
+            datasets=list(planned.get("requested_datasets", [])),
+        ).as_dict()
+        post_update = _plan_macro_data_update({**input_data, "dry_run": True}, context)
+        result.update(
+            {
+                "category": "macro",
+                "dry_run": False,
+                "datasets_used": post_update.get("datasets_used", []),
+                "coverage_status": post_update.get("coverage_status"),
+                "data_update_needed": post_update.get("data_update_needed"),
+                "missing_ranges": post_update.get("missing_ranges", []),
+                "next_repair_tool": "run_macro_data_update",
+            }
+        )
+        return result
+    except Exception as exc:
+        return {"status": "error", "message": _sanitize_error(str(exc), settings)}
+
+
+def _run_chunked_macro_data_update(
+    input_data: dict[str, Any],
+    context: ToolContext,
+    *,
+    settings: Settings,
+    start: str,
+    end: str,
+) -> dict[str, Any]:
+    chunks = _chunk_ranges(start, end, settings.remote_data_max_days_per_call)
+    batch_plans = [
+        _plan_macro_data_update(
+            {
+                **input_data,
+                "start_date": chunk_start,
+                "end_date": chunk_end,
+                "auto_chunk": False,
+                "dry_run": True,
+            },
+            context,
+        )
+        for chunk_start, chunk_end in chunks
+    ]
+    batches = [
+        {
+            **plan,
+            "batch_index": index,
+            "start_date": chunk_start,
+            "end_date": chunk_end,
+        }
+        for index, (plan, (chunk_start, chunk_end)) in enumerate(
+            zip(batch_plans, chunks, strict=True),
+            start=1,
+        )
+    ]
+    execute_plan = bool(input_data.get("execute_plan", False))
+    dry_run = bool(input_data.get("dry_run", False))
+    base_payload: dict[str, Any] = {
+        "status": "planned",
+        "category": "macro",
+        "source": "tushare",
+        "start_date": start,
+        "end_date": end,
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "auto_chunk": True,
+        "execute_plan": execute_plan,
+        "dry_run": dry_run,
+        "batches": batches,
+        "coverage_status": _worst_coverage_status(
+            [str(batch.get("coverage_status", "NO_DATA")) for batch in batches]
+        ),
+        "missing_ranges": [
+            item
+            for batch in batches
+            for item in batch.get("missing_ranges", [])
+            if isinstance(item, dict)
+        ],
+        "next_repair_tool": "run_macro_data_update",
+    }
+    base_payload["remaining_missing_ranges"] = list(base_payload["missing_ranges"])
+    if dry_run or not execute_plan:
+        return base_payload
+
+    if settings.tushare_token is None and _client_factory is None:
+        return {
+            **base_payload,
+            "status": "NOT_CONFIGURED",
+            "message": "TUSHARE_TOKEN is required for live macro data update",
+        }
+
+    batch_results: list[dict[str, Any]] = []
+    try:
+        service = _build_update_service(settings, _get_lake_required())
+        requested = list(batch_plans[0].get("requested_datasets", [])) if batch_plans else []
+        for chunk_start, chunk_end in chunks:
+            batch_results.append(
+                service.update_macro(
+                    chunk_start,
+                    chunk_end,
+                    datasets=requested,
+                ).as_dict()
+            )
+    except Exception as exc:
+        return {
+            **base_payload,
+            "status": "error",
+            "message": _sanitize_error(str(exc), settings),
+            "batch_results": batch_results,
+        }
+
+    post_update = _plan_macro_data_update({**input_data, "dry_run": True}, context)
+    all_updated = all(item.get("status") == "updated" for item in batch_results)
+    return {
+        **base_payload,
+        "status": "updated" if all_updated else "PARTIAL_UPDATE",
+        "dry_run": False,
+        "batch_results": batch_results,
+        "post_update_coverage": {
+            "coverage_status": post_update.get("coverage_status"),
+            "datasets_used": post_update.get("datasets_used", []),
+            "missing_ranges": post_update.get("missing_ranges", []),
+        },
+        "remaining_missing_ranges": []
+        if all_updated
+        else post_update.get("missing_ranges", []),
+        "datasets_used": post_update.get("datasets_used", []),
+    }
+
+
+def _build_update_service(settings: Settings, lake: DataLake) -> TushareDataUpdateService:
+    return TushareDataUpdateService(
+        _build_client(settings),
+        lake,
+        limiter=RequestLimiter(min_interval_seconds=settings.remote_data_min_interval_seconds),
+        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+        retry_attempts=settings.remote_data_retry_attempts,
+        retry_backoff_seconds=settings.remote_data_retry_backoff_seconds,
+    )
+
+
+def _get_lake_required() -> DataLake:
+    lake = _get_lake()
+    if lake is None:
+        raise RuntimeError("data lake not wired")
+    return lake
+
+
 def _parse_request(input_data: dict[str, Any]) -> tuple[str, str, str]:
     source = str(input_data.get("source", "tushare")).lower()
     start = str(input_data.get("start_date") or input_data.get("start") or "")
@@ -359,6 +898,33 @@ def _validate_span(start: str, end: str, max_days: int) -> None:
         raise ValueError(
             f"requested range has {days} days; remote_data_max_days_per_call={max_days}"
         )
+
+
+def _needs_auto_chunk(start: str, end: str, settings: Settings) -> bool:
+    days = (_parse_date(end) - _parse_date(start)).days + 1
+    return days > settings.remote_data_max_days_per_call
+
+
+def _chunk_ranges(start: str, end: str, max_days: int) -> list[tuple[str, str]]:
+    start_date = _parse_date(start)
+    end_date = _parse_date(end)
+    chunks: list[tuple[str, str]] = []
+    cursor = start_date
+    while cursor <= end_date:
+        chunk_end = min(cursor + timedelta(days=max_days - 1), end_date)
+        chunks.append((_format_date(cursor), _format_date(chunk_end)))
+        cursor = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def _worst_coverage_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "NO_DATA"
+    if all(status == "OK" for status in statuses):
+        return "OK"
+    if any(status in {"OK", "PARTIAL_COVERAGE", "PARTIAL"} for status in statuses):
+        return "PARTIAL_COVERAGE"
+    return "NO_DATA"
 
 
 def _missing_ranges(
@@ -645,6 +1211,21 @@ def _remote_data_update_timeout_seconds(
     )
 
 
+def _estimated_request_count(planned: dict[str, Any]) -> int:
+    try:
+        return int(planned.get("estimated_request_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _next_remote_repair_tool(input_data: dict[str, Any]) -> str:
+    include_basics = bool(input_data.get("include_basics", True))
+    include_daily = bool(input_data.get("include_daily", True))
+    if include_basics and not include_daily:
+        return "run_fundamental_data_update"
+    return "run_remote_data_update"
+
+
 def _copy_coverage_fields(payload: dict[str, Any], plan: dict[str, Any]) -> None:
     for key in (
         "coverage_by_symbol",
@@ -690,6 +1271,28 @@ def _sanitize_error(message: str, settings: Settings) -> str:
     return message
 
 
+def _existing_fundamental_datasets(lake: DataLake) -> list[str]:
+    candidates = ["tushare_daily_basic", *(item[0] for item in FINANCIAL_TABLES.values())]
+    return [dataset for dataset in candidates if lake.dataset_path("raw", dataset).exists()]
+
+
+def _normalize_macro_datasets(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = [value]
+    elif isinstance(value, list):
+        raw_items = [str(item) for item in value]
+    else:
+        raw_items = [str(value)]
+    normalized: list[str] = []
+    for item in raw_items:
+        text = item.strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
 _UPDATE_INPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -717,6 +1320,20 @@ _UPDATE_INPUT_SCHEMA = {
         "dry_run": {
             "type": "boolean",
             "description": "When true, return the local gap plan without contacting Tushare.",
+        },
+        "auto_chunk": {
+            "type": "boolean",
+            "description": (
+                "When true, split requests larger than remote_data_max_days_per_call "
+                "into legal date batches."
+            ),
+        },
+        "execute_plan": {
+            "type": "boolean",
+            "description": (
+                "When true with auto_chunk=true and dry_run=false, execute each planned "
+                "batch and return post_update_coverage."
+            ),
         },
     },
     "required": ["start_date", "end_date"],
@@ -792,6 +1409,102 @@ run_remote_data_update_tool: AgentTool = tool(
 )
 
 
+_FUNDAMENTAL_UPDATE_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "source": {"type": "string", "description": "Only tushare is currently supported."},
+        "start_date": {"type": "string", "description": "YYYYMMDD or YYYY-MM-DD."},
+        "end_date": {"type": "string", "description": "YYYYMMDD or YYYY-MM-DD."},
+        "ts_code": {"type": "string", "description": "Optional security code."},
+        "symbols": {"type": "array", "items": {"type": "string"}},
+        "include_daily_basic": {"type": "boolean"},
+        "include_financial_statements": {"type": "boolean"},
+        "include_dividend": {"type": "boolean"},
+        "dry_run": {
+            "type": "boolean",
+            "description": "When true, return the local gap plan without contacting Tushare.",
+        },
+        "auto_chunk": {
+            "type": "boolean",
+            "description": (
+                "When true, split requests larger than remote_data_max_days_per_call "
+                "into legal date batches."
+            ),
+        },
+        "execute_plan": {
+            "type": "boolean",
+            "description": (
+                "When true with auto_chunk=true and dry_run=false, execute each planned "
+                "batch and return post_update_coverage."
+            ),
+        },
+    },
+    "required": ["start_date", "end_date"],
+    "additionalProperties": False,
+}
+
+
+_MACRO_UPDATE_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "source": {"type": "string", "description": "Only tushare is currently supported."},
+        "start_date": {"type": "string", "description": "YYYYMMDD or YYYY-MM-DD."},
+        "end_date": {"type": "string", "description": "YYYYMMDD or YYYY-MM-DD."},
+        "datasets": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Macro dataset ids such as cn_cpi, cn_ppi, cn_gdp, or shibor.",
+        },
+        "dry_run": {
+            "type": "boolean",
+            "description": "When true, return the local gap plan without contacting Tushare.",
+        },
+    },
+    "required": ["start_date", "end_date"],
+    "additionalProperties": False,
+}
+
+
+run_fundamental_data_update_tool: AgentTool = tool(
+    ToolSpec(
+        name="run_fundamental_data_update",
+        description=(
+            "通过本地受控同步器补齐 Tushare 基本面与日频估值数据。"
+            "先用 dry_run=true, auto_chunk=true 查看缺口和批次计划；"
+            "允许 live update 时用 dry_run=false, auto_chunk=true, execute_plan=true "
+            "逐批执行并返回 post_update_coverage。"
+        ),
+        permission=PermissionLevel.RESEARCH_WRITE,
+        side_effect_level="write_formal",
+        input_schema=_FUNDAMENTAL_UPDATE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        deterministic=False,
+        timeout_seconds=300,
+    ),
+    fn=_run_fundamental_data_update,
+)
+
+
+run_macro_data_update_tool: AgentTool = tool(
+    ToolSpec(
+        name="run_macro_data_update",
+        description=(
+            "通过本地受控同步器补齐 Tushare 宏观数据集。"
+            "可用 datasets 指定 cn_cpi、cn_ppi、cn_gdp、shibor。"
+            "超范围请求应使用 auto_chunk=true 拆窗；允许 live update 时设置 "
+            "execute_plan=true 后复查 post_update_coverage。"
+        ),
+        permission=PermissionLevel.RESEARCH_WRITE,
+        side_effect_level="write_formal",
+        input_schema=_MACRO_UPDATE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        deterministic=False,
+        timeout_seconds=300,
+    ),
+    fn=_run_macro_data_update,
+)
+
+
 def build_remote_data_tools(deps: AgentToolDependencies) -> list[AgentTool]:
     return [
         tool(
@@ -804,5 +1517,23 @@ def build_remote_data_tools(deps: AgentToolDependencies) -> list[AgentTool]:
                 input_data,
                 context,
             ),
-        )
+        ),
+        tool(
+            run_fundamental_data_update_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps,
+                _run_fundamental_data_update,
+                input_data,
+                context,
+            ),
+        ),
+        tool(
+            run_macro_data_update_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps,
+                _run_macro_data_update,
+                input_data,
+                context,
+            ),
+        ),
     ]

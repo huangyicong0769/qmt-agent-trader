@@ -15,8 +15,9 @@ from typing import TextIO
 
 import pandas as pd
 
+from qmt_agent_trader.data.macro import MACRO_DATASETS
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.data.tushare_client import TushareClient
+from qmt_agent_trader.data.tushare_client import TushareClient, TushareRequest
 
 
 def build_data_update_plan(client: TushareClient, start: str, end: str) -> list[dict[str, object]]:
@@ -36,6 +37,152 @@ def build_data_update_plan(client: TushareClient, start: str, end: str) -> list[
         }
     )
     return plan
+
+
+FINANCIAL_TABLES: dict[str, tuple[str, list[str], str]] = {
+    "income": (
+        "tushare_income",
+        ["ts_code", "end_date", "ann_date", "report_type"],
+        "build_income_request",
+    ),
+    "balancesheet": (
+        "tushare_balancesheet",
+        ["ts_code", "end_date", "ann_date", "report_type"],
+        "build_balancesheet_request",
+    ),
+    "cashflow": (
+        "tushare_cashflow",
+        ["ts_code", "end_date", "ann_date", "report_type"],
+        "build_cashflow_request",
+    ),
+    "fina_indicator": (
+        "tushare_fina_indicator",
+        ["ts_code", "end_date", "ann_date"],
+        "build_fina_indicator_request",
+    ),
+    "dividend": (
+        "tushare_dividend",
+        ["ts_code", "end_date", "ann_date", "div_proc"],
+        "build_dividend_request",
+    ),
+}
+
+
+def build_fundamental_update_plan(
+    client: TushareClient,
+    start: str,
+    end: str,
+    *,
+    ts_code: str | None = None,
+    include_daily_basic: bool = True,
+    include_financial_statements: bool = True,
+    include_dividend: bool = True,
+) -> list[dict[str, object]]:
+    plan: list[dict[str, object]] = []
+    if include_daily_basic:
+        request = client.build_daily_basic_request(
+            start_date=start if ts_code else None,
+            end_date=end if ts_code else None,
+            ts_code=ts_code,
+        )
+        params: object = request.params
+        estimated_request_count = 1
+        if not ts_code:
+            params = {"trade_dates": "derived from trade_cal open dates"}
+            estimated_request_count = -1
+        plan.append(
+            _plan_entry(
+                request,
+                params=params,
+                target_dataset="tushare_daily_basic",
+                key_columns=["ts_code", "trade_date"],
+                estimated_request_count=estimated_request_count,
+                pit_safe=True,
+            )
+        )
+    if include_financial_statements:
+        for _api_name, (dataset, key_columns, builder_name) in FINANCIAL_TABLES.items():
+            if dataset == "tushare_dividend" and not include_dividend:
+                continue
+            builder = getattr(client, builder_name)
+            request = builder(start_date=start, end_date=end, ts_code=ts_code)
+            plan.append(
+                _plan_entry(
+                    request,
+                    target_dataset=dataset,
+                    key_columns=key_columns,
+                    estimated_request_count=1,
+                    pit_safe=True,
+                )
+            )
+    return plan
+
+
+def build_macro_update_plan(
+    client: TushareClient,
+    start: str,
+    end: str,
+    *,
+    datasets: list[str] | None = None,
+) -> list[dict[str, object]]:
+    dataset_ids = datasets or list(MACRO_DATASETS)
+    plan: list[dict[str, object]] = []
+    for dataset_id in dataset_ids:
+        spec = MACRO_DATASETS.get(dataset_id)
+        if spec is None:
+            plan.append(
+                {
+                    "dataset": dataset_id,
+                    "status": "INVALID_REQUEST",
+                    "message": "unknown macro dataset",
+                }
+            )
+            continue
+        request = client.build_macro_request(
+            api_name=spec.api_name,
+            start_date=start,
+            end_date=end,
+            fields=spec.default_fields,
+        )
+        plan.append(
+            _plan_entry(
+                request,
+                target_dataset=spec.raw_dataset,
+                key_columns=spec.key_columns,
+                estimated_request_count=1,
+                pit_safe=spec.pit_safe,
+                extra={
+                    "dataset": dataset_id,
+                    "frequency": spec.frequency,
+                    "visibility_rule": spec.visibility_rule,
+                },
+            )
+        )
+    return plan
+
+
+def _plan_entry(
+    request: TushareRequest,
+    *,
+    target_dataset: str,
+    key_columns: list[str],
+    estimated_request_count: int,
+    pit_safe: bool,
+    params: object | None = None,
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "api_name": request.api_name,
+        "params": request.params if params is None else params,
+        "fields": request.fields,
+        "estimated_request_count": estimated_request_count,
+        "target_dataset": target_dataset,
+        "incremental_key_columns": key_columns,
+        "pit_safe": pit_safe,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -305,6 +452,139 @@ class TushareDataUpdateService:
 
             return DataUpdateResult(start=start, end=end, writes=writes, open_dates=open_dates)
 
+    def update_fundamentals(
+        self,
+        start: str,
+        end: str,
+        *,
+        ts_code: str | None = None,
+        include_daily_basic: bool = True,
+        include_financial_statements: bool = True,
+        include_dividend: bool = True,
+    ) -> DataUpdateResult:
+        with DataUpdateLock(
+            self.lake.root / "_locks" / "remote_data.lock",
+            timeout_seconds=self.lock_timeout_seconds,
+        ):
+            writes: list[DatasetWrite] = []
+            metadata: dict[str, object] = {
+                "category": "fundamentals",
+                "ts_code": ts_code,
+                "pit_rule": "financial visible_date = f_ann_date if present else ann_date",
+            }
+            calendar = self._execute(
+                self.client.build_trade_calendar_request(start_date=start, end_date=end)
+            )
+            writes.append(self._write("tushare_trade_calendar", calendar, start=start, end=end))
+            open_dates = self._open_dates(calendar)
+
+            if include_daily_basic:
+                if ts_code:
+                    daily_basic = self._execute(
+                        self.client.build_daily_basic_request(
+                            start_date=start,
+                            end_date=end,
+                            ts_code=ts_code,
+                        )
+                    )
+                else:
+                    missing_dates = self._missing_trade_dates("tushare_daily_basic", open_dates)
+                    daily_basic = self._fetch_daily_basic_by_open_dates(missing_dates)
+                if not daily_basic.empty or not open_dates:
+                    writes.append(
+                        self._write_incremental(
+                            "tushare_daily_basic",
+                            daily_basic,
+                            start=start,
+                            end=end,
+                            key_columns=["ts_code", "trade_date"],
+                        )
+                    )
+
+            if include_financial_statements:
+                for dataset, key_columns, builder_name in FINANCIAL_TABLES.values():
+                    if dataset == "tushare_dividend" and not include_dividend:
+                        continue
+                    builder = getattr(self.client, builder_name)
+                    frame = self._execute(
+                        builder(start_date=start, end_date=end, ts_code=ts_code)
+                    )
+                    writes.append(
+                        self._write_incremental(
+                            dataset,
+                            frame,
+                            start=start,
+                            end=end,
+                            key_columns=key_columns,
+                        )
+                    )
+
+            return DataUpdateResult(
+                start=start,
+                end=end,
+                writes=writes,
+                open_dates=open_dates,
+                metadata=metadata,
+            )
+
+    def update_macro(
+        self,
+        start: str,
+        end: str,
+        *,
+        datasets: list[str] | None = None,
+    ) -> DataUpdateResult:
+        with DataUpdateLock(
+            self.lake.root / "_locks" / "remote_data.lock",
+            timeout_seconds=self.lock_timeout_seconds,
+        ):
+            writes: list[DatasetWrite] = []
+            errors: dict[str, str] = {}
+            requested = datasets or list(MACRO_DATASETS)
+            for dataset_id in requested:
+                spec = MACRO_DATASETS.get(dataset_id)
+                if spec is None:
+                    errors[dataset_id] = "unknown macro dataset"
+                    continue
+                request = self.client.build_macro_request(
+                    api_name=spec.api_name,
+                    start_date=start,
+                    end_date=end,
+                    fields=spec.default_fields,
+                )
+                try:
+                    frame = self._execute(request)
+                    if spec.date_column not in frame.columns:
+                        raise ValueError(
+                            f"macro dataset {dataset_id} missing date column: "
+                            f"{spec.date_column}"
+                        )
+                    writes.append(
+                        self._write_incremental(
+                            spec.raw_dataset,
+                            frame,
+                            start=start,
+                            end=end,
+                            key_columns=spec.key_columns,
+                        )
+                    )
+                except Exception as exc:
+                    errors[dataset_id] = str(exc)
+                    self._record_error(spec.raw_dataset, start=start, end=end, error=str(exc))
+
+            return DataUpdateResult(
+                start=start,
+                end=end,
+                writes=writes,
+                open_dates=[],
+                metadata={
+                    "category": "macro",
+                    "requested_datasets": requested,
+                    "errors": errors,
+                    "pit_note": "macro visibility may be conservative unless pit_safe is true",
+                },
+            )
+
     def _execute(self, request: object) -> pd.DataFrame:
         last_error: Exception | None = None
         for attempt in range(1, self.retry_attempts + 1):
@@ -356,6 +636,18 @@ class TushareDataUpdateService:
             error=None,
         )
 
+    def _record_error(self, name: str, *, start: str, end: str, error: str) -> None:
+        self.lake.record_fetch_result(
+            source="tushare",
+            dataset=name,
+            start_date=start,
+            end_date=end,
+            status="error",
+            row_count=0,
+            checksum=None,
+            error=error,
+        )
+
     @staticmethod
     def _open_dates(calendar: pd.DataFrame) -> list[str]:
         if calendar.empty or "cal_date" not in calendar.columns:
@@ -369,6 +661,14 @@ class TushareDataUpdateService:
         frames: list[pd.DataFrame] = []
         for trade_date in open_dates:
             frame = self._execute(self.client.build_daily_by_trade_date_request(trade_date))
+            if not frame.empty:
+                frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def _fetch_daily_basic_by_open_dates(self, open_dates: list[str]) -> pd.DataFrame:
+        frames: list[pd.DataFrame] = []
+        for trade_date in open_dates:
+            frame = self._execute(self.client.build_daily_basic_request(trade_date=trade_date))
             if not frame.empty:
                 frames.append(frame)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

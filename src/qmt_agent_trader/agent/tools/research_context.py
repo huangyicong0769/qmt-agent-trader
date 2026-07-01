@@ -18,6 +18,13 @@ IMPLEMENTED_DAILY_FACTORS = [
     "volatility_20d",
     "turnover_20d",
     "amount_zscore_20d",
+    "size_log_mktcap",
+    "pe_ttm_rank",
+    "pb_rank",
+    "dividend_yield",
+    "roe_rank",
+    "gross_margin_rank",
+    "debt_to_assets_rank",
 ]
 
 
@@ -28,6 +35,30 @@ def get_research_context(universe: str) -> dict[str, Any]:
         "historical_data_source": "Tushare Pro via local data lake",
         "latest_market_source": "Windows QMT Gateway when configured",
         "implemented_daily_factors": IMPLEMENTED_DAILY_FACTORS,
+        "implemented_factor_families": {
+            "price_volume": [
+                "momentum_20d",
+                "momentum_60d",
+                "reversal_5d",
+                "volatility_20d",
+                "turnover_20d",
+                "amount_zscore_20d",
+            ],
+            "value": [
+                "size_log_mktcap",
+                "pe_ttm_rank",
+                "pb_rank",
+                "dividend_yield",
+            ],
+            "quality": [
+                "roe_rank",
+                "gross_margin_rank",
+                "debt_to_assets_rank",
+            ],
+        },
+        "fundamental_factor_note": (
+            "Fundamental factors require tushare_daily_basic and PIT financial datasets."
+        ),
         "trade_state_inputs": [
             "suspend_d",
             "stk_limit",
