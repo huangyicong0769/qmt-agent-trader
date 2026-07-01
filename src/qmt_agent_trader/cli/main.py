@@ -473,7 +473,7 @@ def agent_ask(
     if json_output:
         runtime = build_default_runtime(_settings())
         try:
-            result = runtime.ask(prompt, max_rounds=max_rounds)
+            result = runtime.ask(prompt, max_rounds=max_rounds, session_id=session_id)
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
         print_json(

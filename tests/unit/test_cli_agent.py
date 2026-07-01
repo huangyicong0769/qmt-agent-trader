@@ -39,9 +39,16 @@ def test_agent_call_tool_uses_agent_tool_registry_for_query_bars() -> None:
 
 def test_agent_ask_json_preserves_legacy_output_shape(monkeypatch) -> None:
     class FakeRuntime:
-        def ask(self, prompt: str, *, max_rounds: int = 100):
+        def ask(
+            self,
+            prompt: str,
+            *,
+            max_rounds: int = 100,
+            session_id: str | None = None,
+        ):
             assert prompt == "你好"
             assert max_rounds == 3
+            assert session_id == "chat_cli"
             return SimpleNamespace(
                 content="回答",
                 tool_calls=[
@@ -61,7 +68,17 @@ def test_agent_ask_json_preserves_legacy_output_shape(monkeypatch) -> None:
 
     result = runner.invoke(
         app,
-        ["agent", "ask", "--prompt", "你好", "--max-rounds", "3", "--json"],
+        [
+            "agent",
+            "ask",
+            "--prompt",
+            "你好",
+            "--max-rounds",
+            "3",
+            "--session-id",
+            "chat_cli",
+            "--json",
+        ],
     )
 
     assert result.exit_code == 0
