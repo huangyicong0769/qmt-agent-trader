@@ -90,22 +90,55 @@ class SavedStrategy(BaseModel):
 def strategy_spec_from_agent_spec(data: dict[str, Any]) -> StrategySpec:
     """Convert the legacy agent strategy spec shape into the canonical model."""
     payload = dict(data)
-    factors = payload.get("factors") or []
+    factors = payload.get("factors") or payload.get("selected_factors") or []
+    constraints = payload.get("constraints") or payload.get("risk_constraints") or {}
+    constraints = constraints if isinstance(constraints, dict) else {}
+    factor_weights = constraints.get("factor_weights")
+    factor_weights = factor_weights if isinstance(factor_weights, dict) else {}
+    factor_directions = constraints.get("factor_directions")
+    factor_directions = factor_directions if isinstance(factor_directions, dict) else {}
     factor_legs: list[FactorLeg] = []
     for item in factors:
         if isinstance(item, str):
-            factor_legs.append(FactorLeg(factor_id=item))
+            factor_legs.append(
+                FactorLeg(
+                    factor_id=item,
+                    weight=float(factor_weights.get(item, 1.0)),
+                    ascending=_direction_is_ascending(factor_directions.get(item, False)),
+                )
+            )
         elif isinstance(item, dict):
             raw = dict(item)
             if "factor_id" not in raw and "name" in raw:
                 raw["factor_id"] = str(raw["name"])
+            factor_id = str(raw.get("factor_id", ""))
+            if factor_id in factor_weights:
+                raw["weight"] = factor_weights[factor_id]
+            if factor_id in factor_directions and "ascending" not in raw:
+                raw["ascending"] = _direction_is_ascending(factor_directions[factor_id])
+            if "direction" in raw and "ascending" not in raw:
+                raw["ascending"] = _direction_is_ascending(raw["direction"])
             factor_legs.append(FactorLeg.model_validate(raw))
 
     portfolio_data = payload.get("portfolio") or payload.get("portfolio_construction") or {}
     if isinstance(portfolio_data, dict) and portfolio_data.get("method") == "equal_weight":
         portfolio_data = {**portfolio_data, "method": "equal_weight_top_n"}
+    if not portfolio_data and constraints:
+        portfolio_data = {
+            key: constraints[key]
+            for key in ("top_n", "max_single_position_pct", "cash_buffer_pct", "long_only")
+            if key in constraints
+        }
+        if portfolio_data:
+            portfolio_data.setdefault("method", "equal_weight_top_n")
 
     execution_data = payload.get("execution") or payload.get("execution_assumptions") or {}
+    if not execution_data and constraints:
+        execution_data = {
+            key: constraints[key]
+            for key in ("execution_delay_days", "slippage_bps", "cost_model")
+            if key in constraints
+        }
     if isinstance(execution_data, dict):
         execution_data = _normalize_execution(execution_data)
 
@@ -130,9 +163,21 @@ def strategy_spec_from_agent_spec(data: dict[str, Any]) -> StrategySpec:
         portfolio=PortfolioConstructionSpec.model_validate(portfolio_data or {}),
         rebalance=RebalanceSpec.model_validate(payload.get("rebalance") or {}),
         execution=ExecutionAssumptionSpec.model_validate(execution_data or {}),
-        risk_constraints=dict(payload.get("risk_constraints") or {}),
+        risk_constraints=dict(payload.get("risk_constraints") or constraints),
         tags=[str(item) for item in payload.get("tags", [])],
     )
+
+
+def _direction_is_ascending(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {
+        "ascending",
+        "asc",
+        "lower_is_better",
+        "low",
+        "smaller_is_better",
+    }
 
 
 def _normalize_execution(data: dict[str, Any]) -> dict[str, Any]:

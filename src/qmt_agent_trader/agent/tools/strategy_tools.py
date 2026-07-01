@@ -91,6 +91,7 @@ def _create_strategy_spec(input_data: dict[str, Any], context: ToolContext) -> d
     universe = input_data.get("universe", "stock_etf")
     rebalance_freq = input_data.get("rebalance_frequency", "daily")
     constraints = input_data.get("constraints", {})
+    constraints = constraints if isinstance(constraints, dict) else {}
 
     strategy_id = new_id("strat")
     kind = (
@@ -106,29 +107,44 @@ def _create_strategy_spec(input_data: dict[str, Any], context: ToolContext) -> d
         kind=kind,
         source=StrategySource.AGENT_GENERATED,
         universe=universe,
-        factors=[{"factor_id": str(item), "weight": 1.0} for item in selected_factors],
-        portfolio={"method": "equal_weight_top_n", "top_n": 20},
+        factors=_factor_legs_from_selected(selected_factors, constraints),
+        portfolio=_portfolio_from_constraints(constraints),
         rebalance={"frequency": rebalance_freq},
         risk_constraints=constraints,
-        execution={
-            "signal_timing": "after_close",
-            "execution_timing": "next_open",
-            "execution_delay_days": 1,
-            "slippage_bps": 5.0,
-        },
+        execution=_execution_from_constraints(constraints),
     )
-    return {"status": "created", "strategy_spec": spec.model_dump(mode="json")}
+    return {
+        "status": "created",
+        "strategy_spec": spec.model_dump(mode="json"),
+        "warnings": [],
+        "saved_in_registry": False,
+        "research_only": True,
+        "live_trading_allowed": False,
+        "suggested_next_tools": [
+            "generate_strategy_code",
+            "run_strategy_static_checks",
+            "save_strategy_candidate",
+            "save_strategy_spec_draft",
+            "run_backtest",
+        ],
+    }
 
 
 create_strategy_spec_tool: AgentTool = tool(
     ToolSpec(
         name="create_strategy_spec",
-        description="将策略想法和候选因子组合转成结构化 strategy spec。",
+        description=(
+            "将策略想法和候选因子组合转成结构化 strategy spec，并保留 factor "
+            "weights、ascending/lower_is_better 方向、portfolio 和 execution 约束。"
+        ),
         input_schema={
             "type": "object",
             "properties": {
                 "strategy_idea": {"type": "string"},
-                "selected_factors": {"type": "array", "items": {"type": "string"}},
+                "selected_factors": {
+                    "type": "array",
+                    "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
+                },
                 "universe": {"type": "string"},
                 "rebalance_frequency": {"type": "string"},
                 "constraints": {"type": "object"},
@@ -340,6 +356,73 @@ save_strategy_candidate_tool: AgentTool = tool(
     fn=_save_strategy_candidate,
 )
 
+
+# ── save_strategy_spec_draft ──────────────────────────────────────────────────
+
+
+def _save_strategy_spec_draft(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    spec_data = input_data.get("strategy_spec")
+    if not isinstance(spec_data, dict):
+        return {"status": "error", "message": "strategy_spec is required"}
+    spec = strategy_spec_from_agent_spec(spec_data)
+    registry = _strategy_registry()
+    existing = registry.get_strategy(spec.strategy_id)
+    if existing is not None:
+        return {
+            "status": "already_saved",
+            "strategy_id": spec.strategy_id,
+            "saved_in_registry": True,
+            "saved_strategy": existing.model_dump(mode="json"),
+            "research_only": True,
+            "live_trading_allowed": False,
+            "review_required": True,
+        }
+
+    saved = SavedStrategy(
+        strategy_id=spec.strategy_id,
+        name=spec.name,
+        version=spec.version,
+        source=StrategySource.AGENT_GENERATED,
+        status=ApprovalStatus.GENERATED_BY_LLM,
+        spec=spec,
+        implementation_ref="spec:draft",
+        code_path=None,
+        tests_path=None,
+        created_by="agent",
+    )
+    stored = registry.save_candidate(saved)
+    return {
+        "status": "saved",
+        "strategy_id": spec.strategy_id,
+        "saved_in_registry": True,
+        "code_path": None,
+        "research_only": True,
+        "live_trading_allowed": False,
+        "review_required": True,
+        "saved_strategy": stored.model_dump(mode="json"),
+    }
+
+
+save_strategy_spec_draft_tool: AgentTool = tool(
+    ToolSpec(
+        name="save_strategy_spec_draft",
+        description=(
+            "将 research-only strategy spec 草稿保存到策略注册表，不要求已生成 code_path。"
+            "保存后仍需人工 review，不能直接实盘。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"strategy_spec": {"type": "object"}},
+            "required": ["strategy_spec"],
+            "additionalProperties": False,
+        },
+        permission=PermissionLevel.RESEARCH_WRITE,
+        side_effect_level="write_generated",
+        deterministic=False,
+    ),
+    fn=_save_strategy_spec_draft,
+)
+
 # ── run_strategy_static_checks ──────────────────────────────────────────────
 
 
@@ -385,6 +468,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     strategy_id = input_data.get("strategy_id", "")
     factor_name = input_data.get("factor_name", "")
     spec_data = input_data.get("strategy_spec")
+    saved_strategy: SavedStrategy | None = None
     strategy_spec_result = _parse_backtest_strategy_spec(spec_data, input_data)
     if isinstance(strategy_spec_result, dict):
         return strategy_spec_result
@@ -393,6 +477,18 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         saved_strategy = _strategy_registry().get_strategy(str(strategy_id))
         if saved_strategy is not None:
             strategy_spec = saved_strategy.spec
+        elif not factor_name:
+            return {
+                "status": "STRATEGY_NOT_FOUND",
+                "strategy_id": str(strategy_id),
+                "message": (
+                    "strategy_id not found in StrategyRegistry; pass strategy_spec "
+                    "or save the spec draft first"
+                ),
+                "suggested_next_tools": ["save_strategy_spec_draft", "list_strategy_candidates"],
+                "research_only": True,
+                "live_trading_allowed": False,
+            }
     if strategy_spec is not None:
         strategy_id = strategy_id or strategy_spec.strategy_id
         if not factor_name and strategy_spec.factors:
@@ -403,7 +499,26 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     top_n = int(input_data.get("top_n", strategy_spec.portfolio.top_n if strategy_spec else 20))
     symbols = _requested_symbols(input_data)
     resolved_universe: dict[str, Any] | None = None
-    if not symbols and strategy_spec is not None and _is_cyclical_universe(strategy_spec.universe):
+    universe_info = _resolve_backtest_universe_inputs(
+        input_data,
+        strategy_spec=strategy_spec,
+        saved_strategy=saved_strategy,
+        symbols=symbols,
+    )
+    if universe_info["blocked"]:
+        return {
+            "status": "BLOCKED",
+            "reason": "UNIVERSE_UNSPECIFIED",
+            "message": (
+                "Backtest would use a default broad universe. Pass symbols, universe, "
+                "or allow_default_universe=true explicitly."
+            ),
+            "suggested_next_tools": ["query_universe"],
+            **_universe_evidence_payload(universe_info, symbols, resolved_universe),
+        }
+    if not symbols and universe_info["universe_effective"] and _is_cyclical_universe(
+        str(universe_info["universe_effective"])
+    ):
         universe_as_of = str(
             input_data.get("as_of_date")
             or input_data.get("end_date")
@@ -420,21 +535,22 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
                 "message": "cyclical universe could not be resolved for backtest",
                 "universe_resolution": resolved_universe,
                 "next_repair_tool": resolved_universe.get("metadata", {}).get("next_repair_tool"),
+                **_universe_evidence_payload(universe_info, symbols, resolved_universe),
             }
         symbols = [str(item) for item in resolved_universe.get("symbols", [])]
+        universe_info["symbols_source"] = "resolved_universe"
+        universe_info["symbols_count"] = len(symbols)
     code_path = str(input_data.get("code_path") or "")
     if code_path:
         issues = static_check_strategy_file(Path(code_path))
         if issues:
             return {"status": "STATIC_CHECK_FAILED", "issues": issues, "code_path": code_path}
 
-    # Resolve factor_name from strategy_id if not provided
-    if not factor_name and strategy_id:
-        factor_name = _map_strategy_factor(strategy_id)
     if not factor_name:
         return {
-            "status": "error",
-            "message": "必须提供 factor_name、strategy_spec 或可映射到因子的 strategy_id。"
+            "status": "INVALID_REQUEST",
+            "message": "必须提供 factor_name、strategy_spec 或已保存的 strategy_id。",
+            "suggested_next_tools": ["create_strategy_spec", "save_strategy_spec_draft"],
         }
 
     registry_root = _factor_registry_root(lake)
@@ -485,7 +601,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         factor_name=factor_name,
         start_date=start_date,
         end_date=end_date,
-        universe=str(input_data.get("universe") or strategy_spec.universe),
+        universe=str(universe_info["universe_effective"]),
         initial_cash=initial_cash,
         top_n=top_n,
         max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
@@ -506,6 +622,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         cached["cache_hit"] = True
         cached["timeout_seconds_used"] = timeout_seconds_used
         cached["cost_estimate"] = cost_estimate
+        cached.update(_universe_evidence_payload(universe_info, symbols, resolved_universe))
         return cached
     try:
         result = run_strategy_backtest(
@@ -524,6 +641,16 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             return blocked
         raise
     payload = result.model_dump(mode="json")
+    payload.update(_universe_evidence_payload(universe_info, symbols, resolved_universe))
+    if saved_strategy is not None and not saved_strategy.code_path:
+        warnings = list(payload.get("warnings") or [])
+        warning = "strategy has no generated code; backtest used canonical adapter"
+        if warning not in warnings:
+            warnings.append(warning)
+        payload["warnings"] = warnings
+        payload["saved_in_registry"] = True
+        payload["generated_code"] = False
+        payload["static_checks"] = "NOT_RUN"
     if result.status == "completed":
         payload.update(
             {
@@ -555,6 +682,7 @@ def _blocked_backtest_from_value_error(
         return None
     factor_id = _factor_id_from_missing_columns_error(message) or config.factor_name
     missing_columns = _missing_columns_from_error(message)
+    repair_tool = _repair_tool_for_missing_columns(missing_columns)
     return {
         "status": "BLOCKED",
         "reason": "MISSING_FACTOR_INPUTS",
@@ -564,6 +692,8 @@ def _blocked_backtest_from_value_error(
         "factor_ids": requested_factor_ids,
         "requested_factor_ids": requested_factor_ids,
         "missing_columns": missing_columns,
+        "required_datasets": _datasets_for_missing_columns(missing_columns),
+        "available_columns": [],
         "coverage_status": "NO_DATA",
         "missing_ranges": [
             {
@@ -574,7 +704,16 @@ def _blocked_backtest_from_value_error(
             }
         ],
         "datasets_used": [],
-        "next_repair_tool": _repair_tool_for_missing_columns(missing_columns),
+        "next_repair_tool": repair_tool,
+        "suggested_repair": {
+            "tool": repair_tool,
+            "args": {
+                "start_date": config.start_date,
+                "end_date": config.end_date,
+                "symbols": config.symbols,
+                "columns": missing_columns,
+            },
+        },
         "research_only": True,
         "live_trading_allowed": False,
         "adapter_limitations": [],
@@ -635,6 +774,30 @@ def _repair_tool_for_missing_columns(columns: list[str]) -> str:
     return "run_remote_data_update"
 
 
+def _datasets_for_missing_columns(columns: list[str]) -> list[str]:
+    fundamentals = {
+        "pb",
+        "pe",
+        "pe_ttm",
+        "roe",
+        "gross_margin",
+        "debt_to_assets",
+        "dv_ttm",
+        "total_mv",
+    }
+    daily = {"open", "high", "low", "close", "vol", "volume", "amount", "turnover"}
+    macro = {"pmi", "ppi", "cpi", "macro_cycle_score", "industry_value_added"}
+    datasets: list[str] = []
+    normalized = {column.lower() for column in columns}
+    if normalized & fundamentals:
+        datasets.append("tushare_fundamentals")
+    if normalized & daily:
+        datasets.append("tushare_daily")
+    if normalized & macro:
+        datasets.append("macro_series")
+    return datasets or ["custom_factor_inputs"]
+
+
 def _parse_backtest_strategy_spec(
     spec_data: Any,
     input_data: dict[str, Any],
@@ -682,10 +845,12 @@ run_backtest_tool: AgentTool = tool(
     ToolSpec(
         name="run_backtest",
         description=(
-            "运行因子排名策略的基线回测。返回 total_return, sharpe, max_drawdown, "
-            "turnover, trade_count。必须提供 factor_name、strategy_spec 或可映射到因子的 "
-            "strategy_id。传入多因子 strategy_spec 时会按 factor weight 生成 composite "
-            "score 并在 factor_ids/requested_factor_ids 中披露实际执行因子。"
+            "运行因子排名策略的 research-only 回测。必须提供 factor_name、strategy_spec "
+            "或已保存的 strategy_id，并传入 symbols/universe；如确需默认大 universe，"
+            "必须显式 allow_default_universe=true。返回 total_return, sharpe, "
+            "max_drawdown, turnover, trade_count，并披露 symbols_source、symbols_count "
+            "和 universe_effective。传入多因子 strategy_spec 时会按 factor weight 生成 "
+            "composite score 并在 factor_ids/requested_factor_ids 中披露实际执行因子。"
             " 内置因子: momentum_20d, momentum_60d, reversal_5d, volatility_20d,"
             " turnover_20d, amount_zscore_20d"
         ),
@@ -703,6 +868,11 @@ run_backtest_tool: AgentTool = tool(
                 "symbols": {"type": "array", "items": {"type": "string"}},
                 "initial_cash": {"type": "number"},
                 "top_n": {"type": "integer"},
+                "universe": {"type": "string"},
+                "as_of_date": {"type": "string"},
+                "allow_default_universe": {"type": "boolean"},
+                "universe_filters": {"type": "object"},
+                "rebalance_frequency": {"type": "string"},
             },
             "anyOf": [
                 {"required": ["factor_name"]},
@@ -852,6 +1022,7 @@ def build_strategy_tools(deps: AgentToolDependencies) -> list[AgentTool]:
         (generate_strategy_code_tool, _generate_strategy_code),
         (list_strategy_candidates_tool, _list_strategy_candidates),
         (save_strategy_candidate_tool, _save_strategy_candidate),
+        (save_strategy_spec_draft_tool, _save_strategy_spec_draft),
         (run_strategy_static_checks_tool, _run_strategy_static_checks),
         (run_backtest_tool, _run_backtest),
         (generate_research_report_tool, _generate_research_report),
@@ -872,6 +1043,72 @@ def _bind_tool(
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _factor_legs_from_selected(
+    selected_factors: Any,
+    constraints: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_items = selected_factors if isinstance(selected_factors, list) else []
+    weights = constraints.get("factor_weights")
+    weights = weights if isinstance(weights, dict) else {}
+    directions = constraints.get("factor_directions")
+    directions = directions if isinstance(directions, dict) else {}
+
+    legs: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            raw = dict(item)
+            factor_id = str(raw.get("factor_id") or raw.get("name") or "").strip()
+            if not factor_id:
+                continue
+            leg: dict[str, Any] = {"factor_id": factor_id}
+            if "weight" in raw:
+                leg["weight"] = float(raw["weight"])
+            if "ascending" in raw:
+                leg["ascending"] = bool(raw["ascending"])
+            elif "direction" in raw:
+                leg["ascending"] = _direction_is_ascending(raw["direction"])
+            if raw.get("transform") is not None:
+                leg["transform"] = str(raw["transform"])
+        else:
+            factor_id = str(item).strip()
+            if not factor_id:
+                continue
+            leg = {"factor_id": factor_id}
+        if factor_id in weights:
+            leg["weight"] = float(weights[factor_id])
+        if factor_id in directions:
+            leg["ascending"] = _direction_is_ascending(directions[factor_id])
+        leg.setdefault("weight", 1.0)
+        leg.setdefault("ascending", False)
+        legs.append(leg)
+    return legs
+
+
+def _direction_is_ascending(value: Any) -> bool:
+    text = str(value).strip().lower()
+    return text in {"ascending", "asc", "lower_is_better", "low", "smaller_is_better"}
+
+
+def _portfolio_from_constraints(constraints: dict[str, Any]) -> dict[str, Any]:
+    portfolio = {"method": "equal_weight_top_n", "top_n": int(constraints.get("top_n", 20))}
+    for key in ("max_single_position_pct", "cash_buffer_pct", "long_only"):
+        if key in constraints:
+            portfolio[key] = constraints[key]
+    return portfolio
+
+
+def _execution_from_constraints(constraints: dict[str, Any]) -> dict[str, Any]:
+    execution: dict[str, Any] = {
+        "signal_timing": "after_close",
+        "execution_timing": "next_open",
+        "execution_delay_days": int(constraints.get("execution_delay_days", 1)),
+        "slippage_bps": float(constraints.get("slippage_bps", 5.0)),
+    }
+    if "cost_model" in constraints:
+        execution["cost_model"] = str(constraints["cost_model"])
+    return execution
 
 
 def _render_strategy_code(name: str, spec: StrategySpec) -> str:
@@ -1066,10 +1303,35 @@ def _candidate_line(run_id: str, artifact: dict[str, Any] | None) -> str:
         f"diagnostics={diagnostics}",
         f"factor_ids={factor_ids}",
     ]
+    for key in (
+        "candidate_type",
+        "universe_requested",
+        "universe_effective",
+        "symbols_source",
+        "symbols_count",
+        "actual_data_start",
+        "actual_data_end",
+        "data_freshness",
+        "generated_code",
+        "static_checks",
+        "saved_in_registry",
+        "execution_backend",
+        "factor_weights",
+        "research_only",
+        "live_trading_allowed",
+    ):
+        if key in artifact:
+            details.append(f"{key}={artifact[key]}")
     if report_path:
         details.append(f"report_path={report_path}")
     if isinstance(metrics, dict):
         details.append(f"metrics={metrics}")
+    warnings = artifact.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        details.append(f"warnings={warnings}")
+    limitations = artifact.get("adapter_limitations")
+    if isinstance(limitations, list) and limitations:
+        details.append(f"adapter_limitations={limitations}")
     return f"- {run_id}: " + "; ".join(details)
 
 
@@ -1183,6 +1445,58 @@ def _strategy_registry() -> StrategyRegistry:
     lake = _get_lake()
     root = lake.root.parent / "strategies" if lake is not None else Path("data/strategies")
     return StrategyRegistry(root)
+
+
+def _resolve_backtest_universe_inputs(
+    input_data: dict[str, Any],
+    *,
+    strategy_spec: StrategySpec | None,
+    saved_strategy: SavedStrategy | None,
+    symbols: list[str],
+) -> dict[str, Any]:
+    requested = input_data.get("universe")
+    effective: str | None = None
+    source = "none"
+    if symbols:
+        source = "explicit_symbols"
+        effective = str(
+            requested
+            or (strategy_spec.universe if strategy_spec is not None else "explicit_symbols")
+        )
+    elif requested:
+        source = "input_universe"
+        effective = str(requested)
+    elif saved_strategy is not None and saved_strategy.spec.universe:
+        source = "saved_strategy_spec"
+        effective = saved_strategy.spec.universe
+    elif strategy_spec is not None and strategy_spec.universe:
+        source = "strategy_spec"
+        effective = strategy_spec.universe
+    elif bool(input_data.get("allow_default_universe")):
+        source = "default_universe"
+        effective = "stock_etf"
+    return {
+        "blocked": not symbols and effective is None,
+        "universe_requested": requested,
+        "universe_effective": effective,
+        "symbols_source": source,
+        "symbols_count": len(symbols) if symbols else 0,
+    }
+
+
+def _universe_evidence_payload(
+    universe_info: dict[str, Any],
+    symbols: list[str],
+    resolved_universe: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "universe_requested": universe_info.get("universe_requested"),
+        "universe_effective": universe_info.get("universe_effective"),
+        "symbols_source": universe_info.get("symbols_source", "none"),
+        "symbols_count": len(symbols) if symbols else int(universe_info.get("symbols_count") or 0),
+        "symbols_sample": symbols[:10],
+        "universe_resolution": resolved_universe,
+    }
 
 
 def _registered_status(registry: StrategyRegistry, strategy_id: str) -> str | None:
@@ -1341,7 +1655,7 @@ def _requested_symbols(input_data: dict[str, Any]) -> list[str]:
         raw_symbols.extend(symbols_value)
     elif symbols_value:
         raw_symbols.append(symbols_value)
-    for alias in ("symbol", "code", "universe"):
+    for alias in ("symbol", "code"):
         value = input_data.get(alias)
         if value:
             raw_symbols.append(value)

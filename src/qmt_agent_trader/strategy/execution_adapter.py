@@ -56,6 +56,9 @@ class StrategyBacktestResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     adapter_limitations: list[str] = Field(default_factory=list)
     requested_factor_ids: list[str] = Field(default_factory=list)
+    composite_method: str | None = None
+    factor_weights: dict[str, float] = Field(default_factory=dict)
+    factor_directions: dict[str, str] = Field(default_factory=dict)
 
 
 def run_strategy_backtest(
@@ -69,6 +72,9 @@ def run_strategy_backtest(
     spec = config.strategy_spec or _strategy_spec_from_registry(registry, config.strategy_id)
     factor_name = config.factor_name or _first_factor_id(spec)
     requested_factor_ids = _factor_ids(spec) or ([factor_name] if factor_name else [])
+    composite_method = _composite_method(spec)
+    factor_weights = _factor_weights(spec)
+    factor_directions = _factor_directions(spec)
     used_factor_name, factor_ids, factor_registry, execution_backend = _execution_factor_registry(
         lake,
         config,
@@ -166,6 +172,9 @@ def run_strategy_backtest(
         "requested_factor_ids": requested_factor_ids,
         "factor_ids": factor_ids,
         "execution_backend": execution_backend,
+        "composite_method": composite_method,
+        "factor_weights": factor_weights,
+        "factor_directions": factor_directions,
         "research_only": True,
         "live_trading_allowed": False,
         "warnings": warnings,
@@ -195,6 +204,9 @@ def run_strategy_backtest(
         requested_factor_ids=requested_factor_ids,
         factor_ids=factor_ids,
         execution_backend=execution_backend,
+        composite_method=composite_method,
+        factor_weights=factor_weights,
+        factor_directions=factor_directions,
         data_window=data_window,
         warnings=warnings,
         adapter_limitations=adapter_limitations,
@@ -219,6 +231,27 @@ def _factor_ids(spec: StrategySpec | None) -> list[str]:
     if spec is None:
         return []
     return [factor.factor_id for factor in spec.factors]
+
+
+def _composite_method(spec: StrategySpec | None) -> str | None:
+    if spec is None or len(spec.factors) <= 1:
+        return None
+    return "trade_date_cross_sectional_zscore_weighted_sum"
+
+
+def _factor_weights(spec: StrategySpec | None) -> dict[str, float]:
+    if spec is None:
+        return {}
+    return {factor.factor_id: float(factor.weight) for factor in spec.factors}
+
+
+def _factor_directions(spec: StrategySpec | None) -> dict[str, str]:
+    if spec is None:
+        return {}
+    return {
+        factor.factor_id: "ascending" if factor.ascending else "descending"
+        for factor in spec.factors
+    }
 
 
 def _adapter_limitations(requested_factor_ids: list[str], used_factor_id: str | None) -> list[str]:
