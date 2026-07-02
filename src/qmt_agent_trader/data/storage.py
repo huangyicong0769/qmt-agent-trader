@@ -174,7 +174,10 @@ class DataLake:
         layer_dir = self.root / layer
         if not layer_dir.exists():
             return []
-        names = sorted(path.stem for path in layer_dir.glob("*.parquet"))
+        names = sorted(
+            path.relative_to(layer_dir).with_suffix("").as_posix()
+            for path in layer_dir.rglob("*.parquet")
+        )
         if prefix is None:
             return names
         return [name for name in names if name.startswith(prefix)]

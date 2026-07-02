@@ -15,7 +15,7 @@ from qmt_agent_trader.data.storage import DataLake
 def test_list_data_catalog_hides_legacy_tushare_batches(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     frame = pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102"}])
-    lake.write_parquet(frame, "raw", "tushare_daily")
+    lake.write_parquet(frame, "raw", "tushare/daily")
     lake.write_parquet(frame, "raw", "tushare_daily_adjusted")
     lake.write_parquet(frame, "raw", "tushare_daily_20240101_20240103")
     lake.write_parquet(frame, "raw", "tushare_suspend_20240101_20240103")
@@ -26,7 +26,7 @@ def test_list_data_catalog_hides_legacy_tushare_batches(tmp_path) -> None:
     result = list_data_catalog_tool.run({}, ToolContext(run_id="catalog"))
 
     assert result["status"] == "ok"
-    assert "tushare_daily" in result["layers"]["raw"]
+    assert "tushare/daily" in result["layers"]["raw"]
     assert "tushare_daily_adjusted" in result["layers"]["raw"]
     assert "factor_momentum_20d_20240102" in result["layers"]["gold"]
     assert "tushare_daily_20240101_20240103" not in result["layers"]["raw"]
@@ -60,7 +60,7 @@ def test_query_bars_filters_symbol_alias_and_includes_symbol(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_fund_daily",
+        "tushare/fund_daily",
     )
     set_data_lake(lake)
 
@@ -107,7 +107,7 @@ def test_query_bars_keeps_identity_fields_when_fields_are_requested(tmp_path) ->
             ]
         ),
         "raw",
-        "tushare_fund_daily",
+        "tushare/fund_daily",
     )
     set_data_lake(lake)
 
@@ -149,7 +149,7 @@ def test_query_bars_filters_code_alias_without_returning_market_head(tmp_path) -
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     set_data_lake(lake)
 
@@ -189,7 +189,7 @@ def test_query_bars_reports_partial_coverage_for_multi_symbol_request(tmp_path) 
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     set_data_lake(lake)
 
@@ -229,7 +229,7 @@ def test_query_bars_reports_no_matching_bars_for_requested_symbols(tmp_path) -> 
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     set_data_lake(lake)
 
@@ -276,7 +276,7 @@ def test_query_bars_reports_stale_symbols_when_end_is_not_covered(tmp_path) -> N
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     set_data_lake(lake)
 
@@ -399,7 +399,7 @@ def test_query_universe_builds_reproducible_cyclical_basket_from_stock_basic(
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -442,7 +442,7 @@ def test_query_universe_builds_reproducible_cyclical_basket_from_stock_basic(
             ]
         ),
         "raw",
-        "tushare_stock_basic",
+        "tushare/stock_basic",
     )
     set_data_lake(lake)
 
@@ -457,7 +457,7 @@ def test_query_universe_builds_reproducible_cyclical_basket_from_stock_basic(
     assert result["status"] == "OK"
     assert result["symbols"] == ["600019.SH", "600036.SH"]
     assert result["metadata"]["theme"] == "cyclical"
-    assert result["metadata"]["selection_rules"]["industry_source"] == "tushare_stock_basic"
+    assert result["metadata"]["selection_rules"]["industry_source"] == "tushare/stock_basic"
     assert result["metadata"]["industry_distribution"] == {"钢铁": 1, "银行": 1}
     excluded = {item["symbol"]: item["reason"] for item in result["metadata"]["excluded_symbols"]}
     assert excluded["600519.SH"] == "industry_not_in_theme"
@@ -481,7 +481,7 @@ def test_query_universe_defaults_to_current_date_for_cyclical_theme(tmp_path) ->
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -496,7 +496,7 @@ def test_query_universe_defaults_to_current_date_for_cyclical_theme(tmp_path) ->
             ]
         ),
         "raw",
-        "tushare_stock_basic",
+        "tushare/stock_basic",
     )
     set_data_lake(lake)
 
@@ -528,7 +528,7 @@ def test_cyclical_theme_ontology_includes_provider_specific_industries(tmp_path)
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -564,7 +564,7 @@ def test_cyclical_theme_ontology_includes_provider_specific_industries(tmp_path)
             ]
         ),
         "raw",
-        "tushare_stock_basic",
+        "tushare/stock_basic",
     )
     set_data_lake(lake)
 

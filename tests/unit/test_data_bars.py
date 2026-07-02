@@ -109,7 +109,7 @@ def test_load_daily_bars_ignores_legacy_daily_batches(tmp_path) -> None:
     assert bars.empty
 
 
-def test_load_daily_bars_reads_stable_daily_dataset_only(tmp_path) -> None:
+def test_load_daily_bars_reads_new_registry_daily_dataset_only(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     legacy = {
         "ts_code": "000001.SZ",
@@ -122,8 +122,8 @@ def test_load_daily_bars_reads_stable_daily_dataset_only(tmp_path) -> None:
     stable = dict(legacy)
     stable["close"] = 10.5
 
-    lake.write_parquet(pd.DataFrame([legacy]), "raw", "tushare_daily_20240101_20240103")
-    lake.write_parquet(pd.DataFrame([stable]), "raw", "tushare_daily")
+    lake.write_parquet(pd.DataFrame([legacy]), "raw", "tushare_daily")
+    lake.write_parquet(pd.DataFrame([stable]), "raw", "tushare/daily")
 
     bars = load_daily_bars(lake)
 
@@ -228,12 +228,12 @@ def test_load_daily_bars_enriches_trade_states_from_lake(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     lake.write_parquet(
         pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102", "suspend_type": "S"}]),
         "raw",
-        "tushare_suspend",
+        "tushare/suspend_d",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -247,7 +247,7 @@ def test_load_daily_bars_enriches_trade_states_from_lake(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_stk_limit",
+        "tushare/stk_limit",
     )
 
     bars = load_daily_bars(lake)
@@ -265,7 +265,7 @@ def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
 
     def fake_read_filtered(layer, name, **kwargs):
         calls.append({"layer": layer, "name": name, **kwargs})
-        if name == "tushare_daily":
+        if name == "tushare/daily":
             return pd.DataFrame(
                 [
                     {
@@ -278,11 +278,11 @@ def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
                     }
                 ]
             )
-        if name == "tushare_fund_daily":
+        if name == "tushare/fund_daily":
             return pd.DataFrame(columns=["ts_code", "trade_date", "open", "high", "low", "close"])
-        if name == "tushare_suspend":
+        if name == "tushare/suspend_d":
             return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102"}])
-        if name == "tushare_stk_limit":
+        if name == "tushare/stk_limit":
             return pd.DataFrame(
                 [
                     {
@@ -293,9 +293,9 @@ def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
                     }
                 ]
             )
-        if name == "tushare_namechange":
+        if name == "tushare/namechange":
             return pd.DataFrame()
-        if name == "tushare_stock_basic":
+        if name == "tushare/stock_basic":
             return pd.DataFrame([{"ts_code": "000001.SZ", "name": "Ping An"}])
         raise AssertionError(name)
 
@@ -321,7 +321,7 @@ def test_load_daily_bars_can_skip_trade_state_enrichment(tmp_path, monkeypatch) 
 
     def fake_read_filtered(layer, name, **kwargs):
         calls.append(name)
-        if name == "tushare_daily":
+        if name == "tushare/daily":
             return pd.DataFrame(
                 [
                     {
@@ -341,7 +341,7 @@ def test_load_daily_bars_can_skip_trade_state_enrichment(tmp_path, monkeypatch) 
     bars = load_daily_bars(lake, include_trade_state=False)
 
     assert not bars.empty
-    assert calls == ["tushare_daily", "tushare_fund_daily"]
+    assert calls == ["tushare/daily", "tushare/fund_daily"]
 
 
 def test_historical_st_flags_handle_multiple_periods_without_cross_symbol_bleed() -> None:

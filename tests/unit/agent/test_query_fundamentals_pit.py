@@ -50,7 +50,7 @@ def test_query_fundamentals_pit_returns_daily_and_financial_fields(tmp_path) -> 
             ]
         ),
         "raw",
-        "tushare_daily_basic",
+        "tushare/daily_basic",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -72,7 +72,7 @@ def test_query_fundamentals_pit_returns_daily_and_financial_fields(tmp_path) -> 
             ]
         ),
         "raw",
-        "tushare_fina_indicator",
+        "tushare/fina_indicator",
     )
     set_data_lake(lake)
 
@@ -88,8 +88,8 @@ def test_query_fundamentals_pit_returns_daily_and_financial_fields(tmp_path) -> 
     assert result["metadata"]["status"] == "OK"
     assert result["metadata"]["point_in_time"] is True
     assert result["metadata"]["datasets_used"] == [
-        "tushare_daily_basic",
-        "tushare_fina_indicator",
+        "tushare/daily_basic",
+        "tushare/fina_indicator",
     ]
     assert result["rows"] == [
         {
@@ -113,7 +113,7 @@ def test_query_fundamentals_pit_reports_partial_coverage(tmp_path) -> None:
     lake.write_parquet(
         pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.8}]),
         "raw",
-        "tushare_daily_basic",
+        "tushare/daily_basic",
     )
     set_data_lake(lake)
 

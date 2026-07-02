@@ -14,6 +14,21 @@ def test_duckdb_parquet_roundtrip(tmp_path) -> None:
     assert queried.iloc[0]["symbol"] == "000001.SZ"
 
 
+def test_list_dataset_names_includes_nested_registry_dataset_ids(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(pd.DataFrame([{"ts_code": "000001.SZ"}]), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ"}]),
+        "raw",
+        "tushare/daily_basic",
+    )
+
+    assert lake.list_dataset_names("raw", prefix="tushare/") == [
+        "tushare/daily",
+        "tushare/daily_basic",
+    ]
+
+
 def test_incremental_parquet_merges_by_key(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
 

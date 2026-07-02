@@ -163,7 +163,7 @@ query_universe_tool: AgentTool = tool(
         name="query_universe",
         description=(
             "查询某日可投资股票池 / ETF 池。支持 filters.theme='cyclical' "
-            "基于 tushare_stock_basic 行业/名称映射构造可复现顺周期篮子。"
+            "基于 tushare/stock_basic 行业/名称映射构造可复现顺周期篮子。"
         ),
         input_schema={
             "type": "object",
@@ -216,7 +216,7 @@ CYCLICAL_INDUSTRIES = set().union(*THEME_INDUSTRY_ONTOLOGY["cyclical"].values())
 def _load_recent_bars_for_universe(lake: DataLake, *, end: str) -> Any:
     frames: list[Any] = []
     end_key = _date_key(end)
-    for dataset in ("tushare_daily", "tushare_fund_daily"):
+    for dataset in ("tushare/daily", "tushare/fund_daily"):
         path = lake.dataset_path("raw", dataset)
         if not path.exists():
             continue
@@ -278,10 +278,10 @@ def build_theme_universe(
 def _apply_fast_universe_state(lake: DataLake, recent: Any) -> Any:
     if recent.empty or "symbol" not in recent.columns:
         return recent
-    stock_basic_path = lake.dataset_path("raw", "tushare_stock_basic")
+    stock_basic_path = lake.dataset_path("raw", "tushare/stock_basic")
     if not stock_basic_path.exists():
         return recent
-    stock_basic = lake.read_parquet("raw", "tushare_stock_basic")
+    stock_basic = lake.read_parquet("raw", "tushare/stock_basic")
     if stock_basic.empty or not {"ts_code", "name"}.issubset(stock_basic.columns):
         return recent
     st_symbols = set(
@@ -307,7 +307,7 @@ def _query_theme_universe(
     exclude_suspended: bool,
     min_listed_days: int,
 ) -> dict[str, Any]:
-    if not lake.dataset_path("raw", "tushare_stock_basic").exists():
+    if not lake.dataset_path("raw", "tushare/stock_basic").exists():
         return {
             "status": "BLOCKED",
             "symbols": [],
@@ -317,7 +317,7 @@ def _query_theme_universe(
                 "next_repair_tool": "run_tushare_fetch",
             },
         }
-    stock_basic = lake.read_parquet("raw", "tushare_stock_basic")
+    stock_basic = lake.read_parquet("raw", "tushare/stock_basic")
     if stock_basic.empty or "ts_code" not in stock_basic.columns:
         return {
             "status": "BLOCKED",
@@ -389,7 +389,7 @@ def _query_theme_universe(
             "theme_name": theme,
             "as_of_date": str(recent["trade_date"].iloc[0]),
             "count": len(selected),
-            "industry_source": "tushare_stock_basic",
+            "industry_source": "tushare/stock_basic",
             "match_method": "theme_ontology_provider_industry_exact",
             "known_provider_industries": known_provider_industries,
             "theme_to_provider_mapping": {
@@ -416,7 +416,7 @@ def _query_theme_universe(
             "diversity_score": diversity_score,
             "warnings": warnings,
             "selection_rules": {
-                "industry_source": "tushare_stock_basic",
+                "industry_source": "tushare/stock_basic",
                 "included_industries": mapped_provider_industries,
                 "exclude_st": exclude_st,
                 "exclude_suspended": exclude_suspended,
@@ -695,7 +695,7 @@ def _load_bars_for_query(
         bars,
         suspend=lake.read_parquet_filtered(
             "raw",
-            "tushare_suspend",
+            "tushare/suspend_d",
             columns=["ts_code", "trade_date", "suspend_type"],
             start=returned_start,
             end=returned_end,
@@ -703,7 +703,7 @@ def _load_bars_for_query(
         ),
         stk_limit=lake.read_parquet_filtered(
             "raw",
-            "tushare_stk_limit",
+            "tushare/stk_limit",
             columns=["ts_code", "trade_date", "up_limit", "down_limit"],
             start=returned_start,
             end=returned_end,
@@ -711,13 +711,13 @@ def _load_bars_for_query(
         ),
         namechange=lake.read_parquet_filtered(
             "raw",
-            "tushare_namechange",
+            "tushare/namechange",
             columns=["ts_code", "name", "start_date", "end_date"],
             symbols=returned_symbols,
         ),
         stock_basic=lake.read_parquet_filtered(
             "raw",
-            "tushare_stock_basic",
+            "tushare/stock_basic",
             columns=["ts_code", "name"],
             symbols=returned_symbols,
         ),
@@ -734,7 +734,7 @@ def _read_limited_raw_bars(
     order: str,
 ) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
-    for dataset in ("tushare_daily", "tushare_fund_daily"):
+    for dataset in ("tushare/daily", "tushare/fund_daily"):
         path = lake.dataset_path("raw", dataset)
         if not path.exists():
             continue

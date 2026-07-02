@@ -32,7 +32,7 @@ def test_normalize_financial_statement_prefers_actual_announcement_date() -> Non
     result = normalize_financial_statement(
         frame,
         statement_type="fina_indicator",
-        source="tushare_fina_indicator",
+        source="tushare/fina_indicator",
     )
 
     assert result["period_end"].tolist() == [date(2023, 12, 31)]
@@ -47,7 +47,7 @@ def test_normalize_financial_statement_marks_missing_ann_date_not_pit_safe() -> 
     result = normalize_financial_statement(
         frame,
         statement_type="fina_indicator",
-        source="tushare_fina_indicator",
+        source="tushare/fina_indicator",
     )
 
     assert result["pit_safe"].tolist() == [False]
@@ -63,7 +63,7 @@ def test_load_daily_basic_snapshot_uses_latest_trade_date_asof(tmp_path) -> None
             ]
         ),
         "raw",
-        "tushare_daily_basic",
+        "tushare/daily_basic",
     )
 
     result = load_daily_basic_snapshot(lake, as_of_date="20240131", symbols=["000001.SZ"])
@@ -95,7 +95,7 @@ def test_load_financials_asof_filters_future_announcements(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_fina_indicator",
+        "tushare/fina_indicator",
     )
 
     result = load_financials_asof(
@@ -132,7 +132,7 @@ def test_load_fundamentals_asof_merges_daily_and_financials(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily_basic",
+        "tushare/daily_basic",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -147,7 +147,7 @@ def test_load_fundamentals_asof_merges_daily_and_financials(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_fina_indicator",
+        "tushare/fina_indicator",
     )
 
     result = load_fundamentals_asof(
