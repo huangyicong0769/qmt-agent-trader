@@ -79,6 +79,99 @@ def test_formula_fallback_requests_python_function_when_not_supported(registry) 
     assert "code_path" not in result
 
 
+def test_agent_authored_factor_failure_guides_dataframe_return_repair(registry) -> None:
+    python_function = """
+def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.DataFrame:
+    values = data["close"].pct_change()
+    return pd.DataFrame({"factor_value": values}, index=data.index)
+""".strip()
+
+    result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_name": "bad_dataframe_factor",
+            "factor_description": "incorrectly returns a DataFrame",
+            "python_function": python_function,
+        },
+        ToolContext(run_id="factor-dataframe-failure"),
+    )
+
+    assert result["status"] == "SAMPLE_TEST_FAILED"
+    assert result["next_repair_tool"] == "generate_factor_code"
+    assert "return pandas Series" in " ".join(result["sample_test"]["issues"])
+    assert "pd.Series" in result["suggested_repair"]
+    assert result["authoring_contract"]["return_type"] == "pd.Series"
+
+
+def test_agent_authored_factor_failure_warns_against_trade_date_index(registry) -> None:
+    python_function = """
+def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:
+    factor_values = data.groupby("symbol")["close"].pct_change()
+    return pd.Series(factor_values.to_numpy(), index=data["trade_date"], name="factor_value")
+""".strip()
+
+    result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_name": "bad_trade_date_index_factor",
+            "factor_description": "incorrectly indexes by trade_date",
+            "python_function": python_function,
+        },
+        ToolContext(run_id="factor-trade-date-index-failure"),
+    )
+
+    assert result["status"] == "SAMPLE_TEST_FAILED"
+    issues = " ".join(result["sample_test"]["issues"])
+    assert "duplicate" in issues
+    assert "trade_date" in issues
+    assert result["next_repair_tool"] == "generate_factor_code"
+
+
+def test_agent_authored_factor_accepts_series_aligned_to_input_index(registry) -> None:
+    python_function = """
+def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:
+    ordered = data.sort_values(["symbol", "trade_date"])
+    values = ordered.groupby("symbol")["close"].transform(lambda item: item.pct_change())
+    aligned = values.reindex(data.index)
+    result = pd.Series(aligned, index=data.index, name="factor_value")
+    return pd.to_numeric(result, errors="coerce")
+""".strip()
+
+    result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_name": "aligned_factor",
+            "factor_description": "returns a row-aligned Series",
+            "python_function": python_function,
+        },
+        ToolContext(run_id="factor-aligned-success"),
+    )
+
+    assert result["status"] == "generated"
+    assert result["sample_test_status"] == "PASSED"
+
+
+def test_agent_authored_factor_sample_test_rejects_input_mutation(registry) -> None:
+    python_function = """
+def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:
+    data["mutated"] = 1
+    return pd.Series(data["close"].pct_change(), index=data.index, name="factor_value")
+""".strip()
+
+    result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_name": "mutating_factor",
+            "factor_description": "mutates input data",
+            "python_function": python_function,
+        },
+        ToolContext(run_id="factor-mutation-failure"),
+    )
+
+    assert result["status"] == "SAMPLE_TEST_FAILED"
+    assert "mutated input DataFrame" in " ".join(result["sample_test"]["issues"])
+
+
 @pytest.mark.parametrize(
     "python_function",
     [

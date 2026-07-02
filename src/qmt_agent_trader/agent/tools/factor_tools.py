@@ -25,6 +25,7 @@ from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.factors.context import FactorContext
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import (
     evaluate_factor,
@@ -201,6 +202,9 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
                 "spec_path": str(spec_path),
                 "review_required": True,
                 "sample_test": sample_result,
+                "next_repair_tool": "generate_factor_code",
+                "suggested_repair": _factor_authoring_suggested_repair(),
+                "authoring_contract": _factor_authoring_contract(),
                 "warnings": [*warnings, "generated factor failed sample execution"],
             }
         return {
@@ -234,7 +238,11 @@ generate_factor_code_tool: AgentTool = tool(
         description=(
             "根据 factor spec 生成候选因子代码和测试。主路径支持传入 python_function，"
             "由 Agent 编写 compute_factor(data: pd.DataFrame, context: FactorContext) "
-            "函数；工具负责包装、保存、静态检查和样本运行。只传 formula_sketch 时会尝试"
+            "函数；工具负责包装、保存、静态检查和样本运行。compute_factor 必须返回 "
+            "pd.Series，且 result.index 必须等于 data.index；不要返回 DataFrame，"
+            "不要使用 trade_date 或 symbol/trade_date 作为 index。推荐模板："
+            "result = pd.Series(factor_values, index=data.index, name='factor_value'); "
+            "return pd.to_numeric(result, errors='coerce')。只传 formula_sketch 时会尝试"
             "旧 deterministic fallback，不支持时返回 NEEDS_PYTHON_FUNCTION。"
         ),
         input_schema={
@@ -415,9 +423,44 @@ def _list_saved_factors(input_data: dict[str, Any], context: ToolContext) -> dic
     registry = FactorRegistry(_factor_registry_root(lake))
     query = str(input_data.get("query") or "").strip()
     include_builtins = bool(input_data.get("include_builtins", True))
+    exact = bool(input_data.get("exact", False))
+    include_usage_hints = bool(input_data.get("include_usage_hints", False))
+    implementation_type = str(input_data.get("implementation_type", "any")).strip().lower()
+    required_columns_any = [
+        str(item)
+        for item in input_data.get("required_columns_any", [])
+        if str(item).strip()
+    ]
+    limit = max(1, int(input_data.get("limit") or 50))
     factors = registry.find_factors(query or None, include_builtins=include_builtins)
+    factors = [
+        item
+        for item in factors
+        if _factor_payload_matches_filters(
+            item,
+            implementation_type=implementation_type,
+            required_columns_any=required_columns_any,
+        )
+    ][:limit]
+    payloads = [
+        _saved_factor_payload(item, include_usage_hints=include_usage_hints)
+        for item in factors
+    ]
+    exact_matches = [
+        item
+        for item in payloads
+        if query
+        and (
+            str(item.get("factor_id", "")).lower() == query.lower()
+            or str(item.get("name", "")).lower() == query.lower()
+        )
+    ]
+    candidates = exact_matches if exact else payloads
     duplicates = {
-        name: [_saved_factor_payload(item) for item in items]
+        name: [
+            _saved_factor_payload(item, include_usage_hints=include_usage_hints)
+            for item in items
+        ]
         for name, items in registry.duplicate_names().items()
         if include_builtins or not any(
             item.implementation_ref.startswith("builtin:") for item in items
@@ -427,8 +470,11 @@ def _list_saved_factors(input_data: dict[str, Any], context: ToolContext) -> dic
         "status": "ok",
         "query": query or None,
         "include_builtins": include_builtins,
-        "count": len(factors),
-        "factors": [_saved_factor_payload(item) for item in factors],
+        "exact": exact,
+        "count": len(payloads),
+        "factors": payloads,
+        "exact_matches": exact_matches,
+        "candidates": candidates,
         "duplicate_names": duplicates,
     }
 
@@ -445,6 +491,14 @@ list_saved_factors_tool: AgentTool = tool(
             "properties": {
                 "query": {"type": "string"},
                 "include_builtins": {"type": "boolean"},
+                "exact": {"type": "boolean"},
+                "required_columns_any": {"type": "array", "items": {"type": "string"}},
+                "implementation_type": {
+                    "type": "string",
+                    "enum": ["builtin", "file", "any"],
+                },
+                "limit": {"type": "integer", "minimum": 1},
+                "include_usage_hints": {"type": "boolean"},
             },
         },
         permission=PermissionLevel.READ_ONLY,
@@ -634,13 +688,17 @@ def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
 
 
-def _saved_factor_payload(saved: Any) -> dict[str, Any]:
+def _saved_factor_payload(
+    saved: Any,
+    *,
+    include_usage_hints: bool = False,
+) -> dict[str, Any]:
     implementation_type = (
         "builtin"
         if str(saved.implementation_ref).startswith("builtin:")
         else "file"
     )
-    return {
+    payload = {
         "factor_id": saved.factor_id,
         "name": saved.name,
         "status": saved.status,
@@ -651,6 +709,52 @@ def _saved_factor_payload(saved: Any) -> dict[str, Any]:
         "required_columns": list(saved.required_columns),
         "lookback": saved.lookback,
     }
+    if include_usage_hints:
+        payload["strategy_leg_example"] = {
+            "factor_id": saved.factor_id,
+            "weight": 1.0,
+            "ascending": _default_factor_leg_ascending(saved.factor_id),
+        }
+        payload["usage_hint"] = (
+            "Use this exact factor_id in strategy factor leg objects; "
+            "factor_name is not a valid strategy leg field."
+        )
+    return payload
+
+
+def _factor_payload_matches_filters(
+    saved: Any,
+    *,
+    implementation_type: str,
+    required_columns_any: list[str],
+) -> bool:
+    actual_type = (
+        "builtin"
+        if str(saved.implementation_ref).startswith("builtin:")
+        else "file"
+    )
+    if implementation_type and implementation_type != "any" and implementation_type != actual_type:
+        return False
+    if required_columns_any:
+        required = {str(column) for column in saved.required_columns}
+        wanted = {str(column) for column in required_columns_any}
+        if required.isdisjoint(wanted):
+            return False
+    return True
+
+
+def _default_factor_leg_ascending(factor_id: str) -> bool:
+    lowered = str(factor_id).lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "volatility",
+            "turnover",
+            "drawdown",
+            "risk",
+            "reversal",
+        )
+    )
 
 
 def _factor_cache_version(saved: Any) -> str:
@@ -935,9 +1039,41 @@ def _run_factor_sample_test(code_path: Path, spec_data: dict[str, Any]) -> dict[
         if not callable(compute) or not callable(compute_factor):
             return {"status": "FAILED", "issues": ["compute and compute_factor must be callable"]}
         sample = _sample_factor_data(spec_data)
+        direct_input = sample.copy(deep=True)
+        direct_before = direct_input.copy(deep=True)
+        context = FactorContext(
+            factor_id=str(spec_data.get("factor_id", "agent_factor")),
+            lookback=int(spec_data.get("lookback", 20)),
+            params={},
+            research_only=True,
+        )
+        direct_result = compute_factor(direct_input, context)
+        direct_issues = _factor_sample_issues(
+            direct_result,
+            direct_input,
+            direct_before,
+            source="compute_factor",
+        )
+        if direct_issues:
+            return {
+                "status": "FAILED",
+                "issues": direct_issues,
+                "rows": len(sample),
+                "non_null": int(pd.to_numeric(direct_result, errors="coerce").notna().sum())
+                if isinstance(direct_result, pd.Series)
+                else 0,
+            }
         before = sample.copy(deep=True)
-        result = compute(sample)
-        issues = _factor_sample_issues(result, sample, before)
+        try:
+            result = compute(sample)
+        except ValueError as exc:
+            return {
+                "status": "FAILED",
+                "issues": [_factor_sample_exception_hint(str(exc))],
+                "rows": len(sample),
+                "non_null": 0,
+            }
+        issues = _factor_sample_issues(result, sample, before, source="compute")
         return {
             "status": "PASSED" if not issues else "FAILED",
             "issues": issues,
@@ -988,20 +1124,79 @@ def _factor_sample_issues(
     result: Any,
     sample: pd.DataFrame,
     before: pd.DataFrame,
+    *,
+    source: str,
 ) -> list[str]:
     issues: list[str] = []
     if not sample.equals(before):
         issues.append("compute_factor mutated input DataFrame")
+    if isinstance(result, pd.DataFrame):
+        return [
+            *issues,
+            (
+                "compute_factor returned DataFrame; return pandas Series with "
+                "pd.Series(..., index=data.index, name='factor_value') instead"
+            ),
+        ]
     if not isinstance(result, pd.Series):
-        return [*issues, "compute_factor must return pandas Series"]
+        return [*issues, f"{source} must return pandas Series"]
     if not result.index.equals(sample.index):
-        issues.append("result index must match input index")
+        issues.append(_factor_index_mismatch_hint(result, sample))
     numeric = pd.to_numeric(result, errors="coerce")
     if numeric.notna().sum() == 0:
         issues.append("result must not be entirely null")
     if np.isinf(numeric.to_numpy(dtype="float64", na_value=np.nan)).any():
         issues.append("result must not contain infinite values")
     return issues
+
+
+def _factor_index_mismatch_hint(result: pd.Series, sample: pd.DataFrame) -> str:
+    result_index = result.index
+    input_index = sample.index
+    details = [
+        "result index must match input index",
+        f"input_index_type={type(input_index).__name__}",
+        f"result_index_type={type(result_index).__name__}",
+        f"input_len={len(input_index)}",
+        f"result_len={len(result_index)}",
+        f"result_has_duplicates={bool(result_index.has_duplicates)}",
+    ]
+    if result_index.has_duplicates:
+        details.append("duplicate labels detected")
+    if len(result_index) == len(sample) and result_index.equals(pd.Index(sample["trade_date"])):
+        details.append("do not use trade_date as the factor index")
+    if isinstance(result_index, pd.MultiIndex):
+        details.append("do not use symbol/trade_date MultiIndex as the factor index")
+    return "; ".join(details)
+
+
+def _factor_sample_exception_hint(message: str) -> str:
+    if "duplicate labels" in message:
+        return (
+            f"{message}; duplicate labels usually mean compute_factor used trade_date "
+            "or symbol/trade_date as the index. Return pd.Series(..., index=data.index, "
+            "name='factor_value') instead."
+        )
+    return message
+
+
+def _factor_authoring_contract() -> dict[str, Any]:
+    return {
+        "function": "compute_factor(data: pd.DataFrame, context: FactorContext)",
+        "return_type": "pd.Series",
+        "index": "result.index must equal data.index",
+        "forbidden_outputs": ["DataFrame", "trade_date index", "symbol/trade_date MultiIndex"],
+        "mutates_input": False,
+    }
+
+
+def _factor_authoring_suggested_repair() -> str:
+    return (
+        "Return a row-aligned numeric Series: "
+        "result = pd.Series(factor_values, index=data.index, name='factor_value'); "
+        "return pd.to_numeric(result, errors='coerce'). Do not return a DataFrame "
+        "and do not index by trade_date or symbol/trade_date."
+    )
 
 
 def _requested_symbols(input_data: dict[str, Any]) -> list[str]:

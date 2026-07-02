@@ -222,6 +222,51 @@ def test_agent_can_list_saved_factors_and_duplicate_saves_are_rejected(registry)
     assert duplicate["existing_factors"][0]["factor_id"] == factor_id
 
 
+def test_list_saved_factors_returns_exact_match_and_strategy_leg_hint(registry) -> None:
+    result = registry.run_tool(
+        "list_saved_factors",
+        {
+            "query": "volatility_20d",
+            "include_builtins": True,
+            "exact": True,
+            "include_usage_hints": True,
+        },
+        ToolContext(run_id="factor-query-exact"),
+    )
+
+    assert result["status"] == "ok"
+    assert result["exact_matches"]
+    match = result["exact_matches"][0]
+    assert match["factor_id"] == "volatility_20d"
+    assert match["strategy_leg_example"] == {
+        "factor_id": "volatility_20d",
+        "weight": 1.0,
+        "ascending": True,
+    }
+    assert "factor_name" not in match["strategy_leg_example"]
+
+
+def test_list_saved_factors_returns_fuzzy_candidates_without_factor_name_hint(registry) -> None:
+    result = registry.run_tool(
+        "list_saved_factors",
+        {
+            "query": "volatility",
+            "include_builtins": True,
+            "include_usage_hints": True,
+            "limit": 5,
+        },
+        ToolContext(run_id="factor-query-fuzzy"),
+    )
+
+    assert result["status"] == "ok"
+    assert result["candidates"]
+    assert any(candidate["factor_id"] == "volatility_20d" for candidate in result["candidates"])
+    assert all(
+        "factor_name" not in candidate["strategy_leg_example"]
+        for candidate in result["candidates"]
+    )
+
+
 def test_unknown_factor_formula_requests_python_function_instead_of_fallback(registry) -> None:
     context = ToolContext(run_id="factor-unsupported", experiment_id="exp_test")
     spec = registry.run_tool(
