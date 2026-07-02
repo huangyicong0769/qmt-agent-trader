@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -41,6 +43,12 @@ class DataLake:
 
     def dataset_path(self, layer: str, name: str) -> Path:
         return self.root / layer / f"{name}.parquet"
+
+    def dataset_path_for_id(self, layer: str, dataset_id: str) -> Path:
+        return self.dataset_path(layer, dataset_name_from_id(dataset_id))
+
+    def register_dataset_id(self, dataset_id: str, layer: str, name: str) -> None:
+        self.register_parquet(dataset_view_name(layer, dataset_id), layer, name)
 
     def write_parquet(self, frame: pd.DataFrame, layer: str, name: str) -> Path:
         path = self.dataset_path(layer, name)
@@ -86,7 +94,26 @@ class DataLake:
         else:
             merged = frame.copy()
         path = self.write_parquet(merged, layer, name)
-        self.register_parquet(name, layer, name)
+        table_name = name if name.replace("_", "").isalnum() else name.replace("/", "_")
+        self.register_parquet(table_name, layer, name)
+        return path
+
+    def write_incremental_dataset(
+        self,
+        frame: pd.DataFrame,
+        *,
+        layer: str,
+        dataset_id: str,
+        name: str,
+        key_columns: list[str],
+    ) -> Path:
+        path = self.write_incremental_parquet(
+            frame,
+            layer,
+            name,
+            key_columns=key_columns,
+        )
+        self.register_dataset_id(dataset_id, layer, name)
         return path
 
     def read_parquet(self, layer: str, name: str) -> pd.DataFrame:
@@ -246,6 +273,46 @@ class DataLake:
         with self.connect() as con:
             con.execute(
                 """
+                CREATE TABLE IF NOT EXISTS data_fetch_state_v2 (
+                    source TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    api_name TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    param_hash TEXT NOT NULL,
+                    fields_hash TEXT NOT NULL,
+                    symbols_hash TEXT NOT NULL,
+                    fetched_at TIMESTAMP NOT NULL,
+                    coverage_start TEXT,
+                    coverage_end TEXT,
+                    row_count BIGINT NOT NULL,
+                    checksum TEXT,
+                    status TEXT NOT NULL,
+                    error TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS data_fetch_events_v2 (
+                    source TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    api_name TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    param_hash TEXT NOT NULL,
+                    fields_hash TEXT NOT NULL,
+                    symbols_hash TEXT NOT NULL,
+                    fetched_at TIMESTAMP NOT NULL,
+                    coverage_start TEXT,
+                    coverage_end TEXT,
+                    row_count BIGINT NOT NULL,
+                    checksum TEXT,
+                    status TEXT NOT NULL,
+                    error TEXT
+                )
+                """
+            )
+            con.execute(
+                """
                 CREATE TABLE IF NOT EXISTS data_fetch_state (
                     source TEXT NOT NULL,
                     dataset TEXT NOT NULL,
@@ -273,6 +340,70 @@ class DataLake:
                     error TEXT
                 )
                 """
+            )
+
+    def record_fetch_metadata(
+        self,
+        *,
+        source: str,
+        dataset_id: str,
+        api_name: str,
+        endpoint_id: str,
+        params: dict[str, Any],
+        fields: list[str],
+        symbols: list[str],
+        coverage_start: str | None,
+        coverage_end: str | None,
+        row_count: int,
+        checksum: str | None,
+        status: str,
+        error: str | None,
+    ) -> None:
+        self.ensure_fetch_tables()
+        fetched_at = datetime.now(tz=UTC).replace(tzinfo=None)
+        values = [
+            source,
+            dataset_id,
+            api_name,
+            endpoint_id,
+            _stable_hash(params),
+            _stable_hash(fields),
+            _stable_hash(symbols),
+            fetched_at,
+            coverage_start,
+            coverage_end,
+            row_count,
+            checksum,
+            status,
+            error,
+        ]
+        with self.connect() as con:
+            con.execute(
+                """
+                DELETE FROM data_fetch_state_v2
+                WHERE source = ?
+                  AND dataset_id = ?
+                  AND api_name = ?
+                  AND endpoint_id = ?
+                  AND param_hash = ?
+                  AND fields_hash = ?
+                  AND symbols_hash = ?
+                """,
+                values[:7],
+            )
+            con.execute(
+                """
+                INSERT INTO data_fetch_state_v2
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            con.execute(
+                """
+                INSERT INTO data_fetch_events_v2
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
             )
 
     def record_fetch_result(
@@ -398,3 +529,19 @@ def _normalized_symbols(symbols: list[str] | None) -> list[str]:
         if symbol not in normalized:
             normalized.append(symbol)
     return normalized
+
+
+def dataset_name_from_id(dataset_id: str) -> str:
+    parts = dataset_id.split(".")
+    if len(parts) == 1:
+        return dataset_id
+    return "/".join(parts)
+
+
+def dataset_view_name(layer: str, dataset_id: str) -> str:
+    return f"{layer}_{dataset_id.replace('.', '_').replace('/', '_')}"
+
+
+def _stable_hash(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=True, default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()

@@ -1,0 +1,860 @@
+endpoints:
+  - api_name: daily
+    dataset_id: tushare.daily
+    category: market
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=27
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      trade_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+    fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
+    default_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
+    key_columns: [ts_code, trade_date]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      trade_date: {kind: point, column: trade_date}
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: true
+    supports_marketwide_by_date: true
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
+    wide_table_targets: [daily_market]
+    raw_dataset_name: tushare/daily
+    raw_view_name: raw_tushare_daily
+
+  - api_name: daily_basic
+    dataset_id: tushare.daily_basic
+    category: market
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=32
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      trade_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+    fields: [ts_code, trade_date, close, turnover_rate, turnover_rate_f, volume_ratio, pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm, total_share, float_share, free_share, total_mv, circ_mv, limit_status]
+    default_fields: [ts_code, trade_date, close, turnover_rate, turnover_rate_f, volume_ratio, pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm, total_share, float_share, free_share, total_mv, circ_mv]
+    key_columns: [ts_code, trade_date]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      trade_date: {kind: point, column: trade_date}
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: true
+    supports_marketwide_by_date: true
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
+    wide_table_targets: [daily_market]
+    raw_dataset_name: tushare/daily_basic
+    raw_view_name: raw_tushare_daily_basic
+
+  - api_name: suspend_d
+    dataset_id: tushare.suspend_d
+    category: market
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=31
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      suspend_date: {type: date, required: false}
+      resume_date: {type: date, required: false}
+    fields: [ts_code, trade_date, suspend_timing, suspend_type]
+    default_fields: [ts_code, trade_date, suspend_type]
+    key_columns: [ts_code, trade_date]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      suspend_date: {kind: range_start}
+      resume_date: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: true
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
+    wide_table_targets: [daily_market]
+    raw_dataset_name: tushare/suspend_d
+    raw_view_name: raw_tushare_suspend_d
+
+  - api_name: stk_limit
+    dataset_id: tushare.stk_limit
+    category: market
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=183
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      trade_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+    fields: [ts_code, trade_date, up_limit, down_limit]
+    default_fields: [ts_code, trade_date, up_limit, down_limit]
+    key_columns: [ts_code, trade_date]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      trade_date: {kind: point, column: trade_date}
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: true
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
+    wide_table_targets: [daily_market]
+    raw_dataset_name: tushare/stk_limit
+    raw_view_name: raw_tushare_stk_limit
+
+  - api_name: fund_basic
+    dataset_id: tushare.fund_basic
+    category: fund
+    asset_types: [fund, etf]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=19
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      market: {type: string, required: false}
+      status: {type: string, required: false}
+    fields: [ts_code, name, management, custodian, fund_type, found_date, due_date, list_date, issue_date, delist_date, issue_amount, m_fee, c_fee, duration_year, p_value, min_amount, exp_return, benchmark, status, invest_type, type, trustee, purc_startdate, redm_startdate, market]
+    default_fields: [ts_code, name, management, custodian, fund_type, found_date, due_date, list_date, delist_date, status, market]
+    key_columns: [ts_code]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: list_date, fallback_visible_date_column: found_date}
+    wide_table_targets: [security_master]
+    raw_dataset_name: tushare/fund_basic
+    raw_view_name: raw_tushare_fund_basic
+
+  - api_name: fund_daily
+    dataset_id: tushare.fund_daily
+    category: fund
+    asset_types: [fund, etf]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=127
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      trade_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+    fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
+    default_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
+    key_columns: [ts_code, trade_date]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      trade_date: {kind: point, column: trade_date}
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: true
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
+    wide_table_targets: [daily_market]
+    raw_dataset_name: tushare/fund_daily
+    raw_view_name: raw_tushare_fund_daily
+
+  - api_name: index_basic
+    dataset_id: tushare.index_basic
+    category: index
+    asset_types: [index]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=94
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      symbol: {type: string, required: false}
+      name: {type: string, required: false}
+      market: {type: string, required: false}
+      publisher: {type: string, required: false}
+      category: {type: string, required: false}
+    fields: [ts_code, name, fullname, market, publisher, index_type, category, base_date, base_point, list_date, weight_rule, desc, exp_date]
+    default_fields: [ts_code, name, fullname, market, publisher, index_type, category, base_date, base_point, list_date, exp_date]
+    key_columns: [ts_code]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: list_date, fallback_visible_date_column: base_date}
+    wide_table_targets: [security_master]
+    raw_dataset_name: tushare/index_basic
+    raw_view_name: raw_tushare_index_basic
+
+  - api_name: index_daily
+    dataset_id: tushare.index_daily
+    category: index
+    asset_types: [index]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=95
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: true}
+      trade_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+    fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_chg, vol, amount]
+    default_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
+    key_columns: [ts_code, trade_date]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      trade_date: {kind: point, column: trade_date}
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: true
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
+    wide_table_targets: [index_daily]
+    raw_dataset_name: tushare/index_daily
+    raw_view_name: raw_tushare_index_daily
+
+  - api_name: stock_basic
+    dataset_id: tushare.stock_basic
+    category: security
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=25
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      name: {type: string, required: false}
+      exchange: {type: string, required: false}
+      market: {type: string, required: false}
+      is_hs: {type: string, required: false}
+      list_status: {type: string, required: false}
+      limit: {type: integer, required: false}
+      offset: {type: integer, required: false}
+    fields: [ts_code, symbol, name, area, industry, market, list_date, exchange, curr_type, list_status, delist_date, is_hs]
+    default_fields: [ts_code, symbol, name, area, industry, market, list_date, exchange, list_status, delist_date]
+    key_columns: [ts_code]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: limit_offset, limit_param: limit, offset_param: offset, page_size: 5000, max_pages: 20}
+    pit: {safe: true, visible_date_column: list_date, fallback_visible_date_column: null}
+    wide_table_targets: [security_master]
+    raw_dataset_name: tushare/stock_basic
+    raw_view_name: raw_tushare_stock_basic
+
+  - api_name: namechange
+    dataset_id: tushare.namechange
+    category: security
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=100
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+      limit: {type: integer, required: false}
+      offset: {type: integer, required: false}
+    fields: [ts_code, name, start_date, end_date, change_reason]
+    default_fields: [ts_code, name, start_date, end_date, change_reason]
+    key_columns: [ts_code, start_date, name]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: limit_offset, limit_param: limit, offset_param: offset, page_size: 5000, max_pages: 20}
+    pit: {safe: true, visible_date_column: start_date, fallback_visible_date_column: null}
+    wide_table_targets: [security_master, corporate_actions]
+    raw_dataset_name: tushare/namechange
+    raw_view_name: raw_tushare_namechange
+
+  - api_name: trade_cal
+    dataset_id: tushare.trade_cal
+    category: security
+    asset_types: [calendar]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=26
+    doc_status: OK
+    params:
+      exchange: {type: string, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+      is_open: {type: string, required: false}
+    fields: [exchange, cal_date, is_open, pretrade_date]
+    default_fields: [exchange, cal_date, is_open, pretrade_date]
+    key_columns: [exchange, cal_date]
+    symbol_param: null
+    symbol_column: null
+    date_params:
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: cal_date, fallback_visible_date_column: null}
+    wide_table_targets: [trade_calendar]
+    raw_dataset_name: tushare/trade_cal
+    raw_view_name: raw_tushare_trade_cal
+
+  - api_name: income
+    dataset_id: tushare.income
+    category: fundamental
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=33
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      ann_date: {type: date, required: false}
+      f_ann_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+      period: {type: date, required: false}
+      report_type: {type: string, required: false}
+      comp_type: {type: string, required: false}
+    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, basic_eps, diluted_eps, total_revenue, revenue, operate_profit, total_profit, n_income, n_income_attr_p, update_flag]
+    default_fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, basic_eps, diluted_eps, total_revenue, revenue, operate_profit, total_profit, n_income, n_income_attr_p, update_flag]
+    key_columns: [ts_code, end_date, ann_date, report_type]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+      period: {kind: period}
+    supports_symbol_range: true
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: f_ann_date, fallback_visible_date_column: ann_date}
+    wide_table_targets: [financial_reports_wide, financial_current_wide]
+    raw_dataset_name: tushare/income
+    raw_view_name: raw_tushare_income
+
+  - api_name: balancesheet
+    dataset_id: tushare.balancesheet
+    category: fundamental
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=36
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      ann_date: {type: date, required: false}
+      f_ann_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+      period: {type: date, required: false}
+      report_type: {type: string, required: false}
+      comp_type: {type: string, required: false}
+    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, total_assets, total_liab, total_hldr_eqy_exc_min_int, total_hldr_eqy_inc_min_int, update_flag]
+    default_fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, total_assets, total_liab, total_hldr_eqy_exc_min_int, total_hldr_eqy_inc_min_int, update_flag]
+    key_columns: [ts_code, end_date, ann_date, report_type]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+      period: {kind: period}
+    supports_symbol_range: true
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: f_ann_date, fallback_visible_date_column: ann_date}
+    wide_table_targets: [financial_reports_wide, financial_current_wide]
+    raw_dataset_name: tushare/balancesheet
+    raw_view_name: raw_tushare_balancesheet
+
+  - api_name: cashflow
+    dataset_id: tushare.cashflow
+    category: fundamental
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=44
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      ann_date: {type: date, required: false}
+      f_ann_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+      period: {type: date, required: false}
+      report_type: {type: string, required: false}
+      comp_type: {type: string, required: false}
+    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, net_profit, c_fr_sale_sg, n_cashflow_act, n_cashflow_inv_act, n_cash_flows_fnc_act, update_flag]
+    default_fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, net_profit, c_fr_sale_sg, n_cashflow_act, n_cashflow_inv_act, n_cash_flows_fnc_act, update_flag]
+    key_columns: [ts_code, end_date, ann_date, report_type]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+      period: {kind: period}
+    supports_symbol_range: true
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: f_ann_date, fallback_visible_date_column: ann_date}
+    wide_table_targets: [financial_reports_wide, financial_current_wide]
+    raw_dataset_name: tushare/cashflow
+    raw_view_name: raw_tushare_cashflow
+
+  - api_name: fina_indicator
+    dataset_id: tushare.fina_indicator
+    category: fundamental
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=79
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      ann_date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+      period: {type: date, required: false}
+    fields: [ts_code, ann_date, end_date, eps, dt_eps, total_revenue_ps, revenue_ps, capital_rese_ps, surplus_rese_ps, undist_profit_ps, extra_item, profit_dedt, gross_margin, current_ratio, quick_ratio, cash_ratio, ar_turn, ca_turn, fa_turn, assets_turn, roe, roe_dt, roa, roic, debt_to_assets, assets_to_eqt, update_flag]
+    default_fields: [ts_code, ann_date, end_date, eps, dt_eps, gross_margin, current_ratio, quick_ratio, cash_ratio, ar_turn, ca_turn, fa_turn, assets_turn, roe, roe_dt, roa, roic, debt_to_assets, update_flag]
+    key_columns: [ts_code, end_date, ann_date]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+      period: {kind: period}
+    supports_symbol_range: true
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: ann_date, fallback_visible_date_column: null}
+    wide_table_targets: [financial_reports_wide, financial_current_wide]
+    raw_dataset_name: tushare/fina_indicator
+    raw_view_name: raw_tushare_fina_indicator
+
+  - api_name: dividend
+    dataset_id: tushare.dividend
+    category: corporate_action
+    asset_types: [stock]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=103
+    doc_status: OK
+    params:
+      ts_code: {type: string, required: false}
+      ann_date: {type: date, required: false}
+      record_date: {type: date, required: false}
+      ex_date: {type: date, required: false}
+      imp_ann_date: {type: date, required: false}
+    fields: [ts_code, end_date, ann_date, div_proc, stk_div, stk_bo_rate, stk_co_rate, cash_div, cash_div_tax, record_date, ex_date, pay_date]
+    default_fields: [ts_code, end_date, ann_date, div_proc, stk_div, stk_bo_rate, stk_co_rate, cash_div, cash_div_tax, record_date, ex_date, pay_date]
+    key_columns: [ts_code, end_date, ann_date, div_proc]
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params:
+      ann_date: {kind: point, column: ann_date}
+      record_date: {kind: point, column: record_date}
+      ex_date: {kind: point, column: ex_date}
+      imp_ann_date: {kind: point, column: imp_ann_date}
+    supports_symbol_range: true
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: ann_date, fallback_visible_date_column: ex_date}
+    wide_table_targets: [corporate_actions]
+    raw_dataset_name: tushare/dividend
+    raw_view_name: raw_tushare_dividend
+
+  - api_name: cn_gdp
+    dataset_id: tushare.cn_gdp
+    category: macro
+    asset_types: [macro]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=227
+    doc_status: OK
+    params:
+      q: {type: string, required: false}
+      start_q: {type: string, required: false}
+      end_q: {type: string, required: false}
+      fields: {type: string, required: false}
+    fields: [quarter, gdp, gdp_yoy, pi, pi_yoy, si, si_yoy, ti, ti_yoy]
+    default_fields: [quarter, gdp, gdp_yoy, pi, pi_yoy, si, si_yoy, ti, ti_yoy]
+    key_columns: [quarter]
+    symbol_param: null
+    symbol_column: null
+    date_params:
+      q: {kind: point, column: quarter}
+      start_q: {kind: range_start}
+      end_q: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: quarter, fallback_visible_date_column: null}
+    wide_table_targets: [macro_series]
+    raw_dataset_name: tushare/cn_gdp
+    raw_view_name: raw_tushare_cn_gdp
+
+  - api_name: cn_cpi
+    dataset_id: tushare.cn_cpi
+    category: macro
+    asset_types: [macro]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=228
+    doc_status: OK
+    params:
+      m: {type: string, required: false}
+      start_m: {type: string, required: false}
+      end_m: {type: string, required: false}
+    fields: [month, nt_val, nt_yoy, nt_mom, nt_accu, town_val, town_yoy, town_mom, town_accu, cnt_val, cnt_yoy, cnt_mom, cnt_accu]
+    default_fields: [month, nt_val, nt_yoy, nt_mom, nt_accu, town_val, town_yoy, town_mom, town_accu, cnt_val, cnt_yoy, cnt_mom, cnt_accu]
+    key_columns: [month]
+    symbol_param: null
+    symbol_column: null
+    date_params:
+      m: {kind: point, column: month}
+      start_m: {kind: range_start}
+      end_m: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: month, fallback_visible_date_column: null}
+    wide_table_targets: [macro_series]
+    raw_dataset_name: tushare/cn_cpi
+    raw_view_name: raw_tushare_cn_cpi
+
+  - api_name: cn_ppi
+    dataset_id: tushare.cn_ppi
+    category: macro
+    asset_types: [macro]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=245
+    doc_status: OK
+    params:
+      m: {type: string, required: false}
+      start_m: {type: string, required: false}
+      end_m: {type: string, required: false}
+    fields: [month, ppi_yoy, ppi_mp_yoy, ppi_mp_qm_yoy, ppi_mp_rm_yoy, ppi_mp_p_yoy, ppi_cg_yoy, ppi_cg_f_yoy, ppi_cg_c_yoy, ppi_cg_adu_yoy, ppi_cg_dcg_yoy, ppi_mom, ppi_mp_mom, ppi_mp_qm_mom, ppi_mp_rm_mom, ppi_mp_p_mom, ppi_cg_mom, ppi_accu]
+    default_fields: [month, ppi_yoy, ppi_mom, ppi_accu]
+    key_columns: [month]
+    symbol_param: null
+    symbol_column: null
+    date_params:
+      m: {kind: point, column: month}
+      start_m: {kind: range_start}
+      end_m: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: month, fallback_visible_date_column: null}
+    wide_table_targets: [macro_series]
+    raw_dataset_name: tushare/cn_ppi
+    raw_view_name: raw_tushare_cn_ppi
+
+  - api_name: shibor
+    dataset_id: tushare.shibor
+    category: macro
+    asset_types: [macro]
+    implemented: true
+    doc_url: https://tushare.pro/document/2?doc_id=149
+    doc_status: OK
+    params:
+      date: {type: date, required: false}
+      start_date: {type: date, required: false}
+      end_date: {type: date, required: false}
+    fields: [date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y]
+    default_fields: [date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y]
+    key_columns: [date]
+    symbol_param: null
+    symbol_column: null
+    date_params:
+      date: {kind: point, column: date}
+      start_date: {kind: range_start}
+      end_date: {kind: range_end}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: true, visible_date_column: date, fallback_visible_date_column: null}
+    wide_table_targets: [macro_series]
+    raw_dataset_name: tushare/shibor
+    raw_view_name: raw_tushare_shibor
+
+  - api_name: adj_factor
+    dataset_id: tushare.adj_factor
+    category: corporate_action
+    asset_types: [stock]
+    implemented: false
+    doc_url: https://tushare.pro/document/2?doc_id=28
+    doc_status: OK
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: [corporate_actions]
+    raw_dataset_name: tushare/adj_factor
+    raw_view_name: raw_tushare_adj_factor
+
+  - api_name: moneyflow
+    dataset_id: tushare.moneyflow
+    category: market
+    asset_types: [stock]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/moneyflow
+    raw_view_name: raw_tushare_moneyflow
+
+  - api_name: margin
+    dataset_id: tushare.margin
+    category: market
+    asset_types: [stock]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/margin
+    raw_view_name: raw_tushare_margin
+
+  - api_name: top10_holders
+    dataset_id: tushare.top10_holders
+    category: fundamental
+    asset_types: [stock]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/top10_holders
+    raw_view_name: raw_tushare_top10_holders
+
+  - api_name: concept
+    dataset_id: tushare.concept
+    category: security
+    asset_types: [stock]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: null
+    symbol_column: null
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/concept
+    raw_view_name: raw_tushare_concept
+
+  - api_name: index_weight
+    dataset_id: tushare.index_weight
+    category: index
+    asset_types: [index]
+    implemented: false
+    doc_url: https://tushare.pro/document/2?doc_id=96
+    doc_status: OK
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: index_code
+    symbol_column: index_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/index_weight
+    raw_view_name: raw_tushare_index_weight
+
+  - api_name: index_dailybasic
+    dataset_id: tushare.index_dailybasic
+    category: index
+    asset_types: [index]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/index_dailybasic
+    raw_view_name: raw_tushare_index_dailybasic
+
+  - api_name: index_member
+    dataset_id: tushare.index_member
+    category: index
+    asset_types: [index]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: index_code
+    symbol_column: index_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/index_member
+    raw_view_name: raw_tushare_index_member
+
+  - api_name: fund_nav
+    dataset_id: tushare.fund_nav
+    category: fund
+    asset_types: [fund]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/fund_nav
+    raw_view_name: raw_tushare_fund_nav
+
+  - api_name: fund_portfolio
+    dataset_id: tushare.fund_portfolio
+    category: fund
+    asset_types: [fund]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/fund_portfolio
+    raw_view_name: raw_tushare_fund_portfolio
+
+  - api_name: repurchase
+    dataset_id: tushare.repurchase
+    category: corporate_action
+    asset_types: [stock]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: [corporate_actions]
+    raw_dataset_name: tushare/repurchase
+    raw_view_name: raw_tushare_repurchase
+
+  - api_name: share_float
+    dataset_id: tushare.share_float
+    category: corporate_action
+    asset_types: [stock]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: [corporate_actions]
+    raw_dataset_name: tushare/share_float
+    raw_view_name: raw_tushare_share_float
+
+  - api_name: stk_holdernumber
+    dataset_id: tushare.stk_holdernumber
+    category: fundamental
+    asset_types: [stock]
+    implemented: false
+    doc_status: DOC_UNAVAILABLE
+    params: {}
+    fields: []
+    default_fields: []
+    key_columns: []
+    symbol_param: ts_code
+    symbol_column: ts_code
+    date_params: {}
+    supports_symbol_range: false
+    supports_marketwide_by_date: false
+    pagination: {type: none}
+    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
+    wide_table_targets: []
+    raw_dataset_name: tushare/stk_holdernumber
+    raw_view_name: raw_tushare_stk_holdernumber

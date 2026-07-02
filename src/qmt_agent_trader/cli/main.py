@@ -38,7 +38,12 @@ from qmt_agent_trader.core.audit import AuditLogger
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.types import ApprovalStatus, RiskStatus
 from qmt_agent_trader.data.macro import MACRO_DATASETS
+from qmt_agent_trader.data.providers.base import FetchItem
+from qmt_agent_trader.data.providers.tushare.client import TushareClient as GenericTushareClient
+from qmt_agent_trader.data.providers.tushare.fetcher import TushareFetcher
+from qmt_agent_trader.data.providers.tushare.provider import TushareProvider
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.table_builder import DataTableBuilder
 from qmt_agent_trader.data.tushare_client import TushareClient
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
 from qmt_agent_trader.services.data_update_service import (
@@ -108,11 +113,34 @@ def _tushare_client() -> TushareClient:
     return TushareClient(token=token)
 
 
+def _generic_tushare_client() -> GenericTushareClient:
+    settings = _settings()
+    token = settings.tushare_token.get_secret_value() if settings.tushare_token else None
+    return GenericTushareClient(
+        token=token,
+        timeout_seconds=settings.remote_data_http_timeout_seconds,
+    )
+
+
 def _data_lake() -> DataLake:
     settings = _settings()
     return DataLake(
         root=settings.resolved_data_dir / "lake",
         duckdb_path=settings.resolved_data_dir / "qmt_agent_trader.duckdb",
+    )
+
+
+def _tushare_provider() -> TushareProvider:
+    settings = _settings()
+    lake = _data_lake()
+    return TushareProvider(
+        fetcher=TushareFetcher(
+            _generic_tushare_client(),
+            lake,
+            min_interval_seconds=settings.remote_data_min_interval_seconds,
+            retry_attempts=settings.remote_data_retry_attempts,
+            retry_backoff_seconds=settings.remote_data_retry_backoff_seconds,
+        )
     )
 
 
@@ -171,6 +199,92 @@ def data_update(
         include_basics=not skip_basics,
     )
     print_json(result.as_dict())
+
+
+@data_app.command("capabilities")
+def data_capabilities(
+    category: Annotated[str | None, typer.Option("--category")] = None,
+    asset_type: Annotated[str | None, typer.Option("--asset-type")] = None,
+) -> None:
+    """List registry-driven Tushare endpoint capabilities."""
+    capability = TushareProvider().list_capabilities(category=category, asset_type=asset_type)
+    print_json({"status": "OK", "source": capability.source, "endpoints": capability.endpoints})
+
+
+@data_app.command("plan-fetch")
+def data_plan_fetch(
+    api: Annotated[str, typer.Option("--api")],
+    symbols: Annotated[str | None, typer.Option("--symbols")] = None,
+    fields: Annotated[str | None, typer.Option("--fields")] = None,
+    from_date: Annotated[str | None, typer.Option("--from")] = None,
+    to_date: Annotated[str | None, typer.Option("--to")] = None,
+    trade_date: Annotated[str | None, typer.Option("--trade-date")] = None,
+) -> None:
+    """Plan a registry-validated Tushare fetch without contacting Tushare."""
+    item = FetchItem(
+        api_name=api,
+        symbols=_csv_values(symbols),
+        fields=_csv_values(fields) or None,
+        start_date=from_date,
+        end_date=to_date,
+        trade_date=trade_date,
+    )
+    print_json(_tushare_provider().plan_fetch([item]).as_dict())
+
+
+@data_app.command("fetch")
+def data_fetch(
+    plan: Annotated[Path | None, typer.Option("--plan")] = None,
+    api: Annotated[str | None, typer.Option("--api")] = None,
+    symbols: Annotated[str | None, typer.Option("--symbols")] = None,
+    fields: Annotated[str | None, typer.Option("--fields")] = None,
+    from_date: Annotated[str | None, typer.Option("--from")] = None,
+    to_date: Annotated[str | None, typer.Option("--to")] = None,
+    execute_plan: Annotated[bool, typer.Option("--execute-plan")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Execute a registry-validated Tushare fetch plan."""
+    provider = _tushare_provider()
+    if plan is not None:
+        payload = json.loads(plan.read_text(encoding="utf-8"))
+        items = [
+            FetchItem(
+                api_name=str(item["api_name"]),
+                symbols=[str(value) for value in item.get("symbols", [])],
+                fields=[str(value) for value in item.get("fields", [])] or None,
+                start_date=item.get("start_date"),
+                end_date=item.get("end_date"),
+                trade_date=item.get("trade_date"),
+                params=dict(item.get("params", {})),
+            )
+            for item in payload.get("items", [])
+        ]
+    else:
+        if api is None:
+            raise typer.BadParameter("--api is required when --plan is not provided")
+        items = [
+            FetchItem(
+                api_name=api,
+                symbols=_csv_values(symbols),
+                fields=_csv_values(fields) or None,
+                start_date=from_date,
+                end_date=to_date,
+            )
+        ]
+    fetch_plan = provider.plan_fetch(items)
+    result = provider.run_fetch(fetch_plan, execute_plan=execute_plan, dry_run=dry_run)
+    print_json({**result.as_dict(), "plan": fetch_plan.as_dict()})
+
+
+@data_app.command("build-table")
+def data_build_table(
+    table: Annotated[str, typer.Option("--table")],
+    snapshot_as_of_date: Annotated[
+        str | None, typer.Option("--snapshot-as-of-date")
+    ] = None,
+) -> None:
+    """Build one allowed silver table from registry-driven raw datasets."""
+    print_json(DataTableBuilder(_data_lake()).build(table, snapshot_as_of_date=snapshot_as_of_date))
 
 
 @data_app.command("update-fundamentals")
@@ -362,6 +476,76 @@ def data_migrate_legacy(
             "migrations": [item.as_dict() for item in migrations],
         }
     )
+
+
+@data_app.command("migrate-new-layout")
+def data_migrate_new_layout(
+    keep_legacy: Annotated[bool, typer.Option("--keep-legacy")] = False,
+) -> None:
+    """Migrate stable old raw Tushare files into raw/tushare/*.parquet layout."""
+    lake = _data_lake()
+    mapping = {
+        "tushare_daily": ("tushare/daily", ["ts_code", "trade_date"]),
+        "tushare_daily_basic": ("tushare/daily_basic", ["ts_code", "trade_date"]),
+        "tushare_fund_daily": ("tushare/fund_daily", ["ts_code", "trade_date"]),
+        "tushare_stock_basic": ("tushare/stock_basic", ["ts_code"]),
+        "tushare_etf_basic": ("tushare/fund_basic", ["ts_code"]),
+        "tushare_index_basic": ("tushare/index_basic", ["ts_code"]),
+        "tushare_index_daily": ("tushare/index_daily", ["ts_code", "trade_date"]),
+        "tushare_trade_calendar": ("tushare/trade_cal", ["exchange", "cal_date"]),
+        "tushare_namechange": ("tushare/namechange", ["ts_code", "start_date", "name"]),
+        "tushare_income": ("tushare/income", ["ts_code", "end_date", "ann_date", "report_type"]),
+        "tushare_balancesheet": (
+            "tushare/balancesheet",
+            ["ts_code", "end_date", "ann_date", "report_type"],
+        ),
+        "tushare_cashflow": (
+            "tushare/cashflow",
+            ["ts_code", "end_date", "ann_date", "report_type"],
+        ),
+        "tushare_fina_indicator": (
+            "tushare/fina_indicator",
+            ["ts_code", "end_date", "ann_date"],
+        ),
+        "tushare_dividend": ("tushare/dividend", ["ts_code", "end_date", "ann_date", "div_proc"]),
+        "tushare_macro_cn_gdp": ("tushare/cn_gdp", ["quarter"]),
+        "tushare_macro_cn_cpi": ("tushare/cn_cpi", ["month"]),
+        "tushare_macro_cn_ppi": ("tushare/cn_ppi", ["month"]),
+        "tushare_macro_shibor": ("tushare/shibor", ["date"]),
+        "tushare_suspend": ("tushare/suspend_d", ["ts_code", "trade_date"]),
+        "tushare_stk_limit": ("tushare/stk_limit", ["ts_code", "trade_date"]),
+    }
+    migrations: list[dict[str, object]] = []
+    for old_name, (new_name, keys) in mapping.items():
+        old_path = lake.dataset_path("raw", old_name)
+        if not old_path.exists():
+            continue
+        frame = lake.read_parquet("raw", old_name)
+        missing = [key for key in keys if key not in frame.columns]
+        if missing:
+            migrations.append(
+                {
+                    "old_name": old_name,
+                    "new_name": new_name,
+                    "status": "SKIPPED",
+                    "missing_key_columns": missing,
+                }
+            )
+            continue
+        path = lake.write_incremental_parquet(frame, "raw", new_name, key_columns=keys)
+        if not keep_legacy:
+            old_path.unlink()
+        migrations.append(
+            {
+                "old_name": old_name,
+                "new_name": new_name,
+                "status": "migrated",
+                "path": str(path),
+                "rows": len(frame),
+                "legacy_removed": not keep_legacy,
+            }
+        )
+    print_json({"status": "ok", "migrations": migrations})
 
 
 @data_app.command("qmt-sync")

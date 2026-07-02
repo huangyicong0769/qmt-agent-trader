@@ -13,7 +13,13 @@ from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.macro import MACRO_DATASETS
+from qmt_agent_trader.data.providers.base import FetchItem
+from qmt_agent_trader.data.providers.tushare.client import TushareClient as GenericTushareClient
+from qmt_agent_trader.data.providers.tushare.fetcher import TushareFetcher
+from qmt_agent_trader.data.providers.tushare.planner import TusharePlannerConfig
+from qmt_agent_trader.data.providers.tushare.provider import TushareProvider
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.table_builder import ALLOWED_SILVER_TABLES, DataTableBuilder
 from qmt_agent_trader.data.tushare_client import TushareClient
 from qmt_agent_trader.services.data_update_service import (
     FINANCIAL_TABLES,
@@ -68,6 +74,39 @@ def _build_client(settings: Settings) -> TushareClient:
         token=token,
         timeout_seconds=settings.remote_data_http_timeout_seconds,
     )
+
+
+def _build_generic_client(settings: Settings) -> GenericTushareClient:
+    client_factory = _client_factory_var.get() or _client_factory
+    if client_factory is not None:
+        client = client_factory()
+        if isinstance(client, GenericTushareClient):
+            return client
+        return _ClientAdapter(client)
+    token = settings.tushare_token.get_secret_value() if settings.tushare_token else None
+    return GenericTushareClient(
+        token=token,
+        timeout_seconds=settings.remote_data_http_timeout_seconds,
+    )
+
+
+class _ClientAdapter(GenericTushareClient):
+    def __init__(self, legacy_client: TushareClient) -> None:
+        super().__init__(token=legacy_client.token, timeout_seconds=legacy_client.timeout_seconds)
+        self.legacy_client = legacy_client
+
+    def query(
+        self,
+        api_name: str,
+        params: dict[str, Any],
+        fields: list[str] | None = None,
+    ) -> Any:
+        from qmt_agent_trader.data.tushare_client import TushareRequest
+
+        field_text = ",".join(fields) if fields is not None else None
+        return self.legacy_client.execute(
+            TushareRequest(api_name=api_name, params=params, fields=field_text)
+        )
 
 
 def _with_deps(
@@ -1565,6 +1604,271 @@ def _effective_start_from_local_basics(
     return start, metadata
 
 
+def _new_tushare_provider(lake: DataLake, settings: Settings) -> TushareProvider:
+    fetcher = TushareFetcher(
+        _build_generic_client(settings),
+        lake,
+        min_interval_seconds=settings.remote_data_min_interval_seconds,
+        retry_attempts=settings.remote_data_retry_attempts,
+        retry_backoff_seconds=settings.remote_data_retry_backoff_seconds,
+    )
+    config = TusharePlannerConfig(
+        symbol_fanout_threshold=30,
+        autonomous_request_budget=_AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS,
+        manual_request_budget=500,
+        max_days_per_batch=settings.remote_data_max_days_per_call,
+    )
+    return TushareProvider(fetcher=fetcher, planner_config=config)
+
+
+def _list_tushare_capabilities(
+    input_data: dict[str, Any],
+    _context: ToolContext,
+) -> dict[str, Any]:
+    provider = TushareProvider()
+    capability = provider.list_capabilities(
+        category=_optional_str(input_data.get("category")),
+        asset_type=_optional_str(input_data.get("asset_type")),
+    )
+    return {"status": "OK", "source": capability.source, "endpoints": capability.endpoints}
+
+
+def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    try:
+        items = _parse_fetch_items(input_data)
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+    provider = TushareProvider(
+        planner_config=TusharePlannerConfig(
+            autonomous_request_budget=_AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS
+        )
+    )
+    plan = provider.plan_fetch(
+        items,
+        requested_by_llm=context.requested_by_llm,
+        storage_mode=str(input_data.get("storage_mode", "persistent")),
+    )
+    payload = plan.as_dict()
+    if plan.items:
+        payload["strategy"] = plan.items[0].get("strategy")
+        payload["batches"] = [
+            batch for item in plan.items for batch in item.get("batches", [])
+        ]
+        payload["target_tables"] = [
+            target for item in plan.items for target in item.get("target_tables", [])
+        ]
+        payload["wide_table_targets"] = sorted(
+            {
+                target
+                for item in plan.items
+                for target in item.get("wide_table_targets", [])
+            }
+        )
+        payload["coverage_status"] = "UNKNOWN"
+    return payload
+
+
+def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+    settings = _get_settings()
+    execute_plan = bool(input_data.get("execute_plan", False))
+    dry_run = bool(input_data.get("dry_run", False))
+    if not dry_run and not execute_plan:
+        return {
+            "status": "INVALID_REQUEST",
+            "message": "run_tushare_fetch requires execute_plan=true for live execution",
+        }
+    if not dry_run and settings.tushare_token is None and _client_factory is None:
+        return {
+            "status": "NOT_CONFIGURED",
+            "message": "TUSHARE_TOKEN is required for live Tushare fetch",
+        }
+    try:
+        items = _parse_fetch_items(input_data)
+    except ValueError as exc:
+        return {"status": "INVALID_REQUEST", "message": str(exc)}
+    provider = _new_tushare_provider(lake, settings)
+    plan = provider.plan_fetch(
+        items,
+        requested_by_llm=context.requested_by_llm,
+        storage_mode=str(input_data.get("storage_mode", "persistent")),
+    )
+    if plan.status != "planned":
+        return plan.as_dict()
+    result = provider.run_fetch(plan, execute_plan=execute_plan, dry_run=dry_run).as_dict()
+    result["plan"] = plan.as_dict()
+    result["dry_run"] = dry_run
+    result["execute_plan"] = execute_plan
+    return result
+
+
+def _build_data_table(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
+    lake = _get_lake()
+    if lake is None:
+        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+    table = str(input_data.get("table", ""))
+    snapshot = _optional_str(input_data.get("snapshot_as_of_date"))
+    return DataTableBuilder(lake).build(table, snapshot_as_of_date=snapshot)
+
+
+def _parse_fetch_items(input_data: dict[str, Any]) -> list[FetchItem]:
+    raw_items = input_data.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("items must be a non-empty list")
+    items: list[FetchItem] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError("each fetch item must be an object")
+        api_name = raw.get("api_name")
+        if not isinstance(api_name, str) or not api_name:
+            raise ValueError("each fetch item requires api_name")
+        symbols = _normalize_symbols(raw.get("symbols"))
+        fields = _normalize_fields(raw.get("fields"))
+        raw_params = raw.get("params")
+        params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+        items.append(
+            FetchItem(
+                api_name=api_name,
+                symbols=symbols,
+                fields=fields,
+                trade_date=_optional_str(raw.get("trade_date")),
+                start_date=_optional_str(raw.get("start_date")),
+                end_date=_optional_str(raw.get("end_date")),
+                params=params,
+            )
+        )
+    return items
+
+
+def _normalize_fields(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise ValueError("fields must be a list or comma-separated string")
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+_FETCH_ITEMS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "api_name": {"type": "string"},
+            "symbols": {"type": "array", "items": {"type": "string"}},
+            "fields": {"type": "array", "items": {"type": "string"}},
+            "trade_date": {"type": "string"},
+            "start_date": {"type": "string"},
+            "end_date": {"type": "string"},
+            "params": {"type": "object", "additionalProperties": True},
+        },
+        "required": ["api_name"],
+        "additionalProperties": False,
+    },
+}
+
+
+list_tushare_capabilities_tool: AgentTool = tool(
+    ToolSpec(
+        name="list_tushare_capabilities",
+        description="列出 registry 中可用的 Tushare endpoint、字段、参数、主键、分页和 PIT 规则。",
+        permission=PermissionLevel.READ_ONLY,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {"type": "string"},
+                "asset_type": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        deterministic=True,
+    ),
+    fn=_list_tushare_capabilities,
+)
+
+
+plan_tushare_fetch_tool: AgentTool = tool(
+    ToolSpec(
+        name="plan_tushare_fetch",
+        description="校验结构化 Tushare fetch spec，并生成 planner-controlled 抓取计划。",
+        permission=PermissionLevel.READ_ONLY,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "items": _FETCH_ITEMS_SCHEMA,
+                "storage_mode": {"type": "string"},
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        deterministic=True,
+    ),
+    fn=_plan_tushare_fetch,
+)
+
+
+run_tushare_fetch_tool: AgentTool = tool(
+    ToolSpec(
+        name="run_tushare_fetch",
+        description=(
+            "执行已规划的 Tushare fetch。dry_run=true 不访问远端；真实执行必须显式 "
+            "execute_plan=true，并写入 registry 指定的新 raw layout。"
+        ),
+        permission=PermissionLevel.RESEARCH_WRITE,
+        side_effect_level="write_formal",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "items": _FETCH_ITEMS_SCHEMA,
+                "storage_mode": {"type": "string"},
+                "dry_run": {"type": "boolean"},
+                "execute_plan": {"type": "boolean"},
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        deterministic=False,
+        timeout_seconds=300,
+    ),
+    fn=_run_tushare_fetch,
+)
+
+
+build_data_table_tool: AgentTool = tool(
+    ToolSpec(
+        name="build_data_table",
+        description="从新 raw layout 构建允许的 silver 表，不创建 research_daily_wide。",
+        permission=PermissionLevel.RESEARCH_WRITE,
+        side_effect_level="write_formal",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "table": {"type": "string", "enum": sorted(ALLOWED_SILVER_TABLES)},
+                "snapshot_as_of_date": {"type": "string"},
+            },
+            "required": ["table"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        deterministic=False,
+    ),
+    fn=_build_data_table,
+)
+
+
 run_remote_data_update_tool: AgentTool = tool(
     ToolSpec(
         name="run_remote_data_update",
@@ -1680,32 +1984,27 @@ run_macro_data_update_tool: AgentTool = tool(
 def build_remote_data_tools(deps: AgentToolDependencies) -> list[AgentTool]:
     return [
         tool(
-            run_remote_data_update_tool.spec,
+            list_tushare_capabilities_tool.spec,
             fn=lambda input_data, context: _with_deps(
-                deps, _run_remote_data_update, input_data, context
-            ),
-            timeout_seconds_for_call=lambda input_data, context: _timeout_with_deps(
-                deps,
-                input_data,
-                context,
+                deps, _list_tushare_capabilities, input_data, context
             ),
         ),
         tool(
-            run_fundamental_data_update_tool.spec,
+            plan_tushare_fetch_tool.spec,
             fn=lambda input_data, context: _with_deps(
-                deps,
-                _run_fundamental_data_update,
-                input_data,
-                context,
+                deps, _plan_tushare_fetch, input_data, context
             ),
         ),
         tool(
-            run_macro_data_update_tool.spec,
+            run_tushare_fetch_tool.spec,
             fn=lambda input_data, context: _with_deps(
-                deps,
-                _run_macro_data_update,
-                input_data,
-                context,
+                deps, _run_tushare_fetch, input_data, context
+            ),
+        ),
+        tool(
+            build_data_table_tool.spec,
+            fn=lambda input_data, context: _with_deps(
+                deps, _build_data_table, input_data, context
             ),
         ),
     ]

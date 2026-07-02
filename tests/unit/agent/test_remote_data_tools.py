@@ -159,7 +159,7 @@ def test_run_remote_data_update_blocks_large_autonomous_live_plan(tmp_path) -> N
     assert result["next_repair_tool"] == "run_remote_data_update"
 
 
-def test_build_remote_data_tools_exposes_agent_fundamental_and_macro_updates(tmp_path) -> None:
+def test_build_remote_data_tools_exposes_registry_driven_tushare_surface(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     from qmt_agent_trader.agent.audit import AuditLogger
     from qmt_agent_trader.agent.experiment_store import ExperimentStore
@@ -177,11 +177,12 @@ def test_build_remote_data_tools_exposes_agent_fundamental_and_macro_updates(tmp
     )
     names = {item.spec.name for item in tools}
 
-    assert {
-        "run_remote_data_update",
-        "run_fundamental_data_update",
-        "run_macro_data_update",
-    }.issubset(names)
+    assert names == {
+        "list_tushare_capabilities",
+        "plan_tushare_fetch",
+        "run_tushare_fetch",
+        "build_data_table",
+    }
 
 
 def test_run_fundamental_data_update_dry_run_reports_repair_contract(tmp_path) -> None:
@@ -808,7 +809,7 @@ def test_run_remote_data_update_dynamic_timeout_scales_with_estimated_requests(
     assert capped_timeout_seconds == 3600
 
 
-def test_build_remote_data_tools_dynamic_timeout_uses_injected_dependencies(tmp_path) -> None:
+def test_build_remote_data_tools_no_longer_registers_legacy_update_timeout_tool(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
         pd.DataFrame(
@@ -819,20 +820,15 @@ def test_build_remote_data_tools_dynamic_timeout_uses_injected_dependencies(tmp_
     )
     settings = Settings(project_root=tmp_path, tushare_token=None)
     deps = type("Deps", (), {"data_lake": lake, "settings": settings})()
-    built_tool = build_remote_data_tools(deps)[0]
+    names = [tool.spec.name for tool in build_remote_data_tools(deps)]
 
-    resolver = built_tool.timeout_seconds_for_call  # type: ignore[attr-defined]
-    timeout_seconds = resolver(
-        {
-            "source": "tushare",
-            "start_date": "20240102",
-            "end_date": "20240122",
-            "symbols": ["000001.SZ", "000002.SZ"],
-        },
-        ToolContext(run_id="r-built-timeout"),
-    )
-
-    assert timeout_seconds > 300
+    assert "run_remote_data_update" not in names
+    assert names == [
+        "list_tushare_capabilities",
+        "plan_tushare_fetch",
+        "run_tushare_fetch",
+        "build_data_table",
+    ]
 
 
 def test_run_remote_data_update_reports_partial_coverage_after_live_fetch(tmp_path) -> None:
