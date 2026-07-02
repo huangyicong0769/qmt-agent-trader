@@ -200,6 +200,22 @@ def test_build_data_table_keeps_macro_long_and_financial_pit(tmp_path) -> None:
         key_columns=["ts_code", "end_date", "ann_date", "report_type"],
     )
     lake.write_incremental_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "ann_date": "20240401",
+                    "f_ann_date": "20240403",
+                    "end_date": "20231231",
+                    "total_assets": 100.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/balancesheet",
+        key_columns=["ts_code", "end_date", "ann_date"],
+    )
+    lake.write_incremental_parquet(
         pd.DataFrame([{"month": "202401", "nt_val": 102.0, "nt_yoy": 1.2}]),
         "raw",
         "tushare/cn_cpi",
@@ -212,7 +228,11 @@ def test_build_data_table_keeps_macro_long_and_financial_pit(tmp_path) -> None:
     assert reports["status"] == "built"
     assert macro["status"] == "built"
     financial = lake.read_parquet("silver", "financial_reports_wide")
+    assert len(financial) == 1
     assert financial.iloc[0]["visible_date"] == "20240402"
+    assert financial.iloc[0]["total_revenue"] == 10.0
+    assert financial.iloc[0]["total_assets"] == 100.0
+    assert financial.iloc[0]["source_flags"] == "tushare.balancesheet,tushare.income"
     macro_frame = lake.read_parquet("silver", "macro_series")
     assert set(macro_frame["macro_id"]) == {"cn_cpi.nt_val", "cn_cpi.nt_yoy"}
     assert "ts_code" not in macro_frame.columns

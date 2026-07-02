@@ -9,13 +9,13 @@ import pandas as pd
 
 from qmt_agent_trader.data.storage import DataLake
 
-DAILY_BASIC_DATASET = "tushare_daily_basic"
+DAILY_BASIC_DATASET = "tushare/daily_basic"
 FINANCIAL_DATASETS = {
-    "income": "tushare_income",
-    "balancesheet": "tushare_balancesheet",
-    "cashflow": "tushare_cashflow",
-    "fina_indicator": "tushare_fina_indicator",
-    "dividend": "tushare_dividend",
+    "income": "tushare/income",
+    "balancesheet": "tushare/balancesheet",
+    "cashflow": "tushare/cashflow",
+    "fina_indicator": "tushare/fina_indicator",
+    "dividend": "tushare/dividend",
 }
 
 DEFAULT_FUNDAMENTAL_FIELDS = [

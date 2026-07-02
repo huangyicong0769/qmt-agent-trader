@@ -168,22 +168,32 @@ class DataTableBuilder:
 
     def _build_financial_reports_wide(self, *, snapshot_as_of_date: str | None) -> pd.DataFrame:
         _ = snapshot_as_of_date
-        frames: list[pd.DataFrame] = []
+        merged: pd.DataFrame | None = None
+        source_flags: dict[tuple[str, str], set[str]] = {}
         for name in ("income", "balancesheet", "cashflow", "fina_indicator"):
             frame = _read(self.lake, f"tushare/{name}")
             if frame.empty:
                 continue
-            frame = frame.copy()
-            if "end_date" in frame.columns:
-                frame["report_period"] = frame["end_date"]
-            if "f_ann_date" in frame.columns:
-                frame["visible_date"] = frame["f_ann_date"].fillna(frame.get("ann_date"))
-            elif "ann_date" in frame.columns:
-                frame["visible_date"] = frame["ann_date"]
-            frame["source_flags"] = f"tushare.{name}"
-            frame["pit_safe"] = True
-            frames.append(frame)
-        return _concat(frames, ["ts_code", "report_period", "ann_date", "source_flags"])
+            normalized = _normalize_financial_report_frame(frame, source_name=name)
+            if normalized.empty:
+                continue
+            for row in normalized[["ts_code", "report_period"]].itertuples(index=False):
+                source_flags.setdefault((str(row.ts_code), str(row.report_period)), set()).add(
+                    f"tushare.{name}"
+                )
+            merged = (
+                normalized
+                if merged is None
+                else _merge_financial_report_sources(merged, normalized)
+            )
+        if merged is None or merged.empty:
+            return pd.DataFrame(columns=["ts_code", "report_period"])
+        merged["source_flags"] = [
+            ",".join(sorted(source_flags.get((str(row.ts_code), str(row.report_period)), set())))
+            for row in merged[["ts_code", "report_period"]].itertuples(index=False)
+        ]
+        merged["pit_safe"] = merged["visible_date"].notna()
+        return merged.sort_values(["ts_code", "report_period"]).reset_index(drop=True)
 
     def _build_financial_current_wide(self, *, snapshot_as_of_date: str | None) -> pd.DataFrame:
         as_of = snapshot_as_of_date or datetime.now(tz=UTC).strftime("%Y%m%d")
@@ -333,13 +343,72 @@ def _corporate_action_payload(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[columns]
 
 
+def _normalize_financial_report_frame(frame: pd.DataFrame, *, source_name: str) -> pd.DataFrame:
+    data = frame.copy()
+    if "_empty" in data.columns:
+        data = data.drop(columns=["_empty"])
+    if data.empty or "ts_code" not in data.columns or "end_date" not in data.columns:
+        return pd.DataFrame()
+    data["report_period"] = data["end_date"]
+    if "f_ann_date" in data.columns:
+        data["visible_date"] = data["f_ann_date"].fillna(data.get("ann_date"))
+    elif "ann_date" in data.columns:
+        data["visible_date"] = data["ann_date"]
+    else:
+        data["visible_date"] = None
+    if "ann_date" not in data.columns:
+        data["ann_date"] = None
+    if "report_type" not in data.columns:
+        data["report_type"] = None
+    data["source_" + source_name] = True
+    key_columns = ["ts_code", "report_period"]
+    data = (
+        data.sort_values([*key_columns, "visible_date", "ann_date"], na_position="first")
+        .drop_duplicates(key_columns, keep="last")
+        .reset_index(drop=True)
+    )
+    return data
+
+
+def _merge_financial_report_sources(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+    merged = left.merge(
+        right,
+        on=["ts_code", "report_period"],
+        how="outer",
+        suffixes=("", "_right"),
+    )
+    for column in ("ann_date", "visible_date", "report_type"):
+        right_column = f"{column}_right"
+        if right_column in merged.columns:
+            if column in merged.columns:
+                merged[column] = merged[column].combine_first(merged[right_column])
+            else:
+                merged[column] = merged[right_column]
+            merged = merged.drop(columns=[right_column])
+    duplicate_columns = [
+        column
+        for column in merged.columns
+        if column.endswith("_right") and column.removesuffix("_right") in merged.columns
+    ]
+    if duplicate_columns:
+        merged = merged.drop(columns=duplicate_columns)
+    rename_columns = {
+        column: column.removesuffix("_right")
+        for column in merged.columns
+        if column.endswith("_right") and column.removesuffix("_right") not in merged.columns
+    }
+    if rename_columns:
+        merged = merged.rename(columns=rename_columns)
+    return merged
+
+
 def _silver_keys(table: str) -> list[str]:
     return {
         "security_master": ["ts_code"],
         "trade_calendar": ["exchange", "cal_date"],
         "daily_market": ["ts_code", "trade_date"],
         "index_daily": ["ts_code", "trade_date"],
-        "financial_reports_wide": ["ts_code", "report_period", "ann_date", "source_flags"],
+        "financial_reports_wide": ["ts_code", "report_period"],
         "financial_current_wide": ["ts_code"],
         "corporate_actions": ["ts_code", "action_type", "source_api", "source_event_key"],
         "macro_series": ["macro_id", "period"],

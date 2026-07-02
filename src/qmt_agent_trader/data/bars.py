@@ -112,7 +112,7 @@ def load_daily_bars(
     raw_frames = [
         lake.read_parquet_filtered(
             "raw",
-            "tushare_daily",
+            "tushare/daily",
             columns=daily_columns,
             start=start,
             end=end,
@@ -120,7 +120,7 @@ def load_daily_bars(
         ),
         lake.read_parquet_filtered(
             "raw",
-            "tushare_fund_daily",
+            "tushare/fund_daily",
             columns=daily_columns,
             start=start,
             end=end,
@@ -147,7 +147,7 @@ def load_daily_bars(
         bars,
         suspend=lake.read_parquet_filtered(
             "raw",
-            "tushare_suspend",
+            "tushare/suspend_d",
             columns=["ts_code", "trade_date", "suspend_type"],
             start=start,
             end=end,
@@ -155,7 +155,7 @@ def load_daily_bars(
         ),
         stk_limit=lake.read_parquet_filtered(
             "raw",
-            "tushare_stk_limit",
+            "tushare/stk_limit",
             columns=["ts_code", "trade_date", "up_limit", "down_limit"],
             start=start,
             end=end,
@@ -164,7 +164,7 @@ def load_daily_bars(
         namechange=_filter_namechange_overlap(
             lake.read_parquet_filtered(
                 "raw",
-                "tushare_namechange",
+                "tushare/namechange",
                 columns=["ts_code", "name", "start_date", "end_date"],
                 symbols=symbols,
             ),
@@ -173,7 +173,7 @@ def load_daily_bars(
         ),
         stock_basic=lake.read_parquet_filtered(
             "raw",
-            "tushare_stock_basic",
+            "tushare/stock_basic",
             columns=["ts_code", "name"],
             symbols=symbols,
         ),
