@@ -20,7 +20,7 @@ def test_parse_json_object_accepts_fenced_text() -> None:
     assert parsed == {"a": 1}
 
 
-def test_neutralizes_overclaimed_language_when_failed_evidence_exists() -> None:
+def test_neutralizer_preserves_raw_language_when_failed_evidence_exists() -> None:
     content = "这是最佳候选，显著有效，强烈推荐；收益最高且具有稳健性。"
 
     neutralized = _neutralize_overclaimed_failed_evidence(
@@ -28,12 +28,7 @@ def test_neutralizes_overclaimed_language_when_failed_evidence_exists() -> None:
         has_failed_evidence=True,
     )
 
-    assert "最佳" not in neutralized
-    assert "显著有效" not in neutralized
-    assert "强烈推荐" not in neutralized
-    assert "收益最高" not in neutralized
-    assert "具有稳健性" not in neutralized
-    assert "相对数值较高" in neutralized
+    assert neutralized == content
 
 
 class _Function:
@@ -189,8 +184,8 @@ def test_run_tool_loop_forces_final_answer_after_research_report() -> None:
     ]
     assert any("do not emit tool-call markup" in content for content in system_messages)
     assert any("pseudo read_file requests" in content for content in system_messages)
-    assert any("FAIL/BLOCKED/NOT_COMPUTED" in content for content in system_messages)
-    assert any("repair-required candidates" in content for content in system_messages)
+    assert not any("FAIL/BLOCKED/NOT_COMPUTED" in content for content in system_messages)
+    assert not any("repair-required candidates" in content for content in system_messages)
 
 
 class _FakeEmptyFinalReportCompletions:

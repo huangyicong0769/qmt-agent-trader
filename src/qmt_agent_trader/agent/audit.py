@@ -24,6 +24,15 @@ class AuditEntry:
     status: str  # "ok" | "permission_denied" | "error"
     error_message: str | None
     duration_ms: int
+    execution_status: str = "UNKNOWN"
+    domain_status: str = "UNKNOWN"
+    evidence_status: str = "UNKNOWN"
+    recommendation_status: str = "UNKNOWN"
+    raw_status: str | None = None
+    diagnostic_status: str | None = None
+    blockers: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    next_repair_tool: str | None = None
     output_data: dict[str, Any] | None = None
 
 
@@ -47,6 +56,15 @@ class AuditLogger:
         status: str = "ok",
         error_message: str | None = None,
         duration_ms: int = 0,
+        execution_status: str = "UNKNOWN",
+        domain_status: str = "UNKNOWN",
+        evidence_status: str = "UNKNOWN",
+        recommendation_status: str = "UNKNOWN",
+        raw_status: str | None = None,
+        diagnostic_status: str | None = None,
+        blockers: list[str] | None = None,
+        warnings: list[str] | None = None,
+        next_repair_tool: str | None = None,
     ) -> None:
         entry = AuditEntry(
             timestamp=self._now(),
@@ -62,6 +80,15 @@ class AuditLogger:
             status=status,
             error_message=self._scrub_error(error_message),
             duration_ms=duration_ms,
+            execution_status=execution_status,
+            domain_status=domain_status,
+            evidence_status=evidence_status,
+            recommendation_status=recommendation_status,
+            raw_status=raw_status,
+            diagnostic_status=diagnostic_status,
+            blockers=blockers or [],
+            warnings=warnings or [],
+            next_repair_tool=next_repair_tool,
             output_data=output_data,
         )
         self._entry_cache.append(entry)
@@ -92,6 +119,15 @@ class AuditLogger:
             "status": entry.status,
             "error_message": entry.error_message,
             "duration_ms": entry.duration_ms,
+            "execution_status": entry.execution_status,
+            "domain_status": entry.domain_status,
+            "evidence_status": entry.evidence_status,
+            "recommendation_status": entry.recommendation_status,
+            "raw_status": entry.raw_status,
+            "diagnostic_status": entry.diagnostic_status,
+            "blockers": entry.blockers,
+            "warnings": entry.warnings,
+            "next_repair_tool": entry.next_repair_tool,
             "output_data": entry.output_data,
         }
 

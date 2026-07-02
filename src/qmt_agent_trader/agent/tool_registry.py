@@ -30,6 +30,14 @@ from qmt_agent_trader.agent.permissions import (
     to_capability,
 )
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
+from qmt_agent_trader.agent.tool_result import (
+    DomainStatus,
+    EvidenceStatus,
+    ExecutionStatus,
+    RecommendationStatus,
+    audit_status_from_result,
+    normalize_tool_result,
+)
 from qmt_agent_trader.agent.tools.base import AgentTool
 
 _PROCESS_PAYLOAD_SPILL_BYTES = 1_000_000
@@ -204,6 +212,10 @@ class AgentToolRegistry:
                     "status": "STARTED",
                     "tool_name": name,
                     "timeout_seconds": timeout_seconds,
+                    "execution_status": ExecutionStatus.STARTED.value,
+                    "domain_status": DomainStatus.UNKNOWN.value,
+                    "evidence_status": EvidenceStatus.UNKNOWN.value,
+                    "recommendation_status": RecommendationStatus.UNKNOWN.value,
                 },
                 status="started",
                 error_message=None,
@@ -211,7 +223,7 @@ class AgentToolRegistry:
             )
 
         # 3. Execute
-        status = "ok"
+        execution_status = ExecutionStatus.OK
         error_message = None
         result: dict[str, Any] = {}
         try:
@@ -219,9 +231,9 @@ class AgentToolRegistry:
             if not isinstance(result, dict):
                 result = {"value": result}
             if result.get("status") == "TIMEOUT":
-                status = "timeout"
+                execution_status = ExecutionStatus.TIMEOUT
         except FutureTimeoutError:
-            status = "timeout"
+            execution_status = ExecutionStatus.TIMEOUT
             result = {
                 "status": "TIMEOUT",
                 "tool_name": name,
@@ -230,12 +242,23 @@ class AgentToolRegistry:
                 "kill_attempted": False,
             }
         except Exception as exc:
-            status = "permission_denied" if "PermissionDenied" in type(exc).__name__ else "error"
+            execution_status = (
+                ExecutionStatus.PERMISSION_DENIED
+                if "PermissionDenied" in type(exc).__name__
+                else ExecutionStatus.ERROR
+            )
             error_message = str(exc)
             result = {"error": True, "message": error_message}
 
         # 4. Audit (after)
         duration_ms = int(time.monotonic() * 1000) - start_ms
+        result = normalize_tool_result(
+            name,
+            result,
+            execution_status=execution_status,
+            duration_ms=duration_ms,
+        )
+        status = audit_status_from_result(result)
         self._audit_entry(
             tool_name=name,
             run_id=context.run_id,
@@ -320,6 +343,7 @@ class AgentToolRegistry:
     ) -> None:
         if self.audit_logger is not None:
             try:
+                output = output_data or {}
                 self.audit_logger.append(
                     tool_name=tool_name,
                     run_id=run_id,
@@ -333,6 +357,41 @@ class AgentToolRegistry:
                     status=status,
                     error_message=error_message,
                     duration_ms=duration_ms,
+                    execution_status=str(output.get("execution_status", "UNKNOWN")),
+                    domain_status=str(output.get("domain_status", "UNKNOWN")),
+                    evidence_status=str(output.get("evidence_status", "UNKNOWN")),
+                    recommendation_status=str(
+                        output.get("recommendation_status", "UNKNOWN")
+                    ),
+                    raw_status=(
+                        str(output.get("raw_status"))
+                        if output.get("raw_status") is not None
+                        else None
+                    ),
+                    diagnostic_status=(
+                        str(output.get("diagnostic_status"))
+                        if output.get("diagnostic_status") is not None
+                        else None
+                    ),
+                    blockers=[
+                        str(item)
+                        for item in output.get("blockers", [])
+                        if str(item)
+                    ]
+                    if isinstance(output.get("blockers"), list)
+                    else [],
+                    warnings=[
+                        str(item)
+                        for item in output.get("warnings", [])
+                        if str(item)
+                    ]
+                    if isinstance(output.get("warnings"), list)
+                    else [],
+                    next_repair_tool=(
+                        str(output.get("next_repair_tool"))
+                        if output.get("next_repair_tool") is not None
+                        else None
+                    ),
                 )
             except Exception:
                 pass  # audit failure must not break tool execution

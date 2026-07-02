@@ -204,16 +204,10 @@ class DeepSeekClient:
             tool_calls = list(getattr(message, "tool_calls", None) or [])
 
             assistant_dict = _assistant_message_dict(message)
-            has_failed_evidence = _has_failed_or_incomplete_evidence(conversation)
             if not tool_calls and force_final_answer and assistant_dict.get("content"):
                 assistant_dict["content"] = _strip_tool_call_markup(
                     str(assistant_dict["content"])
                 ).strip()
-            if not tool_calls and assistant_dict.get("content"):
-                assistant_dict["content"] = _neutralize_overclaimed_failed_evidence(
-                    str(assistant_dict["content"]),
-                    has_failed_evidence=has_failed_evidence,
-                )
 
             if not tool_calls:
                 final_content = str(assistant_dict.get("content", "") or "")
@@ -281,12 +275,7 @@ class DeepSeekClient:
                             "Research report has been generated. Do not call more tools; "
                             "do not emit tool-call markup, DSML, JSON function calls, or "
                             "pseudo read_file requests. Answer the user in natural "
-                            "language from the observed evidence and report path. Do not "
-                            "label FAIL/BLOCKED/NOT_COMPUTED strategies as best, optimal, "
-                            "recommended, validated, or effective; call them failed, "
-                            "blocked, or repair-required candidates. For Chinese final "
-                            "answers, avoid 最优/最佳/最好/推荐/有效/稳健 for failed "
-                            "or incomplete candidates; say 数值相对较高 or 仍需修复."
+                            "language from the observed evidence and report path."
                         ),
                     }
                 )
@@ -460,12 +449,6 @@ class DeepSeekClient:
             if not finished_tool_calls:
                 final_content = "".join(content_parts) if content_parts else None
                 if final_content:
-                    final_content = _neutralize_overclaimed_failed_evidence(
-                        final_content,
-                        has_failed_evidence=_has_failed_or_incomplete_evidence(
-                            conversation
-                        ),
-                    )
                     yield FinalMessage(content=final_content)
                 final_msg: dict[str, Any] = {"role": "assistant"}
                 if final_content:
@@ -605,26 +588,8 @@ def _neutralize_overclaimed_failed_evidence(
     *,
     has_failed_evidence: bool,
 ) -> str:
-    if not has_failed_evidence:
-        return content
-    replacements = {
-        "显著有效": "未通过诊断",
-        "强烈推荐": "不建议直接采用",
-        "最佳": "相对数值较高",
-        "最优": "相对数值较高",
-        "最好": "相对数值较高",
-        "收益最高": "观测收益数值较高",
-        "表现最高": "观测数值较高",
-        "表现最佳": "观测数值较高",
-        "表现最优": "观测数值较高",
-        "表现最好": "观测数值较高",
-        "具有稳健性": "稳定性仍待验证",
-        "稳健的": "稳定性待验证的",
-    }
-    neutralized = content
-    for needle, replacement in replacements.items():
-        neutralized = neutralized.replace(needle, replacement)
-    return neutralized
+    _ = has_failed_evidence
+    return content
 
 
 def _compact_tool_result(value: Any, *, key: str | None = None) -> Any:
@@ -659,6 +624,12 @@ def _fallback_tool_result_summary(result: Any, content: str) -> dict[str, Any]:
     }
     if isinstance(result, dict):
         for key in (
+            "execution_status",
+            "domain_status",
+            "evidence_status",
+            "recommendation_status",
+            "raw_status",
+            "diagnostic_status",
             "status",
             "reason",
             "message",
@@ -671,10 +642,41 @@ def _fallback_tool_result_summary(result: Any, content: str) -> dict[str, Any]:
             "metrics",
             "data_window",
             "coverage_status",
+            "missing_symbols",
+            "stale_symbols",
+            "missing_columns",
+            "missing_ranges",
+            "data_update_needed",
             "next_repair_tool",
+            "suggested_repair",
+            "research_only",
+            "review_required",
+            "live_trading_allowed",
+            "adapter_limitations",
+            "data_provenance",
+            "column_quality",
+            "blockers",
+            "warnings",
         ):
             if key in result:
                 summary[key] = _compact_tool_result(result[key])
+        metadata = result.get("metadata")
+        if isinstance(metadata, dict):
+            summary["metadata"] = {
+                key: _compact_tool_result(metadata[key])
+                for key in (
+                    "status",
+                    "reason",
+                    "message",
+                    "coverage_status",
+                    "missing_symbols",
+                    "stale_symbols",
+                    "missing_ranges",
+                    "data_update_needed",
+                    "next_repair_tool",
+                )
+                if key in metadata
+            }
     return summary
 
 

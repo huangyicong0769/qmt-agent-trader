@@ -18,6 +18,12 @@ from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
+from qmt_agent_trader.agent.tool_result import (
+    DomainStatus,
+    EvidenceStatus,
+    ExecutionStatus,
+    RecommendationStatus,
+)
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
@@ -641,7 +647,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         cached["timeout_seconds_used"] = timeout_seconds_used
         cached["cost_estimate"] = cost_estimate
         cached.update(_universe_evidence_payload(universe_info, symbols, resolved_universe))
-        return cached
+        return _with_backtest_evidence_status(cached)
     try:
         result = run_strategy_backtest(
             lake,
@@ -656,7 +662,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             requested_factor_ids=requested_factor_ids,
         )
         if blocked is not None:
-            return blocked
+            return _with_backtest_evidence_status(blocked)
         raise
     payload = result.model_dump(mode="json")
     payload.update(_universe_evidence_payload(universe_info, symbols, resolved_universe))
@@ -686,7 +692,58 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             }
         )
         _put_cached_backtest(cache_key, payload)
-    return payload
+    return _with_backtest_evidence_status(payload)
+
+
+def _with_backtest_evidence_status(payload: dict[str, Any]) -> dict[str, Any]:
+    diagnostic_status = None
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        diagnostic_status = diagnostics.get("status")
+    raw_status = str(payload.get("status") or "")
+    enriched = dict(payload)
+    enriched["execution_status"] = ExecutionStatus.OK.value
+    enriched["raw_status"] = raw_status or None
+    enriched["diagnostic_status"] = diagnostic_status
+    if diagnostic_status == "FAIL":
+        enriched.update(
+            {
+                "domain_status": DomainStatus.FAILED.value,
+                "evidence_status": EvidenceStatus.INVALID.value,
+                "recommendation_status": RecommendationStatus.DO_NOT_RECOMMEND.value,
+                "message": payload.get("message")
+                or "Backtest executed, but diagnostics failed.",
+            }
+        )
+        return enriched
+    if raw_status == "completed":
+        if diagnostic_status in {"PASS", "OK"}:
+            enriched.setdefault("domain_status", DomainStatus.OK.value)
+            enriched.setdefault("evidence_status", EvidenceStatus.VALID.value)
+        else:
+            enriched.setdefault("domain_status", DomainStatus.UNKNOWN.value)
+            enriched.setdefault("evidence_status", EvidenceStatus.UNKNOWN.value)
+            warnings = list(enriched.get("warnings") or [])
+            warning = "backtest_completed_without_explicit_diagnostic_pass"
+            if warning not in warnings:
+                warnings.append(warning)
+            enriched["warnings"] = warnings
+        enriched.setdefault("recommendation_status", RecommendationStatus.RESEARCH_ONLY.value)
+        return enriched
+    if raw_status in {"BLOCKED", "DATA_NOT_READY", "FACTOR_NOT_FOUND"}:
+        enriched.setdefault("domain_status", DomainStatus.BLOCKED.value)
+        enriched.setdefault("evidence_status", EvidenceStatus.BLOCKED.value)
+        enriched.setdefault("recommendation_status", RecommendationStatus.BLOCKED.value)
+        return enriched
+    if raw_status in {"BACKTEST_FAILED", "STATIC_CHECK_FAILED"}:
+        enriched.setdefault("domain_status", DomainStatus.FAILED.value)
+        enriched.setdefault("evidence_status", EvidenceStatus.INVALID.value)
+        enriched.setdefault("recommendation_status", RecommendationStatus.BLOCKED.value)
+        return enriched
+    enriched.setdefault("domain_status", DomainStatus.UNKNOWN.value)
+    enriched.setdefault("evidence_status", EvidenceStatus.UNKNOWN.value)
+    enriched.setdefault("recommendation_status", RecommendationStatus.UNKNOWN.value)
+    return enriched
 
 
 def _blocked_backtest_from_value_error(

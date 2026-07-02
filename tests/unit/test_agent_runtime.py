@@ -44,8 +44,8 @@ def test_default_prompt_keeps_local_quant_workflows_on_native_tools() -> None:
     assert "do not call external MCP/web tools unless" in prompt
     assert "Do not blame replay, validation, or test protocols" in prompt
     assert "observed tool status" in prompt
-    assert "instead of 最优/最佳/最好/推荐/有效/稳健" in prompt
-    assert "数值相对较高/较低" in prompt
+    assert "preserves your raw final answer" in prompt
+    assert "reports evidence-output conflicts" in prompt
     assert "unless a tool returned NOT_CONFIGURED" in prompt
 
 

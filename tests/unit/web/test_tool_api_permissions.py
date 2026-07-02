@@ -58,11 +58,14 @@ def test_tool_api_allows_read_only_and_uses_autonomous_runtime_context(
     response = TestClient(app).post("/echo/run", json={"input_data": {"x": 1}})
 
     assert response.status_code == 200
-    assert response.json()["result"] == {"echo": {"x": 1}}
+    result = response.json()["result"]
+    assert result["echo"] == {"x": 1}
+    assert result["execution_status"] == "OK"
+    assert result["domain_status"] == "UNKNOWN"
     assert seen_contexts[0].call_mode == ToolCallMode.AUTONOMOUS_AGENT
     audit = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert audit["call_mode"] == ToolCallMode.AUTONOMOUS_AGENT.value
-    assert audit["status"] == "ok"
+    assert audit["status"] == "execution_ok_domain_unknown"
 
 
 def test_tool_api_injects_remote_data_update_dry_run_for_web_requests(

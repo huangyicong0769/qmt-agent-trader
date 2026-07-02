@@ -14,12 +14,14 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
+from qmt_agent_trader.agent.evidence_ledger import EvidenceLedger
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.llm_client import (
     DeepSeekClient,
 )
 from qmt_agent_trader.agent.runtime import AgentRuntime, build_default_runtime
 from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
+from qmt_agent_trader.agent.tool_result import status_icon
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.data.storage import DataLake
@@ -294,15 +296,10 @@ class AgentOrchestrator:
             "passed, candidates were saved, data was refreshed, or a specific universe "
             "was used unless a tool result or tool audit explicitly shows it. Treat "
             "adapter_limitations, warnings, diagnostics FAIL/BLOCKED/NOT_COMPUTED, "
-            "missing data, and REVIEW_REQUIRED as material limitations. Do not describe "
-            "a strategy or factor as significant, best, validated, or recommended when "
-            "diagnostics fail, data is stale, default_universe was used, universe is "
-            "unresolved, review_required=true, or predictive evidence is not computed; use failed "
-            "candidate, blocked candidate, incomplete candidate, research-only candidate, or "
-            "needs repair instead of "
-            "最优/最佳/最好/推荐/有效/稳健 for those paths. If comparing failed "
-            "or incomplete candidates, use 数值相对较高/较低 or observed return was "
-            "higher, not best or effective. Do not claim a token or external API is unavailable "
+            "missing data, and REVIEW_REQUIRED as material limitations. The system "
+            "preserves your raw final answer and separately reports evidence-output "
+            "conflicts; do not hide or smooth over tool statuses to make the answer "
+            "look cleaner. Do not claim a token or external API is unavailable "
             "unless a tool returned NOT_CONFIGURED, ENV_BLOCKED, or an explicit "
             "upstream/API error; if a tool returns BLOCKED for missing ts_code or "
             "unsupported basket live fill, call it a tool scope or adapter limitation. "
@@ -454,13 +451,29 @@ class AgentOrchestrator:
         tcount = sum(
             1 for e in stream_buffer if e.__class__.__name__ == "ToolResult"
         )
+        ledger = _ledger_from_stream(rid, stream_buffer)
+        final_answer_raw = _final_answer_from_stream(stream_buffer)
+        evidence_report = ledger.report()
+        if final_answer_raw is not None:
+            conflict_report = ledger.final_answer_conflict_report(final_answer_raw)
+            if conflict_report["has_conflict"]:
+                yield OrchestratorEvent(
+                    type="evidence_conflict_report",
+                    run_id=rid,
+                    message="Evidence conflicts detected after raw final answer.",
+                    data={
+                        "experiment_id": experiment_id,
+                        "evidence_conflict_report": conflict_report,
+                    },
+                )
         yield OrchestratorEvent(
             type="done",
             run_id=rid,
-            message="Run completed successfully.",
+            message=_done_message(evidence_report),
             data={
                 "experiment_id": experiment_id,
                 "tool_calls_count": tcount,
+                "evidence_report": evidence_report,
             },
         )
 
@@ -586,15 +599,22 @@ def _stream_to_events(
     if cls_name == "ToolResult":
         preview = _preview(evt.result)
         result_id = _result_id(evt.result)
+        status = _tool_status_display(evt.result)
         events = [
             OrchestratorEvent(
                 type="tool_done",
                 run_id=run_id,
-                message=f"Tool: {evt.tool_name} ✓",
+                message=f"Tool: {evt.tool_name} {status['symbol']}",
                 data={
                     "tool_name": evt.tool_name,
                     "result_preview": preview,
                     "result_id": result_id,
+                    "execution_status": status["execution_status"],
+                    "domain_status": status["domain_status"],
+                    "evidence_status": status["evidence_status"],
+                    "recommendation_status": status["recommendation_status"],
+                    "raw_status": status["raw_status"],
+                    "diagnostic_status": status["diagnostic_status"],
                     "experiment_id": experiment_id,
                 },
             )
@@ -635,6 +655,70 @@ def _stream_to_events(
         ]
 
     return []
+
+
+def _ledger_from_stream(run_id: str, stream_buffer: list[Any]) -> EvidenceLedger:
+    ledger = EvidenceLedger(run_id=run_id)
+    for evt in stream_buffer:
+        if evt.__class__.__name__ == "ToolResult":
+            ledger.record_tool_result(
+                str(getattr(evt, "tool_name", "unknown_tool")),
+                getattr(evt, "result", None),
+            )
+    return ledger
+
+
+def _final_answer_from_stream(stream_buffer: list[Any]) -> str | None:
+    for evt in reversed(stream_buffer):
+        if evt.__class__.__name__ == "FinalMessage":
+            return str(getattr(evt, "content", ""))
+    return None
+
+
+def _done_message(evidence_report: dict[str, Any]) -> str:
+    summary = evidence_report.get("summary", {})
+    if not isinstance(summary, dict):
+        return "Run finished: all tool calls returned, evidence state unavailable."
+    if summary.get("invalid_count", 0):
+        return "Run finished: all tool calls returned, evidence invalid."
+    if summary.get("blocked_count", 0) or evidence_report.get("blockers"):
+        return "Run finished: all tool calls returned, evidence has blockers."
+    if summary.get("unknown_count", 0):
+        return "Run finished: all tool calls returned, evidence unknown."
+    if summary.get("weak_count", 0) or summary.get("incomplete_count", 0):
+        return "Run finished: all tool calls returned, evidence mixed."
+    return "Run finished: all tool calls returned."
+
+
+def _tool_status_display(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {
+            "symbol": "?",
+            "execution_status": "UNKNOWN",
+            "domain_status": "UNKNOWN",
+            "evidence_status": "UNKNOWN",
+            "recommendation_status": "UNKNOWN",
+            "raw_status": None,
+            "diagnostic_status": None,
+        }
+    icon = status_icon(result)
+    symbol = {
+        "ok": "✓",
+        "warning": "⚠",
+        "failed": "✗",
+        "blocked": "⛔",
+        "unknown": "?",
+        "x": "✗",
+    }.get(icon, "?")
+    return {
+        "symbol": symbol,
+        "execution_status": result.get("execution_status", "UNKNOWN"),
+        "domain_status": result.get("domain_status", "UNKNOWN"),
+        "evidence_status": result.get("evidence_status", "UNKNOWN"),
+        "recommendation_status": result.get("recommendation_status", "UNKNOWN"),
+        "raw_status": result.get("raw_status"),
+        "diagnostic_status": result.get("diagnostic_status"),
+    }
 
 
 def _conversation_history(

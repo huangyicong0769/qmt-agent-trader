@@ -103,7 +103,12 @@ def test_run_tool_with_audit(tmp_path) -> None:
     assert audit.log_path.exists()
     lines = audit.log_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) == 1
-    assert json.loads(lines[0])["output_data"] == {"echo": {"x": 1}, "run_id": "r2"}
+    entry = json.loads(lines[0])
+    assert entry["output_data"]["echo"] == {"x": 1}
+    assert entry["output_data"]["run_id"] == "r2"
+    assert entry["execution_status"] == "OK"
+    assert entry["domain_status"] == "UNKNOWN"
+    assert entry["evidence_status"] == "UNKNOWN"
 
 
 def test_run_tool_writes_started_audit_for_llm_calls(tmp_path) -> None:
@@ -125,12 +130,14 @@ def test_run_tool_writes_started_audit_for_llm_calls(tmp_path) -> None:
         json.loads(line)
         for line in audit.log_path.read_text(encoding="utf-8").strip().split("\n")
     ]
-    assert [entry["status"] for entry in entries] == ["started", "ok"]
-    assert entries[0]["output_data"] == {
-        "status": "STARTED",
-        "tool_name": "echo",
-        "timeout_seconds": 60,
-    }
+    assert [entry["status"] for entry in entries] == [
+        "started",
+        "execution_ok_domain_unknown",
+    ]
+    assert entries[0]["output_data"]["status"] == "STARTED"
+    assert entries[0]["output_data"]["tool_name"] == "echo"
+    assert entries[0]["output_data"]["timeout_seconds"] == 60
+    assert entries[0]["execution_status"] == "STARTED"
 
 
 # ── Execution — permissions ──────────────────────────────────────────────────
@@ -205,7 +212,7 @@ def test_run_tool_timeout_returns_structured_result_and_audits(tmp_path) -> None
     assert result["timeout_seconds"] == 0
     assert result["kill_attempted"] is True
     assert isinstance(result["duration_ms"], int)
-    assert '"status": "timeout"' in audit.log_path.read_text(encoding="utf-8")
+    assert '"status": "execution_timeout"' in audit.log_path.read_text(encoding="utf-8")
 
 
 def test_run_tool_uses_dynamic_timeout_resolver() -> None:
@@ -230,7 +237,9 @@ def test_run_tool_uses_dynamic_timeout_resolver() -> None:
 
     result = reg.run_tool("dynamic_timeout", {}, ToolContext(run_id="r-dynamic-timeout"))
 
-    assert result == {"finished": True}
+    assert result["finished"] is True
+    assert result["execution_status"] == "OK"
+    assert result["domain_status"] == "UNKNOWN"
 
 
 def test_run_tool_timeout_reports_dynamic_timeout_used(tmp_path) -> None:
@@ -343,5 +352,7 @@ def test_agent_registry_legacy_bridge_uses_context_factory() -> None:
 
     result = legacy.call_as_llm("echo_context", value=1)
 
-    assert result == {"run_id": "run-llm", "experiment_id": "exp-1"}
+    assert result["run_id"] == "run-llm"
+    assert result["experiment_id"] == "exp-1"
+    assert result["domain_status"] == "UNKNOWN"
     assert seen_contexts[0].requested_by_llm is True
