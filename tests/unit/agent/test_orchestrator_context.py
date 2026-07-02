@@ -310,7 +310,9 @@ def test_execute_stream_guides_large_batch_data_pull_without_hiding_agent_tools(
     system_prompt = CapturingDeepSeekClient.seen_messages[0]["content"]
     assert "For large-basket or bulk data pulls" in system_prompt
     assert "obey the update tool's live-execution scope" in system_prompt
-    assert "run_remote_data_update" in CapturingDeepSeekClient.seen_tool_names
+    assert "list_tushare_capabilities" in CapturingDeepSeekClient.seen_tool_names
+    assert "plan_tushare_fetch" in CapturingDeepSeekClient.seen_tool_names
+    assert "run_tushare_fetch" in CapturingDeepSeekClient.seen_tool_names
     assert "query_bars" in CapturingDeepSeekClient.seen_tool_names
     assert "run_backtest" in CapturingDeepSeekClient.seen_tool_names
     assert "detect_tool_gap" in CapturingDeepSeekClient.seen_tool_names

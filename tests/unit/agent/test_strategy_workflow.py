@@ -331,7 +331,7 @@ def test_run_backtest_blocks_when_factor_required_columns_are_missing(registry, 
     assert result["factor_id"] == "pb_rank"
     assert result["missing_columns"] == ["pb"]
     assert result["coverage_status"] == "NO_DATA"
-    assert result["next_repair_tool"] == "run_fundamental_data_update"
+    assert result["next_repair_tool"] == "run_tushare_fetch"
 
 
 def test_generate_research_report_includes_evidence_limitations_and_gaps(registry):

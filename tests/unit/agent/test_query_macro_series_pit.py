@@ -16,7 +16,7 @@ def test_query_macro_series_pit_rejects_unknown_dataset(tmp_path) -> None:
     )
 
     assert result["metadata"]["status"] == "INVALID_REQUEST"
-    assert result["metadata"]["next_repair_tool"] == "run_macro_data_update"
+    assert result["metadata"]["next_repair_tool"] == "run_tushare_fetch"
     assert "cn_cpi" in result["metadata"]["known_datasets"]
 
 
@@ -34,7 +34,7 @@ def test_query_macro_series_pit_returns_no_data_for_missing_dataset(tmp_path) ->
     assert result["metadata"]["missing_ranges"] == [
         {"start_date": "20240131", "end_date": "20240131"}
     ]
-    assert result["metadata"]["next_repair_tool"] == "run_macro_data_update"
+    assert result["metadata"]["next_repair_tool"] == "run_tushare_fetch"
 
 
 def test_query_macro_series_pit_returns_pit_safe_series(tmp_path) -> None:

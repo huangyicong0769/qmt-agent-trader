@@ -314,7 +314,7 @@ def _query_theme_universe(
             "metadata": {
                 "theme": theme,
                 "reason": "missing_stock_basic",
-                "next_repair_tool": "run_remote_data_update",
+                "next_repair_tool": "run_tushare_fetch",
             },
         }
     stock_basic = lake.read_parquet("raw", "tushare_stock_basic")
@@ -325,7 +325,7 @@ def _query_theme_universe(
             "metadata": {
                 "theme": theme,
                 "reason": "invalid_stock_basic",
-                "next_repair_tool": "run_remote_data_update",
+                "next_repair_tool": "run_tushare_fetch",
             },
         }
 
@@ -981,7 +981,7 @@ def _query_fundamentals_pit(
                 "datasets_used": [],
                 "coverage_status": "NO_DATA",
                 "missing_ranges": [{"start_date": str(as_of), "end_date": str(as_of)}],
-                "next_repair_tool": "run_fundamental_data_update",
+                "next_repair_tool": "run_tushare_fetch",
                 "pit_rule": "visible_date <= as_of_date",
             },
         })
@@ -1019,7 +1019,7 @@ def _query_fundamentals_pit(
                 "datasets_used": datasets_used,
                 "coverage_status": "NO_DATA",
                 "missing_ranges": [{"start_date": str(as_of), "end_date": str(as_of)}],
-                "next_repair_tool": "run_fundamental_data_update",
+                "next_repair_tool": "run_tushare_fetch",
                 "pit_rule": "visible_date <= as_of_date",
             },
         })
@@ -1064,7 +1064,7 @@ def _query_fundamentals_pit(
                 else []
             ),
             "next_repair_tool": (
-                "run_fundamental_data_update" if status == "PARTIAL_COVERAGE" else None
+                "run_tushare_fetch" if status == "PARTIAL_COVERAGE" else None
             ),
         },
     })
@@ -1132,7 +1132,7 @@ def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -
         metadata = {
             **metadata,
             "known_datasets": sorted(MACRO_DATASETS),
-            "next_repair_tool": "run_macro_data_update",
+            "next_repair_tool": "run_tushare_fetch",
         }
     if metadata.get("status") == "NO_DATA":
         start = str(input_data.get("start_date") or input_data.get("as_of_date", _today_yyyymmdd()))
@@ -1141,7 +1141,7 @@ def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -
             **metadata,
             "coverage_status": "NO_DATA",
             "missing_ranges": [{"start_date": start, "end_date": end}],
-            "next_repair_tool": "run_macro_data_update",
+            "next_repair_tool": "run_tushare_fetch",
             "known_datasets": sorted(MACRO_DATASETS),
         }
     if metadata.get("pit_safe") is False and strict_pit:

@@ -30,9 +30,11 @@ def test_runtime_exposes_one_agent_callable_surface_for_web_and_llm(tmp_path) ->
 
     assert agent_tool_names == llm_tool_names
     assert "query_bars" in agent_tool_names
-    assert "run_remote_data_update" in agent_tool_names
-    assert "run_fundamental_data_update" in agent_tool_names
-    assert "run_macro_data_update" in agent_tool_names
+    assert "list_tushare_capabilities" in agent_tool_names
+    assert "plan_tushare_fetch" in agent_tool_names
+    assert "run_tushare_fetch" in agent_tool_names
+    assert "build_data_table" in agent_tool_names
+    assert "run_remote_data_update" not in agent_tool_names
     assert "run_shell_command" not in agent_tool_names
     assert "propose_tool_registration" not in agent_tool_names
 

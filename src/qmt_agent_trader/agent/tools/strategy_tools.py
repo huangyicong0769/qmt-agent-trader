@@ -843,10 +843,10 @@ def _repair_tool_for_missing_columns(columns: list[str]) -> str:
     macro = {"pmi", "ppi", "cpi", "macro_cycle_score", "industry_value_added"}
     normalized = {column.lower() for column in columns}
     if normalized & fundamentals:
-        return "run_fundamental_data_update"
+        return "run_tushare_fetch"
     if normalized & macro:
-        return "run_macro_data_update"
-    return "run_remote_data_update"
+        return "run_tushare_fetch"
+    return "run_tushare_fetch"
 
 
 def _datasets_for_missing_columns(columns: list[str]) -> list[str]:

@@ -32,7 +32,7 @@ def test_query_fundamentals_pit_returns_no_data_when_raw_missing(tmp_path) -> No
     assert result["metadata"]["missing_ranges"] == [
         {"start_date": "20240131", "end_date": "20240131"}
     ]
-    assert result["metadata"]["next_repair_tool"] == "run_fundamental_data_update"
+    assert result["metadata"]["next_repair_tool"] == "run_tushare_fetch"
 
 
 def test_query_fundamentals_pit_returns_daily_and_financial_fields(tmp_path) -> None:

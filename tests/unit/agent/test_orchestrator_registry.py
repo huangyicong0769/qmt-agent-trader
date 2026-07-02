@@ -25,9 +25,10 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
         "list_tools",
         "query_bars",
         "query_macro_series_pit",
-        "run_remote_data_update",
-        "run_fundamental_data_update",
-        "run_macro_data_update",
+        "list_tushare_capabilities",
+        "plan_tushare_fetch",
+        "run_tushare_fetch",
+        "build_data_table",
         "run_shell_command",
         "create_factor_spec",
         "generate_factor_code",
@@ -48,9 +49,10 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
     assert {
         "query_bars",
         "query_macro_series_pit",
-        "run_remote_data_update",
-        "run_fundamental_data_update",
-        "run_macro_data_update",
+        "list_tushare_capabilities",
+        "plan_tushare_fetch",
+        "run_tushare_fetch",
+        "build_data_table",
         "create_factor_spec",
         "generate_factor_code",
         "list_saved_factors",
@@ -61,6 +63,7 @@ def test_orchestrator_exposes_full_agent_tool_registry_to_llm(tmp_path) -> None:
         "detect_tool_gap",
     }.issubset(llm_names)
     assert "plan_remote_data_update" not in llm_names
+    assert "run_remote_data_update" not in llm_names
     assert "query_fundamentals_pit" in llm_names
     assert "propose_tool_registration" in registered_names
     assert "propose_tool_registration" not in llm_names
