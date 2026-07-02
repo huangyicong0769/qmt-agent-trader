@@ -508,3 +508,83 @@ def test_query_universe_defaults_to_current_date_for_cyclical_theme(tmp_path) ->
     assert result["status"] == "OK"
     assert result["symbols"] == ["600036.SH"]
     assert result["metadata"]["as_of_date"] == "2024-06-28"
+
+
+def test_cyclical_theme_ontology_includes_provider_specific_industries(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": symbol,
+                    "trade_date": "20260629",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "vol": 200,
+                }
+                for symbol in ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
+            ]
+        ),
+        "raw",
+        "tushare_daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "地产A",
+                    "industry": "全国地产",
+                    "list_status": "L",
+                    "list_date": "20200101",
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "煤炭B",
+                    "industry": "煤炭开采",
+                    "list_status": "L",
+                    "list_date": "20200101",
+                },
+                {
+                    "ts_code": "000003.SZ",
+                    "name": "银行C",
+                    "industry": "银行",
+                    "list_status": "L",
+                    "list_date": "20200101",
+                },
+                {
+                    "ts_code": "000004.SZ",
+                    "name": "软件D",
+                    "industry": "软件服务",
+                    "list_status": "L",
+                    "list_date": "20200101",
+                },
+            ]
+        ),
+        "raw",
+        "tushare_stock_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_universe_tool.run(
+        {"as_of_date": "20260629", "filters": {"theme": "cyclical"}},
+        ToolContext(run_id="cyclical-ontology"),
+    )
+
+    assert result["status"] == "OK"
+    assert set(result["symbols"]) == {"000001.SZ", "000002.SZ", "000003.SZ"}
+    metadata = result["metadata"]
+    assert metadata["ontology_version"]
+    assert metadata["theme_to_provider_mapping"]["房地产"] == [
+        "全国地产",
+        "区域地产",
+        "园区开发",
+        "房地产",
+    ]
+    assert metadata["industry_distribution"] == {
+        "全国地产": 1,
+        "煤炭开采": 1,
+        "银行": 1,
+    }

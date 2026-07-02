@@ -17,6 +17,12 @@ import pandas as pd
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
+from qmt_agent_trader.agent.tool_result import (
+    DomainStatus,
+    EvidenceStatus,
+    ExecutionStatus,
+    RecommendationStatus,
+)
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import SHANGHAI_TZ
 from qmt_agent_trader.data.bars import (
@@ -77,7 +83,9 @@ def _with_deps(
 def _list_data_catalog(_input: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
     lake = _get_lake()
     if lake is None:
-        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+        return _with_query_evidence_status(
+            {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+        )
     try:
         layers = {
             layer: visible_dataset_names(layer, lake.list_dataset_names(layer))
@@ -185,28 +193,24 @@ query_universe_tool: AgentTool = tool(
 )
 
 
-CYCLICAL_INDUSTRIES = {
-    "银行",
-    "证券",
-    "保险",
-    "多元金融",
-    "房地产",
-    "钢铁",
-    "煤炭",
-    "有色金属",
-    "工业金属",
-    "贵金属",
-    "基础化工",
-    "化工",
-    "建筑材料",
-    "建材",
-    "建筑装饰",
-    "机械设备",
-    "汽车",
-    "石油石化",
-    "交通运输",
-    "航运港口",
+THEME_ONTOLOGY_VERSION = "2026-07-02"
+THEME_INDUSTRY_ONTOLOGY = {
+    "cyclical": {
+        "房地产": {"全国地产", "区域地产", "园区开发", "房地产"},
+        "煤炭": {"煤炭开采", "焦炭加工", "煤炭"},
+        "建筑": {"建筑工程", "建筑装饰", "房产服务", "装修装饰"},
+        "金融": {"银行", "证券", "保险", "多元金融"},
+        "钢铁": {"普钢", "特种钢", "钢加工", "钢铁"},
+        "有色金属": {"铜", "铝", "铅锌", "小金属", "黄金", "有色金属"},
+        "基础化工": {"化工原料", "化工机械", "农药化肥", "橡胶", "塑料", "玻璃"},
+        "建材": {"水泥", "陶瓷", "其他建材", "建筑材料"},
+        "机械设备": {"工程机械", "机械基件", "专用机械", "机床制造", "电器仪表"},
+        "汽车": {"汽车整车", "汽车配件", "摩托车", "汽车服务"},
+        "石油石化": {"石油加工", "石油开采", "石油贸易"},
+        "交通运输": {"港口", "水运", "空运", "公路", "铁路"},
+    }
 }
+CYCLICAL_INDUSTRIES = set().union(*THEME_INDUSTRY_ONTOLOGY["cyclical"].values())
 
 
 def _load_recent_bars_for_universe(lake: DataLake, *, end: str) -> Any:
@@ -325,6 +329,16 @@ def _query_theme_universe(
             },
         }
 
+    ontology = THEME_INDUSTRY_ONTOLOGY.get(theme, {})
+    provider_industries = sorted(
+        str(item)
+        for item in stock_basic.get("industry", pd.Series(dtype=object)).dropna().unique().tolist()
+        if str(item)
+    )
+    mapped_provider_industries = sorted(set().union(*ontology.values())) if ontology else []
+    known_provider_industries = sorted(
+        industry for industry in provider_industries if industry in mapped_provider_industries
+    )
     recent_by_symbol = recent.set_index("symbol")
     as_of_date = _parse_date(as_of)
     selected: list[dict[str, Any]] = []
@@ -351,17 +365,59 @@ def _query_theme_universe(
 
     selected = sorted(selected, key=lambda item: item["symbol"])
     industries = Counter(item["industry"] for item in selected)
+    concept_distribution = Counter(
+        _theme_concept_for_industry(theme, item["industry"]) or "unmapped"
+        for item in selected
+    )
+    diversity_score = _industry_diversity_score(industries)
+    warnings: list[str] = []
+    domain_status = "OK"
+    if len(industries) <= 3 or diversity_score < 0.25:
+        warnings.append("THEME_MAPPING_LOW_DIVERSITY")
+        domain_status = "WARN"
     return {
         "status": "OK",
+        "execution_status": ExecutionStatus.OK.value,
+        "domain_status": domain_status,
+        "evidence_status": EvidenceStatus.WEAK.value if warnings else EvidenceStatus.VALID.value,
+        "recommendation_status": RecommendationStatus.RESEARCH_ONLY.value,
+        "warnings": warnings,
         "symbols": [item["symbol"] for item in selected][:2000],
         "metadata": {
             "theme": theme,
+            "ontology_version": THEME_ONTOLOGY_VERSION,
+            "theme_name": theme,
             "as_of_date": str(recent["trade_date"].iloc[0]),
             "count": len(selected),
+            "industry_source": "tushare_stock_basic",
+            "match_method": "theme_ontology_provider_industry_exact",
+            "known_provider_industries": known_provider_industries,
+            "theme_to_provider_mapping": {
+                concept: sorted(values) for concept, values in ontology.items()
+            },
+            "matched_provider_industries": sorted(industries),
+            "unmapped_provider_industries": [
+                industry
+                for industry in provider_industries
+                if industry not in mapped_provider_industries
+            ],
+            "unmatched_theme_concepts": [
+                concept
+                for concept, values in ontology.items()
+                if not values.intersection(industries)
+            ],
             "industry_distribution": dict(sorted(industries.items())),
+            "theme_concept_distribution": dict(sorted(concept_distribution.items())),
+            "coverage_ratio": (
+                len(set(industries)) / len(mapped_provider_industries)
+                if mapped_provider_industries
+                else 0.0
+            ),
+            "diversity_score": diversity_score,
+            "warnings": warnings,
             "selection_rules": {
                 "industry_source": "tushare_stock_basic",
-                "included_industries": sorted(CYCLICAL_INDUSTRIES),
+                "included_industries": mapped_provider_industries,
                 "exclude_st": exclude_st,
                 "exclude_suspended": exclude_suspended,
                 "min_listed_days": min_listed_days,
@@ -404,8 +460,89 @@ def _theme_exclusion_reason(
     return None
 
 
+def _theme_concept_for_industry(theme: str, industry: str) -> str | None:
+    for concept, provider_values in THEME_INDUSTRY_ONTOLOGY.get(theme, {}).items():
+        if industry in provider_values:
+            return concept
+    return None
+
+
+def _industry_diversity_score(industries: Counter[str]) -> float:
+    total = sum(industries.values())
+    if total <= 0:
+        return 0.0
+    shares = [count / total for count in industries.values()]
+    return 1.0 - sum(share * share for share in shares)
+
+
 def _date_key(value: str) -> str:
     return _parse_date(value).strftime("%Y%m%d")
+
+
+def _with_query_evidence_status(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_metadata = payload.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    status = str(payload.get("status") or metadata.get("status") or "UNKNOWN")
+    enriched = dict(payload)
+    enriched["execution_status"] = ExecutionStatus.OK.value
+    enriched["raw_status"] = payload.get("status") or metadata.get("status")
+    enriched["message"] = payload.get("message") or metadata.get("message")
+    enriched["reason"] = payload.get("reason") or metadata.get("reason")
+    enriched["next_repair_tool"] = payload.get("next_repair_tool") or metadata.get(
+        "next_repair_tool"
+    )
+    warnings: list[str] = []
+    for key in ("warning", "warnings"):
+        value = payload.get(key) or metadata.get(key)
+        if isinstance(value, list):
+            warnings.extend(str(item) for item in value)
+        elif value:
+            warnings.append(str(value))
+    if status in {"OK", "ok"}:
+        domain = DomainStatus.OK.value
+        evidence = EvidenceStatus.VALID.value
+        recommendation = RecommendationStatus.RESEARCH_ONLY.value
+    elif status in {"PARTIAL_COVERAGE", "PARTIAL", "PIT_NOT_VALIDATED"}:
+        domain = DomainStatus.PARTIAL.value
+        evidence = EvidenceStatus.INCOMPLETE.value
+        recommendation = RecommendationStatus.UNKNOWN.value
+    elif status in {"NO_DATA", "NO_MATCHING_BARS"}:
+        domain = DomainStatus.NO_DATA.value
+        evidence = EvidenceStatus.INCOMPLETE.value
+        recommendation = RecommendationStatus.BLOCKED.value
+    elif status in {"INVALID_REQUEST"}:
+        domain = DomainStatus.INVALID_REQUEST.value
+        evidence = EvidenceStatus.INVALID.value
+        recommendation = RecommendationStatus.BLOCKED.value
+    elif status in {"NOT_AVAILABLE", "NOT_CONFIGURED"}:
+        domain = DomainStatus.NOT_CONFIGURED.value
+        evidence = EvidenceStatus.BLOCKED.value
+        recommendation = RecommendationStatus.BLOCKED.value
+    elif status in {"ERROR"} or metadata.get("error"):
+        domain = DomainStatus.FAILED.value
+        evidence = EvidenceStatus.INVALID.value
+        recommendation = RecommendationStatus.BLOCKED.value
+    else:
+        domain = DomainStatus.UNKNOWN.value
+        evidence = EvidenceStatus.UNKNOWN.value
+        recommendation = RecommendationStatus.UNKNOWN.value
+        warnings.append("legacy_unstructured_tool_result")
+    enriched["domain_status"] = domain
+    enriched["evidence_status"] = evidence
+    enriched["recommendation_status"] = recommendation
+    enriched["warnings"] = sorted(set(warnings))
+    blockers: list[str] = []
+    if domain in {
+        DomainStatus.BLOCKED.value,
+        DomainStatus.FAILED.value,
+        DomainStatus.NO_DATA.value,
+        DomainStatus.INVALID_REQUEST.value,
+        DomainStatus.NOT_CONFIGURED.value,
+    }:
+        reason = enriched.get("reason") or enriched.get("message") or status
+        blockers.append(str(reason))
+    enriched["blockers"] = blockers
+    return enriched
 
 # ── query_bars ───────────────────────────────────────────────────────────────
 
@@ -425,22 +562,29 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
     fields = _bar_output_fields(requested_fields)
     limit = _bar_limit(input_data.get("limit", DEFAULT_BAR_LIMIT))
     if limit is None:
-        return {
-            "rows": [],
-            "metadata": {
-                "status": "INVALID_REQUEST",
-                "message": f"limit must be between 1 and {MAX_BAR_LIMIT}",
-            },
-        }
+        return _with_query_evidence_status(
+            {
+                "rows": [],
+                "metadata": {
+                    "status": "INVALID_REQUEST",
+                    "message": f"limit must be between 1 and {MAX_BAR_LIMIT}",
+                },
+            }
+        )
     include_trade_state = bool(input_data.get("include_trade_state", True))
     if "enrich" in input_data:
         include_trade_state = bool(input_data["enrich"])
     order = str(input_data.get("order", "asc")).lower()
     if order not in {"asc", "desc"}:
-        return {
-            "rows": [],
-            "metadata": {"status": "INVALID_REQUEST", "message": "order must be asc or desc"},
-        }
+        return _with_query_evidence_status(
+            {
+                "rows": [],
+                "metadata": {
+                    "status": "INVALID_REQUEST",
+                    "message": "order must be asc or desc",
+                },
+            }
+        )
 
     try:
         bars = _load_bars_for_query(
@@ -469,11 +613,11 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
                 metadata["reason"] = "no matching bars"
             else:
                 metadata["status"] = "NO_MATCHING_BARS"
-            return {"rows": [], "metadata": metadata}
+            return _with_query_evidence_status({"rows": [], "metadata": metadata})
         cols = [c for c in fields if c in bars.columns]
         output = bars[cols].head(limit).to_dict(orient="records")
         coverage_metadata = _bars_coverage_metadata(symbols, bars, end)
-        return {
+        return _with_query_evidence_status({
             "rows": output,
             "metadata": {
                 "requested_symbols": symbols,
@@ -492,9 +636,11 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
                 "identity_fields_forced": True,
                 **coverage_metadata,
             },
-        }
+        })
     except Exception as exc:
-        return {"rows": [], "metadata": {"error": str(exc)}}
+        return _with_query_evidence_status(
+            {"rows": [], "metadata": {"status": "ERROR", "error": str(exc)}}
+        )
 
 
 def _bar_output_fields(requested_fields: Any) -> list[str]:
@@ -790,25 +936,29 @@ def _query_fundamentals_pit(
 ) -> dict[str, Any]:
     lake = _get_lake()
     if lake is None:
-        return {
-            "rows": [],
-            "metadata": {
-                "point_in_time": True,
-                "status": "NOT_AVAILABLE",
-                "message": "data lake not wired",
-            },
-        }
+        return _with_query_evidence_status(
+            {
+                "rows": [],
+                "metadata": {
+                    "point_in_time": True,
+                    "status": "NOT_AVAILABLE",
+                    "message": "data lake not wired",
+                },
+            }
+        )
 
     as_of = input_data.get("as_of_date")
     if not as_of:
-        return {
-            "rows": [],
-            "metadata": {
-                "point_in_time": True,
-                "status": "INVALID_REQUEST",
-                "message": "as_of_date is required",
-            },
-        }
+        return _with_query_evidence_status(
+            {
+                "rows": [],
+                "metadata": {
+                    "point_in_time": True,
+                    "status": "INVALID_REQUEST",
+                    "message": "as_of_date is required",
+                },
+            }
+        )
     symbols = _requested_symbols(input_data)
     requested_fields = input_data.get("fields")
     fields = (
@@ -821,7 +971,7 @@ def _query_fundamentals_pit(
 
     datasets_used = _fundamental_datasets_used(lake, include_daily_basic, include_financials)
     if not datasets_used:
-        return {
+        return _with_query_evidence_status({
             "rows": [],
             "metadata": {
                 "point_in_time": True,
@@ -834,7 +984,7 @@ def _query_fundamentals_pit(
                 "next_repair_tool": "run_fundamental_data_update",
                 "pit_rule": "visible_date <= as_of_date",
             },
-        }
+        })
 
     try:
         frame = load_fundamentals_asof(
@@ -846,7 +996,7 @@ def _query_fundamentals_pit(
             include_financials=include_financials,
         )
     except Exception as exc:
-        return {
+        return _with_query_evidence_status({
             "rows": [],
             "metadata": {
                 "point_in_time": True,
@@ -856,10 +1006,10 @@ def _query_fundamentals_pit(
                 "requested_symbols": symbols,
                 "datasets_used": datasets_used,
             },
-        }
+        })
 
     if frame.empty:
-        return {
+        return _with_query_evidence_status({
             "rows": [],
             "metadata": {
                 "point_in_time": True,
@@ -872,7 +1022,7 @@ def _query_fundamentals_pit(
                 "next_repair_tool": "run_fundamental_data_update",
                 "pit_rule": "visible_date <= as_of_date",
             },
-        }
+        })
 
     total_rows = len(frame)
     output = frame.head(MAX_FUNDAMENTAL_ROWS).reset_index(drop=True)
@@ -890,7 +1040,7 @@ def _query_fundamentals_pit(
     status = "OK"
     if missing_symbols or missing_fields:
         status = "PARTIAL_COVERAGE"
-    return {
+    return _with_query_evidence_status({
         "rows": records_jsonable(output),
         "metadata": {
             "point_in_time": True,
@@ -917,7 +1067,7 @@ def _query_fundamentals_pit(
                 "run_fundamental_data_update" if status == "PARTIAL_COVERAGE" else None
             ),
         },
-    }
+    })
 
 
 query_fundamentals_pit_tool: AgentTool = tool(
@@ -949,24 +1099,24 @@ query_fundamentals_pit_tool: AgentTool = tool(
 def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
     lake = _get_lake()
     if lake is None:
-        return {
+        return _with_query_evidence_status({
             "rows": [],
             "metadata": {
                 "status": "NOT_AVAILABLE",
                 "point_in_time": True,
                 "message": "data lake not wired",
             },
-        }
+        })
     dataset = str(input_data.get("dataset") or "").strip()
     if not dataset:
-        return {
+        return _with_query_evidence_status({
             "rows": [],
             "metadata": {
                 "status": "INVALID_REQUEST",
                 "point_in_time": True,
                 "message": "dataset is required",
             },
-        }
+        })
     fields_value = input_data.get("fields")
     fields = [str(field) for field in fields_value] if isinstance(fields_value, list) else None
     strict_pit = bool(input_data.get("strict_pit", True))
@@ -1003,7 +1153,7 @@ def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -
                 "for production backtests unless release timing is validated."
             ),
         }
-        return {"rows": [], "metadata": metadata}
+        return _with_query_evidence_status({"rows": [], "metadata": metadata})
     if metadata.get("pit_safe") is False:
         metadata = {
             **metadata,
@@ -1020,7 +1170,9 @@ def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -
         "total_rows": total_rows,
         "truncated": total_rows > len(output),
     }
-    return {"rows": macro_records_jsonable(output), "metadata": metadata}
+    return _with_query_evidence_status(
+        {"rows": macro_records_jsonable(output), "metadata": metadata}
+    )
 
 
 query_macro_series_pit_tool: AgentTool = tool(
