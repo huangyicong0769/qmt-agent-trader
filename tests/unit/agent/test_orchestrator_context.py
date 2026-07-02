@@ -84,6 +84,13 @@ def test_execute_stream_includes_recent_natural_session_history(monkeypatch, tmp
     assert "Do not blame replay, validation, or test protocols" in system_prompt
     assert "Do not expand the user-requested date window" in system_prompt
     assert "Do not validate only a sample symbol" in system_prompt
+    assert "next_repair_tool" in system_prompt
+    assert "suggested_repair" in system_prompt
+    assert "MISSING_FACTOR_INPUTS" in system_prompt
+    assert "todo_update_item" in system_prompt
+    assert "BLOCKED" in system_prompt
+    assert "exact factor_id" in system_prompt
+    assert "strategy factor leg" in system_prompt
     assert "intent has been classified" not in system_prompt
     assert "Suggested workflow" not in system_prompt
     assert "Recommended tools" not in system_prompt
@@ -307,3 +314,106 @@ def test_execute_stream_guides_large_batch_data_pull_without_hiding_agent_tools(
     assert "query_bars" in CapturingDeepSeekClient.seen_tool_names
     assert "run_backtest" in CapturingDeepSeekClient.seen_tool_names
     assert "detect_tool_gap" in CapturingDeepSeekClient.seen_tool_names
+
+
+class StreamingErrorAfterToolResultClient:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def run_tool_loop_stream(self, *, messages: list[dict], tools: list[object], max_rounds: int):
+        yield ToolResult(
+            tool_call_id="call-backtest",
+            tool_name="run_backtest",
+            result={
+                "status": "completed",
+                "run_id": "research_1",
+                "strategy_id": "strat_1",
+                "report_path": "reports/research/research_1.json",
+                "metrics": {"total_return": 0.12, "max_drawdown": -0.4},
+                "diagnostics": {"status": "FAIL"},
+            },
+        )
+        yield ToolResult(
+            tool_call_id="call-factor",
+            tool_name="generate_factor_code",
+            result={
+                "status": "SAMPLE_TEST_FAILED",
+                "factor_id": "factor_bad",
+                "sample_test": {"issues": ["duplicate trade_date index"]},
+                "next_repair_tool": "generate_factor_code",
+            },
+        )
+        raise RuntimeError("peer closed connection without sending complete message body")
+
+
+class StreamingErrorWithoutToolResultClient:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def run_tool_loop_stream(self, *, messages: list[dict], tools: list[object], max_rounds: int):
+        raise RuntimeError("peer closed connection without sending complete message body")
+
+
+def test_execute_stream_returns_fallback_final_message_after_stream_error_with_evidence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.orchestrator.DeepSeekClient",
+        StreamingErrorAfterToolResultClient,
+    )
+    settings = Settings(project_root=tmp_path, deepseek_api_key=SecretStr("key"))
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    orchestrator = AgentOrchestrator(settings=settings, data_lake=lake)
+
+    async def collect_events() -> list[object]:
+        return [
+            event
+            async for event in orchestrator.execute_stream(
+                "在顺周期股票篮子里寻找 smart beta 策略",
+                run_id="run-stream-fallback",
+            )
+        ]
+
+    events = anyio.run(collect_events)
+    final_events = [event for event in events if event.type == "final_message"]
+
+    assert final_events
+    final = final_events[-1]
+    assert final.data["fallback"] is True
+    assert "stream interrupted" in final.message
+    assert "run_backtest" in final.message
+    assert "research_1" in final.message
+    assert "SAMPLE_TEST_FAILED" in final.message
+    assert events[-1].type == "done"
+    assert events[-1].data["completed_with_stream_error"] is True
+    for forbidden in ("最佳", "最优", "推荐", "有效", "稳健"):
+        assert forbidden not in final.message
+
+
+def test_execute_stream_keeps_error_behavior_when_stream_fails_without_tool_results(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.orchestrator.DeepSeekClient",
+        StreamingErrorWithoutToolResultClient,
+    )
+    settings = Settings(project_root=tmp_path, deepseek_api_key=SecretStr("key"))
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    orchestrator = AgentOrchestrator(settings=settings, data_lake=lake)
+
+    async def collect_events() -> list[object]:
+        return [
+            event
+            async for event in orchestrator.execute_stream(
+                "继续",
+                run_id="run-stream-no-evidence",
+            )
+        ]
+
+    events = anyio.run(collect_events)
+
+    assert any(event.type == "error" for event in events)
+    assert all(event.type != "final_message" for event in events)
+    assert all(event.type != "done" for event in events)

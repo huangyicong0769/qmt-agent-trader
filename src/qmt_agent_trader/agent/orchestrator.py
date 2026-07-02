@@ -270,7 +270,24 @@ class AgentOrchestrator:
             "unknown macro datasets. If "
             "generate_factor_code returns STATIC_CHECK_FAILED, or "
             "run_factor_static_checks returns semantic_status=FAILED, do not save, "
-            "evaluate, rank, or recommend that generated factor. Keep the final answer "
+            "evaluate, rank, or recommend that generated factor. "
+            "If a tool returns BLOCKED, INVALID_REQUEST, NO_DATA, PARTIAL_COVERAGE, "
+            "SAMPLE_TEST_FAILED, STATIC_CHECK_FAILED, or semantic_status=FAILED and "
+            "the result includes next_repair_tool or suggested_repair, treat that as "
+            "the next concrete repair step unless the user goal explicitly does not "
+            "need that path. If you cannot execute the repair, use todo_update_item to "
+            "mark the step BLOCKED and include the tool name, reason, missing fields, "
+            "and next_repair_tool in the final answer. MISSING_FACTOR_INPUTS means "
+            "the factor inputs are absent from local data; do not call the factor "
+            "invalid until the missing inputs are fetched or the exact blocker is "
+            "reported. For fundamental factors such as dividend_yield, pb_rank, or "
+            "roe_rank, missing dv_ttm, pb, or roe should route through "
+            "run_fundamental_data_update with dry_run=true and auto_chunk=true, then "
+            "a scoped live update when allowed, then query_fundamentals_pit "
+            "verification. Before building strategy_spec.factors or selected_factors, "
+            "call list_saved_factors or describe_factor to confirm the exact factor_id. "
+            "Every strategy factor leg must use factor_id; never use factor_name as a "
+            "strategy factor leg field. Keep the final answer "
             "at the same abstraction level as the user's question: if the user asks for "
             "strategies, factor tests are intermediate evidence and must not be presented "
             "as strategy results. Do not claim that code was generated, static checks "
@@ -370,6 +387,53 @@ class AgentOrchestrator:
                 return
 
             if stream_error_msg:
+                fallback_tool_results = [
+                    evt
+                    for evt in stream_buffer
+                    if evt.__class__.__name__ == "ToolResult"
+                ]
+                if fallback_tool_results:
+                    fallback_message = _stream_error_fallback_message(
+                        stream_error_msg,
+                        fallback_tool_results,
+                    )
+                    yield OrchestratorEvent(
+                        type="error",
+                        run_id=rid,
+                        message=(
+                            f"LLM streaming error: {stream_error_msg}; "
+                            "returning fallback summary from completed tool evidence."
+                        ),
+                        data={
+                            "error": stream_error_msg,
+                            "fallback": True,
+                            "experiment_id": experiment_id,
+                        },
+                    )
+                    yield OrchestratorEvent(
+                        type="final_message",
+                        run_id=rid,
+                        message=fallback_message,
+                        data={
+                            "content": fallback_message,
+                            "phase": "final",
+                            "fallback": True,
+                            "stream_error": stream_error_msg,
+                            "experiment_id": experiment_id,
+                        },
+                    )
+                    yield OrchestratorEvent(
+                        type="done",
+                        run_id=rid,
+                        message="Completed with stream error fallback.",
+                        data={
+                            "experiment_id": experiment_id,
+                            "completed_with_stream_error": True,
+                            "fallback": True,
+                            "tool_calls_count": len(fallback_tool_results),
+                        },
+                    )
+                    return
                 yield OrchestratorEvent(
                     type="error",
                     run_id=rid,
@@ -402,6 +466,59 @@ class AgentOrchestrator:
 
 
 # ── Stream event converter ──
+
+
+def _stream_error_fallback_message(error: str, tool_results: list[Any]) -> str:
+    lines = [
+        f"LLM stream interrupted before final answer: {error}",
+        "Fallback summary from completed tool evidence only:",
+    ]
+    for index, evt in enumerate(tool_results, start=1):
+        tool_name = str(getattr(evt, "tool_name", "unknown_tool"))
+        result = getattr(evt, "result", None)
+        lines.append(f"- {index}. {tool_name}: {_fallback_result_summary(result)}")
+    lines.append(
+        "Unfinished: the model final response was not received; "
+        "this fallback does not add conclusions beyond completed tool evidence."
+    )
+    return "\n".join(lines)
+
+
+def _fallback_result_summary(result: Any) -> str:
+    if not isinstance(result, dict):
+        return _preview(result, max_len=300)
+
+    fields: list[str] = []
+    for key in (
+        "status",
+        "reason",
+        "run_id",
+        "strategy_id",
+        "factor_id",
+        "report_path",
+        "next_repair_tool",
+    ):
+        value = result.get(key)
+        if value not in (None, "", [], {}):
+            fields.append(f"{key}={value}")
+
+    metrics = result.get("metrics")
+    if isinstance(metrics, dict):
+        metric_parts = [
+            f"{key}={value}"
+            for key, value in metrics.items()
+            if value not in (None, "", [], {})
+        ]
+        if metric_parts:
+            fields.append("metrics={" + ", ".join(metric_parts[:6]) + "}")
+
+    issues = result.get("issues")
+    if isinstance(issues, list) and issues:
+        fields.append("issues=" + "; ".join(str(item) for item in issues[:3]))
+
+    if not fields:
+        fields.append(_preview(result, max_len=300))
+    return ", ".join(fields)
 
 
 def _stream_to_events(
