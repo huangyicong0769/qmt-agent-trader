@@ -9,6 +9,12 @@ from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.todos import TodoListStore
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
+from qmt_agent_trader.agent.tool_result import (
+    DomainStatus,
+    EvidenceStatus,
+    ExecutionStatus,
+    RecommendationStatus,
+)
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 
 
@@ -42,7 +48,10 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
             title=_optional_str(input_data.get("title")),
             notes=_optional_str(input_data.get("notes")),
         )
-        return _result(record)
+        return _result(
+            record,
+            todo_consistency=_todo_consistency(input_data),
+        )
 
     def _get_status(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
         include_completed = bool(input_data.get("include_completed", True))
@@ -113,6 +122,7 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
                     },
                     "title": {"type": "string"},
                     "notes": {"type": "string"},
+                    "evidence_refs": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["item_id"],
             },
@@ -178,8 +188,52 @@ def _optional_str(value: object) -> str | None:
     return str(value)
 
 
-def _result(record: Any, *, include_completed: bool = True) -> dict[str, Any]:
-    return {
+def _result(
+    record: Any,
+    *,
+    include_completed: bool = True,
+    todo_consistency: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    warnings = list((todo_consistency or {}).get("warnings", []))
+    payload = {
         "status": "ok",
+        "execution_status": ExecutionStatus.OK.value,
+        "domain_status": DomainStatus.WARN.value if warnings else DomainStatus.UNKNOWN.value,
+        "evidence_status": EvidenceStatus.WEAK.value if warnings else EvidenceStatus.UNKNOWN.value,
+        "recommendation_status": RecommendationStatus.UNKNOWN.value,
+        "warnings": warnings,
+        "todo_consistency_status": (todo_consistency or {}).get(
+            "todo_consistency_status",
+            "UNKNOWN",
+        ),
         "todo_state": record.to_payload(include_completed=include_completed),
     }
+    return payload
+
+
+def _todo_consistency(input_data: dict[str, Any]) -> dict[str, Any]:
+    status = str(input_data.get("status") or "")
+    if status != "COMPLETED":
+        return {"todo_consistency_status": "UNKNOWN", "warnings": []}
+    notes = str(input_data.get("notes") or "")
+    evidence_refs = input_data.get("evidence_refs")
+    warnings: list[str] = []
+    consistency = "OK"
+    failure_markers = (
+        "FAIL",
+        "FAILED",
+        "BLOCKED",
+        "NO_DATA",
+        "PARTIAL_COVERAGE",
+        "INVALID",
+        "缺失",
+        "失败",
+        "阻塞",
+    )
+    if any(marker in notes for marker in failure_markers):
+        consistency = "CONFLICT"
+        warnings.append("TODO_COMPLETED_WITH_FAILED_EVIDENCE")
+    elif not isinstance(evidence_refs, list) or not evidence_refs:
+        consistency = "UNVERIFIED"
+        warnings.append("TODO_COMPLETION_UNVERIFIED")
+    return {"todo_consistency_status": consistency, "warnings": warnings}

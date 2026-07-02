@@ -93,3 +93,40 @@ def test_todo_clear_completed_keeps_pending_in_progress_and_blocked(tmp_path) ->
 
     remaining_titles = [item["title"] for item in cleared["todo_state"]["items"]]
     assert remaining_titles == ["进行中", "阻塞", "待处理"]
+
+
+def test_todo_completed_without_evidence_is_preserved_but_warns(tmp_path) -> None:
+    tools = _tools(tmp_path)
+    context = ToolContext(run_id="run_1", session_id="chat_1")
+    created = tools["todo_set_list"].run({"items": [{"title": "运行回测"}]}, context)
+    item_id = created["todo_state"]["items"][0]["item_id"]
+
+    updated = tools["todo_update_item"].run(
+        {"item_id": item_id, "status": "COMPLETED"},
+        context,
+    )
+
+    assert updated["todo_state"]["items"][0]["status"] == "COMPLETED"
+    assert updated["todo_consistency_status"] == "UNVERIFIED"
+    assert "TODO_COMPLETION_UNVERIFIED" in updated["warnings"]
+
+
+def test_todo_completed_with_failed_evidence_is_preserved_but_warns(tmp_path) -> None:
+    tools = _tools(tmp_path)
+    context = ToolContext(run_id="run_1", session_id="chat_1")
+    created = tools["todo_set_list"].run({"items": [{"title": "运行回测"}]}, context)
+    item_id = created["todo_state"]["items"][0]["item_id"]
+
+    updated = tools["todo_update_item"].run(
+        {
+            "item_id": item_id,
+            "status": "COMPLETED",
+            "notes": "run_backtest diagnostics FAIL",
+            "evidence_refs": ["run_backtest:research_1"],
+        },
+        context,
+    )
+
+    assert updated["todo_state"]["items"][0]["status"] == "COMPLETED"
+    assert updated["todo_consistency_status"] == "CONFLICT"
+    assert "TODO_COMPLETED_WITH_FAILED_EVIDENCE" in updated["warnings"]
