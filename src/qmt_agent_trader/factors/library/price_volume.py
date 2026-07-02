@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from qmt_agent_trader.data.bars import column_quality, is_column_usable_for_factor
+
 
 def momentum(frame: pd.DataFrame, window: int) -> pd.Series:
     return frame.groupby("symbol")["close"].pct_change(window)
@@ -25,7 +27,22 @@ def volatility_20d(frame: pd.DataFrame) -> pd.Series:
 
 
 def turnover_20d(frame: pd.DataFrame) -> pd.Series:
-    return frame.groupby("symbol")["turnover"].rolling(20).mean().reset_index(level=0, drop=True)
+    if "turnover" not in frame.columns:
+        raise ValueError("TURNOVER_NOT_REAL_OR_INSUFFICIENT: turnover column is missing")
+    quality = column_quality(frame, "turnover")
+    if not is_column_usable_for_factor(frame, "turnover"):
+        raise ValueError(
+            "TURNOVER_NOT_REAL_OR_INSUFFICIENT: "
+            f"turnover column_quality={quality}"
+        )
+    turnover = pd.to_numeric(frame["turnover"], errors="coerce")
+    non_null = turnover.notna().sum()
+    non_zero = turnover.fillna(0).ne(0).sum()
+    if non_null == 0 or non_zero == 0:
+        raise ValueError(
+            "TURNOVER_NOT_REAL_OR_INSUFFICIENT: turnover has no non-zero observations"
+        )
+    return turnover.groupby(frame["symbol"]).rolling(20).mean().reset_index(level=0, drop=True)
 
 
 def amount_zscore_20d(frame: pd.DataFrame) -> pd.Series:

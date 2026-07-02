@@ -3,11 +3,13 @@ import pandas as pd
 from qmt_agent_trader.data.bars import (
     CANONICAL_BAR_COLUMNS,
     _apply_historical_st_flags,
+    column_quality,
     enrich_trade_states,
     load_daily_bars,
     normalize_tushare_daily,
 )
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.factors.library.price_volume import turnover_20d
 
 
 def test_normalize_tushare_daily_ignores_empty_marker_column() -> None:
@@ -32,6 +34,55 @@ def test_normalize_tushare_daily_ignores_empty_marker_column() -> None:
     assert bars.iloc[0]["symbol"] == "000001.SZ"
     assert str(bars.iloc[0]["trade_date"]) == "2024-01-02"
     assert "turnover" in bars.columns
+
+
+def test_missing_turnover_is_marked_unusable_not_filled_with_zero() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20240102",
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.5,
+            }
+        ]
+    )
+
+    bars = normalize_tushare_daily(frame)
+
+    assert pd.isna(bars.iloc[0]["turnover"])
+    assert column_quality(bars, "turnover") == {
+        "source": "missing_from_raw",
+        "imputed": True,
+        "usable_for_factor": False,
+    }
+
+
+def test_turnover_factor_requires_real_turnover() -> None:
+    bars = normalize_tushare_daily(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": f"202401{day:02d}",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                }
+                for day in range(1, 22)
+            ]
+        )
+    )
+
+    try:
+        turnover_20d(bars)
+    except ValueError as exc:
+        assert "TURNOVER_NOT_REAL_OR_INSUFFICIENT" in str(exc)
+    else:
+        raise AssertionError("turnover_20d should reject imputed turnover")
 
 
 def test_load_daily_bars_ignores_legacy_daily_batches(tmp_path) -> None:

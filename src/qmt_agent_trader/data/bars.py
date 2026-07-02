@@ -27,13 +27,18 @@ CANONICAL_BAR_COLUMNS = [
 
 def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
-        return pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+        empty = pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+        empty.attrs["column_quality"] = {}
+        return empty
 
     data = frame.copy()
+    column_quality: dict[str, dict[str, object]] = {}
     if "_empty" in data.columns:
         data = data.drop(columns=["_empty"])
     if data.empty:
-        return pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+        empty = pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+        empty.attrs["column_quality"] = {}
+        return empty
 
     rename_map = {"ts_code": "symbol", "vol": "volume"}
     data = data.rename(columns=rename_map)
@@ -43,19 +48,45 @@ def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"tushare daily bars missing columns: {sorted(missing)}")
 
     data["trade_date"] = pd.to_datetime(data["trade_date"].astype(str), format="%Y%m%d").dt.date
-    for column in ["volume", "amount", "turnover"]:
+    for column in ["volume", "amount"]:
         if column not in data.columns:
-            data[column] = 0.0
+            data[column] = pd.NA
+            column_quality[column] = {
+                "source": "missing_from_raw",
+                "imputed": True,
+                "usable_for_factor": False,
+            }
+        else:
+            column_quality[column] = {
+                "source": "raw",
+                "imputed": False,
+                "usable_for_factor": True,
+            }
+    if "turnover" not in data.columns:
+        data["turnover"] = pd.NA
+        column_quality["turnover"] = {
+            "source": "missing_from_raw",
+            "imputed": True,
+            "usable_for_factor": False,
+        }
+    else:
+        column_quality["turnover"] = {
+            "source": "raw",
+            "imputed": False,
+            "usable_for_factor": True,
+        }
     for column in ["suspended", "limit_up", "limit_down", "st"]:
         if column not in data.columns:
             data[column] = False
 
-    return (
+    normalized = (
         data[CANONICAL_BAR_COLUMNS]
         .drop_duplicates(["symbol", "trade_date"], keep="last")
         .sort_values(["symbol", "trade_date"])
         .reset_index(drop=True)
     )
+    normalized.attrs["column_quality"] = column_quality
+    return normalized
 
 
 def load_daily_bars(
@@ -102,10 +133,13 @@ def load_daily_bars(
         if normalized
         else pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
     )
+    bars.attrs["column_quality"] = _merge_column_quality(normalized)
     if bars.empty:
         return bars
     if not include_trade_state:
-        return bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+        result = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+        result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
+        return result
     if bars.empty:
         return bars.reset_index(drop=True)
 
@@ -145,7 +179,27 @@ def load_daily_bars(
         ),
     )
 
-    return bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+    result = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+    result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
+    return result
+
+
+def column_quality(frame: pd.DataFrame, column: str) -> dict[str, object]:
+    quality = frame.attrs.get("column_quality")
+    if isinstance(quality, dict) and isinstance(quality.get(column), dict):
+        return dict(quality[column])
+    if column not in frame.columns:
+        return {
+            "source": "missing_column",
+            "imputed": False,
+            "usable_for_factor": False,
+        }
+    return {"source": "unknown", "imputed": False, "usable_for_factor": None}
+
+
+def is_column_usable_for_factor(frame: pd.DataFrame, column: str) -> bool:
+    quality = column_quality(frame, column)
+    return quality.get("usable_for_factor") is not False
 
 
 def enrich_trade_states(
@@ -167,7 +221,32 @@ def enrich_trade_states(
         enriched = _apply_historical_st_flags(enriched, namechange)
     for column in ["suspended", "limit_up", "limit_down", "st"]:
         enriched[column] = enriched[column].fillna(False).astype(bool)
+    enriched.attrs["column_quality"] = bars.attrs.get("column_quality", {})
     return enriched
+
+
+def _merge_column_quality(frames: list[pd.DataFrame]) -> dict[str, dict[str, object]]:
+    merged: dict[str, dict[str, object]] = {}
+    for frame in frames:
+        quality = frame.attrs.get("column_quality")
+        if not isinstance(quality, dict):
+            continue
+        for column, entry in quality.items():
+            if not isinstance(entry, dict):
+                continue
+            existing = merged.get(str(column))
+            if existing is None:
+                merged[str(column)] = dict(entry)
+                continue
+            if (
+                existing.get("usable_for_factor") is False
+                or entry.get("usable_for_factor") is False
+            ):
+                existing["usable_for_factor"] = False
+            if existing.get("source") != entry.get("source"):
+                existing["source"] = "mixed"
+            existing["imputed"] = bool(existing.get("imputed")) or bool(entry.get("imputed"))
+    return merged
 
 
 def _parse_date(value: str | date) -> date:

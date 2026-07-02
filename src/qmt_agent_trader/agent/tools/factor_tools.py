@@ -21,9 +21,16 @@ from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import FactorSpec, ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
+from qmt_agent_trader.agent.tool_result import (
+    DomainStatus,
+    EvidenceStatus,
+    ExecutionStatus,
+    RecommendationStatus,
+)
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id
+from qmt_agent_trader.data.bars import CANONICAL_BAR_COLUMNS
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.context import FactorContext
 from qmt_agent_trader.factors.registry import FactorRegistry
@@ -193,35 +200,76 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
             spec_code,
         )
         sample_result = _run_factor_sample_test(code_path, spec_data)
+        real_schema_result = _run_factor_real_schema_test(spec_data)
         if sample_result["status"] != "PASSED":
             return {
                 "status": "SAMPLE_TEST_FAILED",
+                "execution_status": ExecutionStatus.OK.value,
+                "domain_status": DomainStatus.FAILED.value,
+                "evidence_status": EvidenceStatus.INVALID.value,
+                "recommendation_status": RecommendationStatus.BLOCKED.value,
                 "factor_id": factor_id,
                 "code_path": str(code_path),
                 "tests_path": str(tests_path),
                 "spec_path": str(spec_path),
                 "review_required": True,
                 "sample_test": sample_result,
+                "synthetic_contract_test": sample_result,
+                "contract_test_status": sample_result["status"],
+                "real_schema_test": real_schema_result,
+                "real_schema_status": real_schema_result["status"],
                 "next_repair_tool": "generate_factor_code",
                 "suggested_repair": _factor_authoring_suggested_repair(),
                 "authoring_contract": _factor_authoring_contract(),
                 "warnings": [*warnings, "generated factor failed sample execution"],
             }
-        return {
+        payload = {
             "factor_id": factor_id,
             "code_path": str(code_path),
             "tests_path": str(tests_path),
             "spec_path": str(spec_path),
             "status": "generated",
+            "execution_status": ExecutionStatus.OK.value,
             "formula_ast": formula_ast,
             "static_check_status": "PASSED",
             "sample_test_status": sample_result["status"],
             "sample_test": sample_result,
+            "synthetic_contract_test": sample_result,
+            "contract_test_status": sample_result["status"],
+            "real_schema_test": real_schema_result,
+            "real_schema_status": real_schema_result["status"],
             "review_required": True,
             "research_only": True,
             "live_trading_allowed": False,
             "warnings": warnings,
         }
+        if real_schema_result["status"] == "BLOCKED":
+            payload.update(
+                {
+                    "domain_status": DomainStatus.BLOCKED.value,
+                    "evidence_status": EvidenceStatus.BLOCKED.value,
+                    "recommendation_status": RecommendationStatus.BLOCKED.value,
+                    "reason": "MISSING_REAL_DATA_SCHEMA",
+                    "missing_columns": real_schema_result["missing_columns"],
+                    "warnings": [
+                        *warnings,
+                        "generated factor code is not runnable evidence on real bars schema",
+                    ],
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "domain_status": DomainStatus.WARN.value
+                    if real_schema_result["status"] == "UNKNOWN"
+                    else DomainStatus.OK.value,
+                    "evidence_status": EvidenceStatus.WEAK.value
+                    if real_schema_result["status"] == "UNKNOWN"
+                    else EvidenceStatus.VALID.value,
+                    "recommendation_status": RecommendationStatus.RESEARCH_ONLY.value,
+                }
+            )
+        return payload
     except Exception as exc:
         return {
             "status": "STATIC_CHECK_FAILED",
@@ -841,6 +889,7 @@ def _load_factor_spec(spec_path_raw: str, sb: CodeSandbox) -> dict[str, Any]:
 
 def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
     explicit = spec_data.get("required_columns") or spec_data.get("inputs")
+    formula = json.dumps(spec_data, ensure_ascii=False).lower()
     if isinstance(explicit, list):
         columns = ["symbol", "trade_date"]
         data_sources = {
@@ -859,9 +908,14 @@ def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
                 columns.append(text)
         if "close" not in columns:
             columns.append("close")
+        _append_semantic_required_columns(columns, formula)
         return tuple(columns)
-    formula = json.dumps(spec_data, ensure_ascii=False).lower()
     columns = ["symbol", "trade_date", "close"]
+    _append_semantic_required_columns(columns, formula)
+    return tuple(columns)
+
+
+def _append_semantic_required_columns(columns: list[str], formula: str) -> None:
     for candidate in (
         "open",
         "high",
@@ -880,7 +934,6 @@ def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
         columns.append("industry")
     if "宏观" in formula and "macro_cycle_score" not in columns:
         columns.append("macro_cycle_score")
-    return tuple(columns)
 
 
 def _render_agent_factor_code(spec_data: dict[str, Any], python_function: str) -> str:
@@ -1059,6 +1112,7 @@ def _run_factor_sample_test(code_path: Path, spec_data: dict[str, Any]) -> dict[
                 "status": "FAILED",
                 "issues": direct_issues,
                 "rows": len(sample),
+                "contract_test_only": True,
                 "non_null": int(pd.to_numeric(direct_result, errors="coerce").notna().sum())
                 if isinstance(direct_result, pd.Series)
                 else 0,
@@ -1071,6 +1125,7 @@ def _run_factor_sample_test(code_path: Path, spec_data: dict[str, Any]) -> dict[
                 "status": "FAILED",
                 "issues": [_factor_sample_exception_hint(str(exc))],
                 "rows": len(sample),
+                "contract_test_only": True,
                 "non_null": 0,
             }
         issues = _factor_sample_issues(result, sample, before, source="compute")
@@ -1078,6 +1133,7 @@ def _run_factor_sample_test(code_path: Path, spec_data: dict[str, Any]) -> dict[
             "status": "PASSED" if not issues else "FAILED",
             "issues": issues,
             "rows": len(sample),
+            "contract_test_only": True,
             "non_null": int(pd.to_numeric(result, errors="coerce").notna().sum())
             if isinstance(result, pd.Series)
             else 0,
@@ -1110,14 +1166,33 @@ def _sample_factor_data(spec_data: dict[str, Any]) -> pd.DataFrame:
                 "volume": 1000 + offset * 10 + symbol_index,
                 "vol": 1000 + offset * 10 + symbol_index,
                 "amount": 10_000 + offset * 100 + symbol_index,
-                "turnover": 0.01 + offset * 0.001 + symbol_index * 0.002,
-                "industry": "bank" if symbol_index == 0 else "software",
-                "macro_cycle_score": 1.0,
             }
             for column in required:
                 row.setdefault(column, 1.0)
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _run_factor_real_schema_test(spec_data: dict[str, Any]) -> dict[str, Any]:
+    required = set(_required_columns_for_spec(spec_data))
+    real_columns = set(CANONICAL_BAR_COLUMNS)
+    missing = sorted(required.difference(real_columns))
+    warnings: list[str] = []
+    status = "PASSED"
+    if missing:
+        status = "BLOCKED"
+    elif "turnover" in required:
+        status = "UNKNOWN"
+        warnings.append("TURNOVER_REQUIRES_RUNTIME_COLUMN_QUALITY")
+    return {
+        "status": status,
+        "required_columns": sorted(required),
+        "real_schema_columns": sorted(real_columns),
+        "missing_columns": missing,
+        "reason": "MISSING_REAL_DATA_SCHEMA" if missing else None,
+        "warnings": warnings,
+        "real_schema_test_only": True,
+    }
 
 
 def _factor_sample_issues(

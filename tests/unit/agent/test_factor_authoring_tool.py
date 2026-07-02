@@ -151,6 +151,34 @@ def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:
     assert result["sample_test_status"] == "PASSED"
 
 
+def test_agent_authored_factor_reports_real_schema_blocker_for_industry(registry) -> None:
+    python_function = """
+def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:
+    return data["close"] - data.groupby("industry")["close"].transform("mean")
+""".strip()
+
+    result = registry.run_tool(
+        "generate_factor_code",
+        {
+            "factor_spec": {
+                "factor_id": "industry_neutral_factor",
+                "name": "industry neutral factor",
+                "formula": "行业中性 close",
+                "required_columns": ["daily_bars", "close", "industry"],
+            },
+            "python_function": python_function,
+        },
+        ToolContext(run_id="factor-real-schema"),
+    )
+
+    assert result["status"] == "generated"
+    assert result["synthetic_contract_test"]["contract_test_only"] is True
+    assert result["real_schema_status"] == "BLOCKED"
+    assert result["domain_status"] == "BLOCKED"
+    assert result["evidence_status"] == "BLOCKED"
+    assert result["missing_columns"] == ["industry"]
+
+
 def test_agent_authored_factor_sample_test_rejects_input_mutation(registry) -> None:
     python_function = """
 def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:
