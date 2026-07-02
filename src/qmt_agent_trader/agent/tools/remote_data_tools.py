@@ -1638,6 +1638,9 @@ def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dic
         items = _parse_fetch_items(input_data)
     except ValueError as exc:
         return {"status": "INVALID_REQUEST", "message": str(exc)}
+    lake = _get_lake()
+    if lake is not None:
+        items = _attach_trade_dates_for_marketwide_fetches(items, lake)
     provider = TushareProvider(
         planner_config=TusharePlannerConfig(
             autonomous_request_budget=_AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS
@@ -1689,6 +1692,7 @@ def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict
         items = _parse_fetch_items(input_data)
     except ValueError as exc:
         return {"status": "INVALID_REQUEST", "message": str(exc)}
+    items = _attach_trade_dates_for_marketwide_fetches(items, lake)
     provider = _new_tushare_provider(lake, settings)
     plan = provider.plan_fetch(
         items,
@@ -1711,6 +1715,63 @@ def _build_data_table(input_data: dict[str, Any], _context: ToolContext) -> dict
     table = str(input_data.get("table", ""))
     snapshot = _optional_str(input_data.get("snapshot_as_of_date"))
     return DataTableBuilder(lake).build(table, snapshot_as_of_date=snapshot)
+
+
+def _attach_trade_dates_for_marketwide_fetches(
+    items: list[FetchItem],
+    lake: DataLake,
+) -> list[FetchItem]:
+    provider = TushareProvider()
+    config = TusharePlannerConfig(
+        autonomous_request_budget=_AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS
+    )
+    enriched: list[FetchItem] = []
+    for item in items:
+        spec = provider.registry.get(item.api_name)
+        if (
+            spec is None
+            or not spec.supports_marketwide_by_date
+            or len(item.symbols) <= config.symbol_fanout_threshold
+            or not item.start_date
+            or not item.end_date
+            or item.trade_date
+            or item.params.get("trade_dates")
+        ):
+            enriched.append(item)
+            continue
+        trade_dates = _new_layout_trade_dates(lake, item.start_date, item.end_date)
+        if not trade_dates:
+            enriched.append(item)
+            continue
+        enriched.append(
+            FetchItem(
+                api_name=item.api_name,
+                symbols=item.symbols,
+                fields=item.fields,
+                start_date=item.start_date,
+                end_date=item.end_date,
+                trade_date=item.trade_date,
+                params={**item.params, "trade_dates": trade_dates},
+            )
+        )
+    return enriched
+
+
+def _new_layout_trade_dates(lake: DataLake, start: str, end: str) -> list[str]:
+    start_key = start.replace("-", "")
+    end_key = end.replace("-", "")
+    frame = None
+    if lake.dataset_path("silver", "trade_calendar").exists():
+        frame = lake.read_parquet("silver", "trade_calendar")
+    elif lake.dataset_path("raw", "tushare/trade_cal").exists():
+        frame = lake.read_parquet("raw", "tushare/trade_cal")
+    if frame is None or frame.empty or "cal_date" not in frame.columns:
+        return []
+    data = frame.copy()
+    if "is_open" in data.columns:
+        data = data[data["is_open"].astype(str).isin({"1", "True", "true"})]
+    dates = data["cal_date"].astype(str).str.replace("-", "", regex=False)
+    return sorted(date for date in dates if start_key <= date <= end_key)
 
 
 def _parse_fetch_items(input_data: dict[str, Any]) -> list[FetchItem]:

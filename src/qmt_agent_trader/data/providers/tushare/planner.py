@@ -155,6 +155,19 @@ class TushareFetchPlanner:
                 "reason": "REQUEST_BUDGET_EXCEEDED",
                 "message": "symbol fanout exceeds planner threshold",
             }
+        if (
+            strategy == "marketwide_by_trade_date"
+            and item.start_date
+            and item.end_date
+            and not item.trade_date
+            and not item.params.get("trade_dates")
+        ):
+            return {
+                "status": "BLOCKED",
+                "api_name": spec.api_name,
+                "reason": "TRADE_CALENDAR_REQUIRED",
+                "message": "marketwide range planning requires explicit trade_dates",
+            }
         batches = _batches_for(spec, item, fields, strategy, self.config)
         pagination = spec.pagination
         if pagination.get("type") == "limit_offset":
@@ -211,11 +224,11 @@ def _strategy_for(
     if spec.api_name in {"stock_basic", "fund_basic", "index_basic"} and not item.symbols:
         return "full_refresh"
     if item.symbols and spec.supports_symbol_range:
-        return (
-            "fanout_by_symbol_range"
-            if len(item.symbols) <= config.symbol_fanout_threshold
-            else "blocked_too_large"
-        )
+        if len(item.symbols) <= config.symbol_fanout_threshold:
+            return "fanout_by_symbol_range"
+        if spec.supports_marketwide_by_date:
+            return "marketwide_by_trade_date"
+        return "blocked_too_large"
     if spec.supports_marketwide_by_date and item.trade_date:
         return "marketwide_by_trade_date"
     if spec.supports_marketwide_by_date and item.start_date and item.end_date:
@@ -247,19 +260,20 @@ def _batches_for(
             }
             for symbol in item.symbols
         ]
-    if strategy == "marketwide_by_trade_date" and item.start_date and item.end_date:
+    if strategy == "marketwide_by_trade_date" and item.params.get("trade_dates"):
+        base_without_range = {
+            key: value
+            for key, value in base.items()
+            if key not in {"start_date", "end_date", "trade_dates"}
+        }
         return [
             {
                 "api_name": spec.api_name,
-                "params": {**base, "start_date": start, "end_date": end},
+                "params": {**base_without_range, "trade_date": trade_date},
                 "fields": fields,
                 "dataset_id": spec.dataset_id,
             }
-            for start, end in _date_chunks(
-                item.start_date,
-                item.end_date,
-                config.max_days_per_batch,
-            )
+            for trade_date in item.params["trade_dates"]
         ]
     return [
         {

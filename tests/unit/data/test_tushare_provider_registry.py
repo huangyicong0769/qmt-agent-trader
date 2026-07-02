@@ -9,6 +9,7 @@ from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.remote_data_tools import (
     build_remote_data_tools,
+    plan_tushare_fetch_tool,
     run_tushare_fetch_tool,
     wire,
 )
@@ -116,7 +117,33 @@ def test_tushare_planner_supports_multi_symbol_fanout_and_budget_block() -> None
     assert plan.estimated_request_count == 2
     assert plan.items[0]["strategy"] == "fanout_by_symbol_range"
     assert blocked.status == "BLOCKED"
-    assert blocked.reason == "REQUEST_BUDGET_EXCEEDED"
+    assert blocked.reason == "TRADE_CALENDAR_REQUIRED"
+
+
+def test_tushare_planner_uses_explicit_trade_dates_for_large_marketwide_fetch() -> None:
+    planner = TushareFetchPlanner()
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="daily_basic",
+                symbols=[f"{index:06d}.SZ" for index in range(1, 40)],
+                fields=["ts_code", "trade_date", "pe_ttm"],
+                start_date="20240101",
+                end_date="20240105",
+                params={"trade_dates": ["20240102", "20240103", "20240105"]},
+            )
+        ],
+        requested_by_llm=True,
+    )
+
+    assert plan.status == "planned"
+    assert plan.items[0]["strategy"] == "marketwide_by_trade_date"
+    assert [batch["params"]["trade_date"] for batch in plan.items[0]["batches"]] == [
+        "20240102",
+        "20240103",
+        "20240105",
+    ]
 
 
 def test_tushare_fetcher_writes_new_raw_layout_and_metadata(tmp_path) -> None:
@@ -285,3 +312,58 @@ def test_run_tushare_fetch_tool_dry_run_never_contacts_client(tmp_path) -> None:
 
     assert result["status"] == "planned"
     assert client.calls == []
+
+
+def test_plan_tushare_fetch_tool_injects_new_layout_trade_calendar_only(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    wire(data_lake=lake, settings=Settings(project_root=tmp_path))
+    request = {
+        "items": [
+            {
+                "api_name": "daily_basic",
+                "symbols": [f"{index:06d}.SZ" for index in range(1, 40)],
+                "fields": ["ts_code", "trade_date", "pe_ttm"],
+                "start_date": "20240101",
+                "end_date": "20240105",
+            }
+        ]
+    }
+
+    blocked = plan_tushare_fetch_tool.run(
+        request,
+        ToolContext(run_id="plan-without-new-calendar", requested_by_llm=True),
+    )
+    lake.write_parquet(
+        pd.DataFrame([{"cal_date": "20240102", "is_open": 1}]),
+        "raw",
+        "tushare_trade_calendar",
+    )
+    still_blocked = plan_tushare_fetch_tool.run(
+        request,
+        ToolContext(run_id="plan-with-legacy-calendar", requested_by_llm=True),
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"cal_date": "20240102", "is_open": 1},
+                {"cal_date": "20240103", "is_open": 1},
+                {"cal_date": "20240104", "is_open": 0},
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    planned = plan_tushare_fetch_tool.run(
+        request,
+        ToolContext(run_id="plan-with-new-calendar", requested_by_llm=True),
+    )
+
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["reason"] == "TRADE_CALENDAR_REQUIRED"
+    assert still_blocked["status"] == "BLOCKED"
+    assert planned["status"] == "planned"
+    assert planned["strategy"] == "marketwide_by_trade_date"
+    assert [batch["params"]["trade_date"] for batch in planned["batches"]] == [
+        "20240102",
+        "20240103",
+    ]
