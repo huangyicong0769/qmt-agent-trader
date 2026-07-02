@@ -31,7 +31,7 @@ class RecordingClient(TushareClient):
     def execute(self, request: TushareRequest) -> pd.DataFrame:
         self.seen.append(request.api_name)
         if request.api_name == "trade_cal":
-            return pd.DataFrame([{"cal_date": "20240102", "is_open": 1}])
+            return pd.DataFrame([{"cal_date": request.params["start_date"], "is_open": 1}])
         if request.api_name == "daily":
             return pd.DataFrame(
                 [
@@ -265,6 +265,120 @@ def test_run_fundamental_data_update_auto_chunks_and_executes_live_plan(
     assert result["remaining_missing_ranges"] == []
     assert [request.api_name for request in client.requests].count("trade_cal") == 2
     assert lake.dataset_path("raw", "tushare_daily_basic").exists()
+
+
+def test_run_remote_data_update_auto_chunks_dry_run_plan(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    wire(
+        data_lake=lake,
+        settings=Settings(
+            project_root=tmp_path,
+            tushare_token=None,
+            remote_data_max_days_per_call=366,
+        ),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240101",
+            "end_date": "20250131",
+            "dry_run": True,
+            "auto_chunk": True,
+        },
+        ToolContext(run_id="daily-auto-chunk-dry", dry_run=True),
+    )
+
+    assert result["status"] == "planned"
+    assert result["category"] == "daily"
+    assert result["auto_chunk"] is True
+    assert result["dry_run"] is True
+    assert result["execute_plan"] is False
+    assert [batch["start_date"] for batch in result["batches"]] == [
+        "20240101",
+        "20250101",
+    ]
+    assert [batch["end_date"] for batch in result["batches"]] == [
+        "20241231",
+        "20250131",
+    ]
+    assert result["estimated_request_count"] >= 0
+    assert result["next_repair_tool"] == "run_remote_data_update"
+    assert not lake.dataset_path("raw", "tushare_daily").exists()
+
+
+def test_run_remote_data_update_auto_chunks_and_executes_live_plan(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    client = RecordingClient()
+    wire(
+        data_lake=lake,
+        settings=Settings(
+            project_root=tmp_path,
+            remote_data_max_days_per_call=366,
+        ),
+        client_factory=lambda: client,
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240101",
+            "end_date": "20250131",
+            "include_basics": False,
+            "dry_run": False,
+            "auto_chunk": True,
+            "execute_plan": True,
+        },
+        ToolContext(run_id="daily-auto-chunk-live", dry_run=False),
+    )
+
+    assert result["status"] in {"updated", "PARTIAL_UPDATE"}
+    assert result["category"] == "daily"
+    assert result["auto_chunk"] is True
+    assert [batch["start_date"] for batch in result["batches"]] == [
+        "20240101",
+        "20250101",
+    ]
+    assert [batch["end_date"] for batch in result["batches"]] == [
+        "20241231",
+        "20250131",
+    ]
+    assert [batch["status"] for batch in result["batch_results"]] == [
+        "updated",
+        "updated",
+    ]
+    assert result["post_update_coverage"]["coverage_status"] in {
+        "OK",
+        "PARTIAL_COVERAGE",
+        "CALENDAR_VALIDATION_REQUIRED",
+    }
+    assert [item for item in client.seen if item == "daily"] == ["daily", "daily"]
+    assert lake.dataset_path("raw", "tushare_daily").exists()
+
+
+def test_run_remote_data_update_without_auto_chunk_still_rejects_too_long_range(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, remote_data_max_days_per_call=366),
+        client_factory=lambda: ExplodingClient(),
+    )
+
+    result = run_remote_data_update_tool.run(
+        {
+            "source": "tushare",
+            "start_date": "20240101",
+            "end_date": "20250131",
+            "dry_run": True,
+        },
+        ToolContext(run_id="daily-no-auto-chunk", dry_run=True),
+    )
+
+    assert result["status"] == "INVALID_REQUEST"
+    assert "remote_data_max_days_per_call=366" in result["message"]
 
 
 def test_run_fundamental_data_update_blocks_unscoped_autonomous_live_plan(

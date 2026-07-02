@@ -237,6 +237,18 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
                 "status": "INVALID_REQUEST",
                 "message": "asset_type must be stock, etf, or auto",
             }
+        if _needs_auto_chunk(start, end, settings) and bool(input_data.get("auto_chunk", False)):
+            return _run_chunked_remote_data_update(
+                input_data,
+                context,
+                settings=settings,
+                start=start,
+                end=end,
+                ts_code=ts_code,
+                symbols=symbols,
+                asset_type=asset_type,
+                timeout_seconds_used=timeout_seconds_used,
+            )
         if ts_code is None:
             _validate_span(start, end, settings.remote_data_max_days_per_call)
     except ValueError as exc:
@@ -362,6 +374,166 @@ def _run_remote_data_update(input_data: dict[str, Any], context: ToolContext) ->
             error=message,
         )
         return {"status": "error", "message": message}
+
+
+def _run_chunked_remote_data_update(
+    input_data: dict[str, Any],
+    context: ToolContext,
+    *,
+    settings: Settings,
+    start: str,
+    end: str,
+    ts_code: str | None,
+    symbols: list[str],
+    asset_type: str,
+    timeout_seconds_used: int,
+) -> dict[str, Any]:
+    chunks = _chunk_ranges(start, end, settings.remote_data_max_days_per_call)
+    batch_plans = [
+        _plan_remote_data_update(
+            {
+                **input_data,
+                "start_date": chunk_start,
+                "end_date": chunk_end,
+                "auto_chunk": False,
+                "dry_run": True,
+            },
+            context,
+        )
+        for chunk_start, chunk_end in chunks
+    ]
+    batches = [
+        {
+            **plan,
+            "batch_index": index,
+            "start_date": chunk_start,
+            "end_date": chunk_end,
+        }
+        for index, (plan, (chunk_start, chunk_end)) in enumerate(
+            zip(batch_plans, chunks, strict=True),
+            start=1,
+        )
+    ]
+    estimated_request_count = sum(_estimated_request_count(plan) for plan in batch_plans)
+    execute_plan = bool(input_data.get("execute_plan", False))
+    dry_run = bool(input_data.get("dry_run", False))
+    missing_ranges = [
+        item
+        for batch in batches
+        for item in batch.get("missing_ranges", [])
+        if isinstance(item, dict)
+    ]
+    base_payload: dict[str, Any] = {
+        "status": "planned",
+        "category": "daily",
+        "source": "tushare",
+        "start_date": start,
+        "end_date": end,
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "auto_chunk": True,
+        "execute_plan": execute_plan,
+        "dry_run": dry_run,
+        "batches": batches,
+        "coverage_status": _worst_coverage_status(
+            [str(batch.get("coverage_status", "NO_DATA")) for batch in batches]
+        ),
+        "missing_ranges": missing_ranges,
+        "remaining_missing_ranges": list(missing_ranges),
+        "estimated_request_count": estimated_request_count,
+        "timeout_seconds_used": timeout_seconds_used,
+        "next_repair_tool": "run_remote_data_update",
+    }
+    if dry_run or not execute_plan:
+        return base_payload
+
+    if (
+        context.requested_by_llm
+        and len(chunks) > _AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS
+    ):
+        return {
+            **base_payload,
+            "status": "BLOCKED",
+            "reason": "AUTONOMOUS_REMOTE_UPDATE_TOO_LARGE",
+            "message": (
+                "Autonomous agent remote data update would require too many requests; "
+                "use dry_run planning, narrower symbols/date windows, or dedicated "
+                "fundamental/macro chunked update tools before live execution."
+            ),
+            "autonomous_batch_count": len(chunks),
+            "max_autonomous_request_count": _AUTONOMOUS_REMOTE_UPDATE_MAX_REQUESTS,
+        }
+
+    if settings.tushare_token is None and _client_factory is None:
+        return {
+            **base_payload,
+            "status": "NOT_CONFIGURED",
+            "message": "TUSHARE_TOKEN is required for live remote data update",
+        }
+
+    batch_results: list[dict[str, Any]] = []
+    try:
+        service = _build_update_service(settings, _get_lake_required())
+        for index, (chunk_start, chunk_end) in enumerate(chunks, start=1):
+            result = service.update(
+                chunk_start,
+                chunk_end,
+                include_daily=bool(input_data.get("include_daily", True)),
+                include_basics=bool(input_data.get("include_basics", True)),
+                ts_code=ts_code,
+                asset_type=asset_type,
+                required_symbols=symbols or None,
+            ).as_dict()
+            result.update(
+                {
+                    "batch_index": index,
+                    "start_date": chunk_start,
+                    "end_date": chunk_end,
+                }
+            )
+            batch_results.append(result)
+    except Exception as exc:
+        return {
+            **base_payload,
+            "status": "error",
+            "message": _sanitize_error(str(exc), settings),
+            "batch_results": batch_results,
+        }
+
+    post_update = _plan_remote_data_update({**input_data, "dry_run": True}, context)
+    remaining = [
+        item
+        for item in post_update.get("missing_ranges", [])
+        if isinstance(item, dict)
+    ]
+    all_updated = all(item.get("status") == "updated" for item in batch_results)
+    post_update_coverage_status = _coverage_status_from_plan(post_update)
+    return {
+        **base_payload,
+        "status": "updated" if all_updated and not remaining else "PARTIAL_UPDATE",
+        "dry_run": False,
+        "batch_results": batch_results,
+        "post_update_coverage": {
+            "coverage_status": post_update_coverage_status,
+            "data_update_needed": post_update.get("data_update_needed"),
+            "missing_ranges": post_update.get("missing_ranges", []),
+            "missing_symbols": post_update.get("missing_symbols", []),
+            "stale_symbols": post_update.get("stale_symbols", []),
+        },
+        "remaining_missing_ranges": remaining,
+    }
+
+
+def _coverage_status_from_plan(plan: dict[str, Any]) -> str:
+    explicit = plan.get("coverage_status")
+    if explicit:
+        return str(explicit)
+    status = str(plan.get("status") or "")
+    if status == "CALENDAR_VALIDATION_REQUIRED":
+        return status
+    if bool(plan.get("data_update_needed", False)):
+        return "PARTIAL_COVERAGE"
+    return "OK"
 
 
 def _plan_fundamental_data_update(
