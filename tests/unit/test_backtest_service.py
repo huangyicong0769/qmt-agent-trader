@@ -32,7 +32,7 @@ def test_run_single_symbol_backtest_uses_next_day_fill(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
 
     summary = run_single_symbol_backtest(
@@ -70,7 +70,7 @@ def test_run_backtest_report_persists_report(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     reports_dir = tmp_path / "reports"
 

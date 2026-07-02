@@ -867,7 +867,7 @@ def _datasets_for_missing_columns(columns: list[str]) -> list[str]:
     if normalized & fundamentals:
         datasets.append("tushare_fundamentals")
     if normalized & daily:
-        datasets.append("tushare_daily")
+        datasets.append("tushare/daily")
     if normalized & macro:
         datasets.append("macro_series")
     return datasets or ["custom_factor_inputs"]
@@ -1738,7 +1738,7 @@ def _put_cached_backtest(cache_key: str, payload: dict[str, Any]) -> None:
 
 def _data_fingerprint(lake: DataLake) -> dict[str, tuple[int, int]]:
     result: dict[str, tuple[int, int]] = {}
-    for name in ("tushare_daily", "tushare_fund_daily", "tushare_suspend", "tushare_stk_limit"):
+    for name in ("tushare/daily", "tushare/fund_daily", "tushare/suspend_d", "tushare/stk_limit"):
         path = lake.dataset_path("raw", name)
         if path.exists():
             stat = path.stat()

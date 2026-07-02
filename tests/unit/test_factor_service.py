@@ -27,7 +27,7 @@ def test_compute_factor_to_lake(tmp_path) -> None:
         }
         for offset in range(21)
     ]
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
 
     result = compute_factor_to_lake(lake, name="momentum_20d", date="20240121")
 
@@ -60,7 +60,7 @@ def test_compute_fundamental_factor_to_lake_uses_pit_context(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     lake.write_parquet(
         pd.DataFrame(
@@ -70,7 +70,7 @@ def test_compute_fundamental_factor_to_lake_uses_pit_context(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily_basic",
+        "tushare/daily_basic",
     )
 
     result = compute_factor_to_lake(lake, name="pe_ttm_rank", date="20240131")
@@ -107,7 +107,7 @@ def test_validate_factor_computes_ic(tmp_path) -> None:
                 "close": 20.0 + offset,
             }
         )
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
 
     result = validate_factor(lake, name="momentum_20d", start="20240121", end="20240121")
 
@@ -141,7 +141,7 @@ def test_walk_forward_factor_validation_slices_history(tmp_path) -> None:
                 "close": 20.0 + offset * 0.1,
             }
         )
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
 
     result = walk_forward_factor_validation(
         lake,

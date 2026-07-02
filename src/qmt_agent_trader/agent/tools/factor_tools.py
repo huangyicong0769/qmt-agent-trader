@@ -895,6 +895,7 @@ def _required_columns_for_spec(spec_data: dict[str, Any]) -> tuple[str, ...]:
         data_sources = {
             "daily_bars",
             "tushare_daily",
+            "tushare/daily",
             "bars",
             "fundamentals",
             "macro",

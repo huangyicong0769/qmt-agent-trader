@@ -62,7 +62,7 @@ def registry(lake, tmp_path):
     lake.write_parquet(
         pd.DataFrame(rows),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     return reg
 

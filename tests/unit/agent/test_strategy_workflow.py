@@ -50,7 +50,7 @@ def registry(lake, tmp_path):
             }
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     return reg
 
@@ -271,7 +271,7 @@ def test_run_backtest_resolves_cyclical_universe_when_symbols_are_omitted(regist
             }
         ),
         "raw",
-        "tushare_stock_basic",
+        "tushare/stock_basic",
     )
     context = ToolContext(run_id="strategy-cyclical-resolved")
 
@@ -403,4 +403,4 @@ def _write_multi_factor_bars(lake: DataLake) -> None:
                     "turnover": 0.02 + symbol_index * 0.01,
                 }
             )
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")

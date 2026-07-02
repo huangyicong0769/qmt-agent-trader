@@ -57,7 +57,7 @@ def get_research_context(universe: str) -> dict[str, Any]:
             ],
         },
         "fundamental_factor_note": (
-            "Fundamental factors require tushare_daily_basic and PIT financial datasets."
+            "Fundamental factors require tushare/daily_basic and PIT financial datasets."
         ),
         "trade_state_inputs": [
             "suspend_d",
