@@ -85,4 +85,4 @@ def _write_bars(lake: DataLake) -> None:
                     "amount": 1000000,
                 }
             )
-    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare_daily")
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")

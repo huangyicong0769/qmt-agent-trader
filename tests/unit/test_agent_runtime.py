@@ -69,7 +69,7 @@ def test_runtime_instances_keep_tool_dependencies_isolated(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
     runtime_b.lake.write_parquet(
         pd.DataFrame(
@@ -86,7 +86,7 @@ def test_runtime_instances_keep_tool_dependencies_isolated(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
 
     result_a = runtime_a.run_tool(
