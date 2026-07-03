@@ -201,6 +201,7 @@ class TushareFetcher:
         checksum: str | None = None,
     ) -> None:
         params = dict(item.get("params", {}))
+        coverage_start, coverage_end = _coverage_bounds_from_params(params)
         self.lake.record_fetch_metadata(
             source="tushare",
             dataset_id=str(item["dataset_id"]),
@@ -209,8 +210,8 @@ class TushareFetcher:
             params=params,
             fields=list(item.get("fields", [])),
             symbols=list(item.get("symbols", [])),
-            coverage_start=params.get("start_date"),
-            coverage_end=params.get("end_date"),
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
             row_count=row_count,
             checksum=checksum,
             status=status,
@@ -224,3 +225,27 @@ def _checksum_frame(frame: pd.DataFrame) -> str:
     normalized = frame.sort_index(axis=1).astype(str)
     payload = normalized.to_csv(index=False).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _coverage_bounds_from_params(params: dict[str, Any]) -> tuple[str | None, str | None]:
+    for start_key, end_key in (
+        ("start_date", "end_date"),
+        ("start_m", "end_m"),
+        ("start_q", "end_q"),
+    ):
+        start = _optional_text(params.get(start_key))
+        end = _optional_text(params.get(end_key))
+        if start or end:
+            return start, end
+    for point_key in ("trade_date", "date", "cal_date", "m", "q", "period", "ann_date"):
+        value = _optional_text(params.get(point_key))
+        if value:
+            return value, value
+    return None, None
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

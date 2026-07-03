@@ -212,6 +212,39 @@ def test_tushare_fetcher_writes_new_raw_layout_and_metadata(tmp_path) -> None:
     assert state[0]["dataset_id"] == "tushare.daily_basic"
 
 
+def test_tushare_fetcher_records_point_parameter_coverage(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    frame = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20240102",
+                "pe_ttm": 5.0,
+            }
+        ]
+    )
+    client = FakeGenericClient({"daily_basic": frame})
+    plan = TushareFetchPlanner().plan(
+        [
+            FetchItem(
+                api_name="daily_basic",
+                fields=["ts_code", "trade_date", "pe_ttm"],
+                trade_date="20240102",
+            )
+        ]
+    )
+
+    result = TushareFetcher(client, lake, sleep=lambda _: None).run(
+        plan,
+        execute_plan=True,
+    )
+
+    assert result.status == "updated"
+    state = lake.query_parquet("SELECT * FROM data_fetch_state_v2").to_dict(orient="records")
+    assert state[0]["coverage_start"] == "20240102"
+    assert state[0]["coverage_end"] == "20240102"
+
+
 def test_tushare_fetcher_rejects_schema_mismatch_without_write(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = FakeGenericClient({"daily_basic": pd.DataFrame([{"ts_code": "000001.SZ"}])})

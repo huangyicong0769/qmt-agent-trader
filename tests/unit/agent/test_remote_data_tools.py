@@ -106,6 +106,51 @@ def test_plan_tushare_fetch_rejects_unknown_fields_and_placeholders(tmp_path) ->
     assert placeholder["reason"] == "endpoint_registered_as_placeholder"
 
 
+def test_plan_tushare_fetch_reports_new_layout_local_coverage(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    plan_tool = _tools(tmp_path, lake)["plan_tushare_fetch"]
+    request = {
+        "items": [
+            {
+                "api_name": "daily_basic",
+                "symbols": ["000001.SZ", "000002.SZ"],
+                "fields": ["ts_code", "trade_date", "pe_ttm"],
+                "start_date": "20240101",
+                "end_date": "20240131",
+            }
+        ]
+    }
+
+    missing = plan_tool.run(request, ToolContext(run_id="r-coverage-missing"))
+    lake.write_incremental_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "pe_ttm": 5.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/daily_basic",
+        key_columns=["ts_code", "trade_date"],
+    )
+    partial = plan_tool.run(request, ToolContext(run_id="r-coverage-partial"))
+
+    assert missing["status"] == "planned"
+    assert missing["coverage_status"] == "NO_DATA"
+    assert missing["local_coverage"][0]["reason"] == "raw_dataset_missing"
+    assert partial["status"] == "planned"
+    assert partial["coverage_status"] == "PARTIAL_COVERAGE"
+    assert partial["local_coverage"][0]["missing_symbols"] == ["000002.SZ"]
+    assert partial["local_coverage"][0]["partial_reasons"] == [
+        "starts_after_requested_start",
+        "ends_before_requested_end",
+        "missing_symbols",
+    ]
+
+
 def test_run_tushare_fetch_dry_run_does_not_query_remote(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = ExplodingGenericClient()

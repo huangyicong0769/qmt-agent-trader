@@ -7,6 +7,8 @@ from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from typing import Any
 
+import pandas as pd
+
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
@@ -1667,7 +1669,15 @@ def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dic
                 for target in item.get("wide_table_targets", [])
             }
         )
-        payload["coverage_status"] = "UNKNOWN"
+        local_coverage = (
+            [_local_coverage_for_planned_item(item, lake) for item in plan.items]
+            if lake is not None
+            else []
+        )
+        payload["local_coverage"] = local_coverage
+        payload["coverage_status"] = (
+            _aggregate_local_coverage(local_coverage) if local_coverage else "UNKNOWN"
+        )
     return payload
 
 
@@ -1715,6 +1725,145 @@ def _build_data_table(input_data: dict[str, Any], _context: ToolContext) -> dict
     table = str(input_data.get("table", ""))
     snapshot = _optional_str(input_data.get("snapshot_as_of_date"))
     return DataTableBuilder(lake).build(table, snapshot_as_of_date=snapshot)
+
+
+def _local_coverage_for_planned_item(
+    item: dict[str, Any],
+    lake: DataLake,
+) -> dict[str, Any]:
+    target_dataset = str(item.get("target_dataset", ""))
+    dataset_id = str(item.get("dataset_id", ""))
+    path = lake.dataset_path("raw", target_dataset)
+    params = dict(item.get("params", {}))
+    start, end = _coverage_bounds_from_params(params)
+    coverage: dict[str, Any] = {
+        "dataset_id": dataset_id,
+        "target_dataset": target_dataset,
+        "coverage_start": start,
+        "coverage_end": end,
+    }
+    if not path.exists():
+        return {
+            **coverage,
+            "status": "NO_DATA",
+            "reason": "raw_dataset_missing",
+        }
+    frame = lake.read_parquet("raw", target_dataset)
+    if frame.empty:
+        return {
+            **coverage,
+            "status": "NO_DATA",
+            "reason": "raw_dataset_empty",
+        }
+
+    symbols = [str(item) for item in item.get("symbols", [])]
+    missing_symbols: list[str] = []
+    scoped = frame
+    if symbols and "ts_code" in scoped.columns:
+        present_symbols = set(scoped["ts_code"].astype(str))
+        missing_symbols = [symbol for symbol in symbols if symbol not in present_symbols]
+        scoped = scoped[scoped["ts_code"].astype(str).isin(symbols)]
+        if scoped.empty:
+            return {
+                **coverage,
+                "status": "NO_DATA",
+                "reason": "requested_symbols_missing",
+                "missing_symbols": missing_symbols,
+            }
+
+    date_column = _coverage_date_column(item, scoped)
+    if date_column is None or start is None or end is None:
+        return {
+            **coverage,
+            "status": "LOCAL_DATA_PRESENT",
+            "rows": len(scoped),
+            "missing_symbols": missing_symbols,
+            "date_column": date_column,
+            "reason": "coverage_range_not_derivable" if date_column is None else None,
+        }
+
+    comparable = scoped[date_column].astype(str).str.replace("-", "", regex=False)
+    start_key = start.replace("-", "")
+    end_key = end.replace("-", "")
+    in_range = scoped[(comparable >= start_key) & (comparable <= end_key)]
+    if in_range.empty:
+        return {
+            **coverage,
+            "status": "NO_DATA",
+            "reason": "no_rows_in_requested_range",
+            "missing_symbols": missing_symbols,
+            "date_column": date_column,
+        }
+
+    actual_values = in_range[date_column].astype(str).str.replace("-", "", regex=False)
+    actual_start = str(actual_values.min())
+    actual_end = str(actual_values.max())
+    partial_reasons: list[str] = []
+    if actual_start > start_key:
+        partial_reasons.append("starts_after_requested_start")
+    if actual_end < end_key:
+        partial_reasons.append("ends_before_requested_end")
+    if missing_symbols:
+        partial_reasons.append("missing_symbols")
+    status = "PARTIAL_COVERAGE" if partial_reasons else "LOCAL_DATA_PRESENT"
+    return {
+        **coverage,
+        "status": status,
+        "rows": len(in_range),
+        "actual_start": actual_start,
+        "actual_end": actual_end,
+        "missing_symbols": missing_symbols,
+        "date_column": date_column,
+        "partial_reasons": partial_reasons,
+    }
+
+
+def _aggregate_local_coverage(items: list[dict[str, Any]]) -> str:
+    statuses = {str(item.get("status")) for item in items}
+    if "NO_DATA" in statuses:
+        return "NO_DATA"
+    if "PARTIAL_COVERAGE" in statuses:
+        return "PARTIAL_COVERAGE"
+    if statuses == {"LOCAL_DATA_PRESENT"}:
+        return "LOCAL_DATA_PRESENT"
+    return "UNKNOWN"
+
+
+def _coverage_date_column(item: dict[str, Any], frame: pd.DataFrame) -> str | None:
+    candidates = [
+        "trade_date",
+        "date",
+        "cal_date",
+        "month",
+        "quarter",
+        "end_date",
+        "ann_date",
+    ]
+    declared = set(item.get("key_columns", [])) | set(item.get("fields", []))
+    for column in candidates:
+        if column in declared and column in frame.columns:
+            return column
+    for column in candidates:
+        if column in frame.columns:
+            return column
+    return None
+
+
+def _coverage_bounds_from_params(params: dict[str, Any]) -> tuple[str | None, str | None]:
+    for start_key, end_key in (
+        ("start_date", "end_date"),
+        ("start_m", "end_m"),
+        ("start_q", "end_q"),
+    ):
+        start = _optional_str(params.get(start_key))
+        end = _optional_str(params.get(end_key))
+        if start or end:
+            return start, end
+    for point_key in ("trade_date", "date", "cal_date", "m", "q", "period", "ann_date"):
+        value = _optional_str(params.get(point_key))
+        if value:
+            return value, value
+    return None, None
 
 
 def _attach_trade_dates_for_marketwide_fetches(
