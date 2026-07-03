@@ -151,6 +151,43 @@ def test_plan_tushare_fetch_reports_new_layout_local_coverage(tmp_path) -> None:
     ]
 
 
+def test_plan_tushare_fetch_reports_missing_symbols_without_date_range(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_incremental_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "symbol": "000001",
+                    "name": "平安银行",
+                    "list_date": "19910403",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
+        key_columns=["ts_code"],
+    )
+    plan_tool = _tools(tmp_path, lake)["plan_tushare_fetch"]
+
+    result = plan_tool.run(
+        {
+            "items": [
+                {
+                    "api_name": "stock_basic",
+                    "symbols": ["000001.SZ", "000002.SZ"],
+                    "fields": ["ts_code", "symbol", "name", "list_date"],
+                }
+            ]
+        },
+        ToolContext(run_id="r-symbol-only-coverage"),
+    )
+
+    assert result["coverage_status"] == "PARTIAL_COVERAGE"
+    assert result["local_coverage"][0]["missing_symbols"] == ["000002.SZ"]
+    assert result["local_coverage"][0]["partial_reasons"] == ["missing_symbols"]
+
+
 def test_run_tushare_fetch_dry_run_does_not_query_remote(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = ExplodingGenericClient()

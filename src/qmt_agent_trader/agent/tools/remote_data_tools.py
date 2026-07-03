@@ -1773,12 +1773,16 @@ def _local_coverage_for_planned_item(
 
     date_column = _coverage_date_column(item, scoped)
     if date_column is None or start is None or end is None:
+        symbol_partial_reasons = ["missing_symbols"] if missing_symbols else []
         return {
             **coverage,
-            "status": "LOCAL_DATA_PRESENT",
+            "status": (
+                "PARTIAL_COVERAGE" if symbol_partial_reasons else "LOCAL_DATA_PRESENT"
+            ),
             "rows": len(scoped),
             "missing_symbols": missing_symbols,
             "date_column": date_column,
+            "partial_reasons": symbol_partial_reasons,
             "reason": "coverage_range_not_derivable" if date_column is None else None,
         }
 
