@@ -7,12 +7,12 @@ builds point-in-time query views from those raw files.
 
 Supported raw datasets:
 
-- `tushare_daily_basic`
-- `tushare_income`
-- `tushare_balancesheet`
-- `tushare_cashflow`
-- `tushare_fina_indicator`
-- `tushare_dividend`
+- `tushare/daily_basic`
+- `tushare/income`
+- `tushare/balancesheet`
+- `tushare/cashflow`
+- `tushare/fina_indicator`
+- `tushare/dividend`
 
 Update commands:
 
@@ -45,7 +45,7 @@ Fundamental factors:
 - Value: `size_log_mktcap`, `pe_ttm_rank`, `pb_rank`, `dividend_yield`
 - Quality: `roe_rank`, `gross_margin_rank`, `debt_to_assets_rank`
 
-These factors require `tushare_daily_basic` and PIT financial datasets. They are
+These factors require `tushare/daily_basic` and PIT financial datasets. They are
 computed from a factor context, not by adding fundamentals to canonical bars.
 
 ## Macro

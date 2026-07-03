@@ -41,13 +41,40 @@ class FakeGenericClient(TushareClient):
 
 def test_tushare_endpoint_registry_loads_official_inventory() -> None:
     registry = default_tushare_registry()
+    daily = registry.require("daily")
     daily_basic = registry.require("daily_basic")
 
+    assert daily.description is not None
+    assert daily.field_descriptions["ts_code"] == "股票代码"
+    assert daily.field_descriptions["trade_date"] == "交易日期"
+    assert daily.call_limit["status"] == "DOCUMENTED"
+    assert daily.call_limit["requests_per_minute"] == 500
+    assert daily.call_limit["rows_per_request"] == 6000
     assert daily_basic.implemented is True
     assert "pe_ttm" in daily_basic.fields
+    assert daily_basic.field_descriptions["pe_ttm"].startswith("市盈率")
+    assert daily_basic.call_limit["status"] == "DOCUMENTED"
+    assert daily_basic.call_limit["rows_per_request"] == 6000
     assert daily_basic.key_columns == ("ts_code", "trade_date")
     assert daily_basic.raw_dataset_name == "tushare/daily_basic"
     assert registry.require("repurchase").implemented is False
+
+
+def test_tushare_capabilities_expose_metadata_completeness_gaps() -> None:
+    registry = default_tushare_registry()
+    capabilities = {item["api_name"]: item for item in registry.as_capabilities()}
+
+    assert capabilities["daily"]["field_description_status"] == "COMPLETE"
+    assert capabilities["daily"]["missing_field_descriptions"] == []
+    assert capabilities["daily"]["call_limit"]["status"] == "DOCUMENTED"
+    assert capabilities["suspend_d"]["field_description_status"] == "UNKNOWN"
+    assert capabilities["suspend_d"]["missing_field_descriptions"] == [
+        "ts_code",
+        "trade_date",
+        "suspend_timing",
+        "suspend_type",
+    ]
+    assert capabilities["suspend_d"]["call_limit"]["status"] == "UNKNOWN"
 
 
 def test_tushare_planner_rejects_unknown_placeholder_field_and_symbol() -> None:

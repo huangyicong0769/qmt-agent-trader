@@ -1,13 +1,25 @@
 # Tushare Endpoint Inventory
 
 This inventory was extracted from the official Tushare documentation visible in the user's
-browser session and the official `tushare.pro/wctapi/documents/*.md` pages on 2026-07-02.
-It intentionally records endpoint names, parameters, fields, keys, storage intent, and PIT
-rules only. It does not include or require any Tushare token, cookie, or session value.
+browser session and the official `tushare.pro/wctapi/documents/*.md` pages on 2026-07-02
+and 2026-07-03. It records endpoint names, descriptions, parameters, parameter
+descriptions, fields, field meanings, keys, storage intent, call-limit notes when visible,
+and PIT rules. It does not include or require any Tushare token, cookie, or session value.
 
 If a candidate endpoint page was not available during extraction it is marked
 `DOC_UNAVAILABLE` in `src/qmt_agent_trader/data/providers/tushare/endpoints.yml` and is
 registered as a placeholder.
+
+Metadata completeness is exposed by `list_tushare_capabilities`:
+
+- `field_description_status=COMPLETE` means every registered output field has a meaning
+  extracted from the official markdown page.
+- `field_description_status=UNKNOWN` means the endpoint is executable but its official
+  markdown response was not available during extraction. As of the 2026-07-03 refresh,
+  this applies to `suspend_d`.
+- `call_limit.status=DOCUMENTED` is used only when a visible official doc line or endpoint
+  description contains a concrete limit or points requirement. Otherwise it remains
+  `UNKNOWN`; the registry does not infer missing limits.
 
 ## Implemented endpoints
 
@@ -15,7 +27,7 @@ registered as a placeholder.
 | --- | --- | --- | --- | --- | --- | --- |
 | `daily` | https://tushare.pro/document/2?doc_id=27 | market | `ts_code, trade_date` | yes | `trade_date, start_date, end_date` | Stock daily OHLCV. |
 | `daily_basic` | https://tushare.pro/document/2?doc_id=32 | market | `ts_code, trade_date` | yes | `trade_date, start_date, end_date` | Daily valuation and share metrics. |
-| `suspend_d` | https://tushare.pro/document/2?doc_id=31 | market | `ts_code, trade_date` | yes | `suspend_date, resume_date` | Suspension status. |
+| `suspend_d` | https://tushare.pro/document/2?doc_id=31 | market | `ts_code, trade_date` | yes | `suspend_date, resume_date` | Suspension status; field meanings currently `UNKNOWN` because the official markdown response was empty during refresh. |
 | `stk_limit` | https://tushare.pro/document/2?doc_id=183 | market | `ts_code, trade_date` | yes | `trade_date, start_date, end_date` | Daily limit-up/down prices. |
 | `fund_basic` | https://tushare.pro/document/2?doc_id=19 | fund | `ts_code` | yes | none | Fund and ETF master data. |
 | `fund_daily` | https://tushare.pro/document/2?doc_id=127 | fund | `ts_code, trade_date` | yes | `trade_date, start_date, end_date` | Fund/ETF daily OHLCV. |

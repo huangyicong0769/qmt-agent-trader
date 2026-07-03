@@ -17,10 +17,12 @@ class EndpointSpec:
     category: str
     asset_types: tuple[str, ...]
     implemented: bool
+    description: str | None
     doc_url: str | None
     doc_status: str
     params: dict[str, dict[str, Any]]
     fields: tuple[str, ...]
+    field_descriptions: dict[str, str]
     default_fields: tuple[str, ...]
     key_columns: tuple[str, ...]
     symbol_param: str | None
@@ -29,6 +31,7 @@ class EndpointSpec:
     supports_symbol_range: bool
     supports_marketwide_by_date: bool
     pagination: dict[str, Any]
+    call_limit: dict[str, Any]
     pit: dict[str, Any]
     wide_table_targets: tuple[str, ...]
     raw_dataset_name: str
@@ -40,37 +43,56 @@ class EndpointSpec:
             api_name=str(data["api_name"]),
             dataset_id=str(data["dataset_id"]),
             category=str(data["category"]),
-            asset_types=tuple(str(item) for item in data.get("asset_types", [])),
+            asset_types=_str_tuple(data, "asset_types"),
             implemented=bool(data.get("implemented", False)),
+            description=data.get("description"),
             doc_url=data.get("doc_url"),
             doc_status=str(data.get("doc_status", "DOC_UNAVAILABLE")),
             params=dict(data.get("params", {})),
-            fields=tuple(str(item) for item in data.get("fields", [])),
-            default_fields=tuple(str(item) for item in data.get("default_fields", [])),
-            key_columns=tuple(str(item) for item in data.get("key_columns", [])),
+            fields=_str_tuple(data, "fields"),
+            field_descriptions=_str_dict(data, "field_descriptions"),
+            default_fields=_str_tuple(data, "default_fields"),
+            key_columns=_str_tuple(data, "key_columns"),
             symbol_param=data.get("symbol_param"),
             symbol_column=data.get("symbol_column"),
             date_params=dict(data.get("date_params", {})),
             supports_symbol_range=bool(data.get("supports_symbol_range", False)),
             supports_marketwide_by_date=bool(data.get("supports_marketwide_by_date", False)),
             pagination=dict(data.get("pagination", {"type": "none"})),
+            call_limit=dict(data.get("call_limit", {"status": "UNKNOWN", "raw": None})),
             pit=dict(data.get("pit", {})),
-            wide_table_targets=tuple(str(item) for item in data.get("wide_table_targets", [])),
+            wide_table_targets=_str_tuple(data, "wide_table_targets"),
             raw_dataset_name=str(data["raw_dataset_name"]),
             raw_view_name=str(data["raw_view_name"]),
         )
 
     def as_capability(self) -> dict[str, Any]:
+        missing_field_descriptions = [
+            field for field in self.fields if field not in self.field_descriptions
+        ]
+        field_description_status = (
+            "NOT_APPLICABLE"
+            if not self.fields
+            else "COMPLETE"
+            if not missing_field_descriptions
+            else "PARTIAL"
+            if self.field_descriptions
+            else "UNKNOWN"
+        )
         return {
             "api_name": self.api_name,
             "dataset_id": self.dataset_id,
             "category": self.category,
             "asset_types": list(self.asset_types),
             "implemented": self.implemented,
+            "description": self.description,
             "doc_url": self.doc_url,
             "doc_status": self.doc_status,
             "params": self.params,
             "fields": list(self.fields),
+            "field_descriptions": self.field_descriptions,
+            "field_description_status": field_description_status,
+            "missing_field_descriptions": missing_field_descriptions,
             "default_fields": list(self.default_fields),
             "key_columns": list(self.key_columns),
             "symbol_param": self.symbol_param,
@@ -79,6 +101,7 @@ class EndpointSpec:
             "supports_symbol_range": self.supports_symbol_range,
             "supports_marketwide_by_date": self.supports_marketwide_by_date,
             "pagination": self.pagination,
+            "call_limit": self.call_limit,
             "pit": self.pit,
             "wide_table_targets": list(self.wide_table_targets),
             "raw_dataset_name": self.raw_dataset_name,
@@ -140,6 +163,34 @@ def default_tushare_registry() -> TushareEndpointRegistry:
     return TushareEndpointRegistry.from_yaml()
 
 
+def _str_tuple(data: dict[str, Any], key: str) -> tuple[str, ...]:
+    values = data.get(key, [])
+    if not isinstance(values, list):
+        raise ValueError(f"{key} must be a list")
+    invalid = [item for item in values if not isinstance(item, str)]
+    if invalid:
+        raise ValueError(
+            f"{key} must contain strings only for {data.get('api_name')}: {invalid}"
+        )
+    return tuple(values)
+
+
+def _str_dict(data: dict[str, Any], key: str) -> dict[str, str]:
+    values = data.get(key, {})
+    if not isinstance(values, dict):
+        raise ValueError(f"{key} must be an object")
+    invalid = [
+        (name, value)
+        for name, value in values.items()
+        if not isinstance(name, str) or not isinstance(value, str)
+    ]
+    if invalid:
+        raise ValueError(
+            f"{key} must contain string keys and values for {data.get('api_name')}: {invalid}"
+        )
+    return dict(values)
+
+
 def _validate_specs(specs: list[EndpointSpec]) -> None:
     seen: set[str] = set()
     for spec in specs:
@@ -159,4 +210,10 @@ def _validate_specs(specs: list[EndpointSpec]) -> None:
         if missing_keys:
             raise ValueError(
                 f"key columns not present for {spec.api_name}: {sorted(missing_keys)}"
+            )
+        unknown_descriptions = set(spec.field_descriptions).difference(spec.fields)
+        if unknown_descriptions:
+            raise ValueError(
+                f"field descriptions not present for {spec.api_name}: "
+                f"{sorted(unknown_descriptions)}"
             )

@@ -1,860 +1,2295 @@
 endpoints:
-  - api_name: daily
-    dataset_id: tushare.daily
-    category: market
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=27
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      trade_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-    fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
-    default_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
-    key_columns: [ts_code, trade_date]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      trade_date: {kind: point, column: trade_date}
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: true
-    supports_marketwide_by_date: true
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
-    wide_table_targets: [daily_market]
-    raw_dataset_name: tushare/daily
-    raw_view_name: raw_tushare_daily
-
-  - api_name: daily_basic
-    dataset_id: tushare.daily_basic
-    category: market
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=32
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      trade_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-    fields: [ts_code, trade_date, close, turnover_rate, turnover_rate_f, volume_ratio, pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm, total_share, float_share, free_share, total_mv, circ_mv, limit_status]
-    default_fields: [ts_code, trade_date, close, turnover_rate, turnover_rate_f, volume_ratio, pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm, total_share, float_share, free_share, total_mv, circ_mv]
-    key_columns: [ts_code, trade_date]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      trade_date: {kind: point, column: trade_date}
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: true
-    supports_marketwide_by_date: true
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
-    wide_table_targets: [daily_market]
-    raw_dataset_name: tushare/daily_basic
-    raw_view_name: raw_tushare_daily_basic
-
-  - api_name: suspend_d
-    dataset_id: tushare.suspend_d
-    category: market
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=31
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      suspend_date: {type: date, required: false}
-      resume_date: {type: date, required: false}
-    fields: [ts_code, trade_date, suspend_timing, suspend_type]
-    default_fields: [ts_code, trade_date, suspend_type]
-    key_columns: [ts_code, trade_date]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      suspend_date: {kind: range_start}
-      resume_date: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: true
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
-    wide_table_targets: [daily_market]
-    raw_dataset_name: tushare/suspend_d
-    raw_view_name: raw_tushare_suspend_d
-
-  - api_name: stk_limit
-    dataset_id: tushare.stk_limit
-    category: market
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=183
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      trade_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-    fields: [ts_code, trade_date, up_limit, down_limit]
-    default_fields: [ts_code, trade_date, up_limit, down_limit]
-    key_columns: [ts_code, trade_date]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      trade_date: {kind: point, column: trade_date}
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: true
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
-    wide_table_targets: [daily_market]
-    raw_dataset_name: tushare/stk_limit
-    raw_view_name: raw_tushare_stk_limit
-
-  - api_name: fund_basic
-    dataset_id: tushare.fund_basic
-    category: fund
-    asset_types: [fund, etf]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=19
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      market: {type: string, required: false}
-      status: {type: string, required: false}
-    fields: [ts_code, name, management, custodian, fund_type, found_date, due_date, list_date, issue_date, delist_date, issue_amount, m_fee, c_fee, duration_year, p_value, min_amount, exp_return, benchmark, status, invest_type, type, trustee, purc_startdate, redm_startdate, market]
-    default_fields: [ts_code, name, management, custodian, fund_type, found_date, due_date, list_date, delist_date, status, market]
-    key_columns: [ts_code]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: list_date, fallback_visible_date_column: found_date}
-    wide_table_targets: [security_master]
-    raw_dataset_name: tushare/fund_basic
-    raw_view_name: raw_tushare_fund_basic
-
-  - api_name: fund_daily
-    dataset_id: tushare.fund_daily
-    category: fund
-    asset_types: [fund, etf]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=127
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      trade_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-    fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
-    default_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
-    key_columns: [ts_code, trade_date]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      trade_date: {kind: point, column: trade_date}
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: true
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
-    wide_table_targets: [daily_market]
-    raw_dataset_name: tushare/fund_daily
-    raw_view_name: raw_tushare_fund_daily
-
-  - api_name: index_basic
-    dataset_id: tushare.index_basic
-    category: index
-    asset_types: [index]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=94
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      symbol: {type: string, required: false}
-      name: {type: string, required: false}
-      market: {type: string, required: false}
-      publisher: {type: string, required: false}
-      category: {type: string, required: false}
-    fields: [ts_code, name, fullname, market, publisher, index_type, category, base_date, base_point, list_date, weight_rule, desc, exp_date]
-    default_fields: [ts_code, name, fullname, market, publisher, index_type, category, base_date, base_point, list_date, exp_date]
-    key_columns: [ts_code]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: list_date, fallback_visible_date_column: base_date}
-    wide_table_targets: [security_master]
-    raw_dataset_name: tushare/index_basic
-    raw_view_name: raw_tushare_index_basic
-
-  - api_name: index_daily
-    dataset_id: tushare.index_daily
-    category: index
-    asset_types: [index]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=95
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: true}
-      trade_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-    fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_chg, vol, amount]
-    default_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
-    key_columns: [ts_code, trade_date]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      trade_date: {kind: point, column: trade_date}
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: true
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: trade_date, fallback_visible_date_column: null}
-    wide_table_targets: [index_daily]
-    raw_dataset_name: tushare/index_daily
-    raw_view_name: raw_tushare_index_daily
-
-  - api_name: stock_basic
-    dataset_id: tushare.stock_basic
-    category: security
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=25
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      name: {type: string, required: false}
-      exchange: {type: string, required: false}
-      market: {type: string, required: false}
-      is_hs: {type: string, required: false}
-      list_status: {type: string, required: false}
-      limit: {type: integer, required: false}
-      offset: {type: integer, required: false}
-    fields: [ts_code, symbol, name, area, industry, market, list_date, exchange, curr_type, list_status, delist_date, is_hs]
-    default_fields: [ts_code, symbol, name, area, industry, market, list_date, exchange, list_status, delist_date]
-    key_columns: [ts_code]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: limit_offset, limit_param: limit, offset_param: offset, page_size: 5000, max_pages: 20}
-    pit: {safe: true, visible_date_column: list_date, fallback_visible_date_column: null}
-    wide_table_targets: [security_master]
-    raw_dataset_name: tushare/stock_basic
-    raw_view_name: raw_tushare_stock_basic
-
-  - api_name: namechange
-    dataset_id: tushare.namechange
-    category: security
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=100
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-      limit: {type: integer, required: false}
-      offset: {type: integer, required: false}
-    fields: [ts_code, name, start_date, end_date, change_reason]
-    default_fields: [ts_code, name, start_date, end_date, change_reason]
-    key_columns: [ts_code, start_date, name]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: limit_offset, limit_param: limit, offset_param: offset, page_size: 5000, max_pages: 20}
-    pit: {safe: true, visible_date_column: start_date, fallback_visible_date_column: null}
-    wide_table_targets: [security_master, corporate_actions]
-    raw_dataset_name: tushare/namechange
-    raw_view_name: raw_tushare_namechange
-
-  - api_name: trade_cal
-    dataset_id: tushare.trade_cal
-    category: security
-    asset_types: [calendar]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=26
-    doc_status: OK
-    params:
-      exchange: {type: string, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-      is_open: {type: string, required: false}
-    fields: [exchange, cal_date, is_open, pretrade_date]
-    default_fields: [exchange, cal_date, is_open, pretrade_date]
-    key_columns: [exchange, cal_date]
-    symbol_param: null
-    symbol_column: null
-    date_params:
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: cal_date, fallback_visible_date_column: null}
-    wide_table_targets: [trade_calendar]
-    raw_dataset_name: tushare/trade_cal
-    raw_view_name: raw_tushare_trade_cal
-
-  - api_name: income
-    dataset_id: tushare.income
-    category: fundamental
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=33
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      ann_date: {type: date, required: false}
-      f_ann_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-      period: {type: date, required: false}
-      report_type: {type: string, required: false}
-      comp_type: {type: string, required: false}
-    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, basic_eps, diluted_eps, total_revenue, revenue, operate_profit, total_profit, n_income, n_income_attr_p, update_flag]
-    default_fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, basic_eps, diluted_eps, total_revenue, revenue, operate_profit, total_profit, n_income, n_income_attr_p, update_flag]
-    key_columns: [ts_code, end_date, ann_date, report_type]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-      period: {kind: period}
-    supports_symbol_range: true
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: f_ann_date, fallback_visible_date_column: ann_date}
-    wide_table_targets: [financial_reports_wide, financial_current_wide]
-    raw_dataset_name: tushare/income
-    raw_view_name: raw_tushare_income
-
-  - api_name: balancesheet
-    dataset_id: tushare.balancesheet
-    category: fundamental
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=36
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      ann_date: {type: date, required: false}
-      f_ann_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-      period: {type: date, required: false}
-      report_type: {type: string, required: false}
-      comp_type: {type: string, required: false}
-    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, total_assets, total_liab, total_hldr_eqy_exc_min_int, total_hldr_eqy_inc_min_int, update_flag]
-    default_fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, total_assets, total_liab, total_hldr_eqy_exc_min_int, total_hldr_eqy_inc_min_int, update_flag]
-    key_columns: [ts_code, end_date, ann_date, report_type]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-      period: {kind: period}
-    supports_symbol_range: true
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: f_ann_date, fallback_visible_date_column: ann_date}
-    wide_table_targets: [financial_reports_wide, financial_current_wide]
-    raw_dataset_name: tushare/balancesheet
-    raw_view_name: raw_tushare_balancesheet
-
-  - api_name: cashflow
-    dataset_id: tushare.cashflow
-    category: fundamental
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=44
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      ann_date: {type: date, required: false}
-      f_ann_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-      period: {type: date, required: false}
-      report_type: {type: string, required: false}
-      comp_type: {type: string, required: false}
-    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, net_profit, c_fr_sale_sg, n_cashflow_act, n_cashflow_inv_act, n_cash_flows_fnc_act, update_flag]
-    default_fields: [ts_code, ann_date, f_ann_date, end_date, report_type, comp_type, net_profit, c_fr_sale_sg, n_cashflow_act, n_cashflow_inv_act, n_cash_flows_fnc_act, update_flag]
-    key_columns: [ts_code, end_date, ann_date, report_type]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-      period: {kind: period}
-    supports_symbol_range: true
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: f_ann_date, fallback_visible_date_column: ann_date}
-    wide_table_targets: [financial_reports_wide, financial_current_wide]
-    raw_dataset_name: tushare/cashflow
-    raw_view_name: raw_tushare_cashflow
-
-  - api_name: fina_indicator
-    dataset_id: tushare.fina_indicator
-    category: fundamental
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=79
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      ann_date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-      period: {type: date, required: false}
-    fields: [ts_code, ann_date, end_date, eps, dt_eps, total_revenue_ps, revenue_ps, capital_rese_ps, surplus_rese_ps, undist_profit_ps, extra_item, profit_dedt, gross_margin, current_ratio, quick_ratio, cash_ratio, ar_turn, ca_turn, fa_turn, assets_turn, roe, roe_dt, roa, roic, debt_to_assets, assets_to_eqt, update_flag]
-    default_fields: [ts_code, ann_date, end_date, eps, dt_eps, gross_margin, current_ratio, quick_ratio, cash_ratio, ar_turn, ca_turn, fa_turn, assets_turn, roe, roe_dt, roa, roic, debt_to_assets, update_flag]
-    key_columns: [ts_code, end_date, ann_date]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-      period: {kind: period}
-    supports_symbol_range: true
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: ann_date, fallback_visible_date_column: null}
-    wide_table_targets: [financial_reports_wide, financial_current_wide]
-    raw_dataset_name: tushare/fina_indicator
-    raw_view_name: raw_tushare_fina_indicator
-
-  - api_name: dividend
-    dataset_id: tushare.dividend
-    category: corporate_action
-    asset_types: [stock]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=103
-    doc_status: OK
-    params:
-      ts_code: {type: string, required: false}
-      ann_date: {type: date, required: false}
-      record_date: {type: date, required: false}
-      ex_date: {type: date, required: false}
-      imp_ann_date: {type: date, required: false}
-    fields: [ts_code, end_date, ann_date, div_proc, stk_div, stk_bo_rate, stk_co_rate, cash_div, cash_div_tax, record_date, ex_date, pay_date]
-    default_fields: [ts_code, end_date, ann_date, div_proc, stk_div, stk_bo_rate, stk_co_rate, cash_div, cash_div_tax, record_date, ex_date, pay_date]
-    key_columns: [ts_code, end_date, ann_date, div_proc]
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params:
-      ann_date: {kind: point, column: ann_date}
-      record_date: {kind: point, column: record_date}
-      ex_date: {kind: point, column: ex_date}
-      imp_ann_date: {kind: point, column: imp_ann_date}
-    supports_symbol_range: true
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: ann_date, fallback_visible_date_column: ex_date}
-    wide_table_targets: [corporate_actions]
-    raw_dataset_name: tushare/dividend
-    raw_view_name: raw_tushare_dividend
-
-  - api_name: cn_gdp
-    dataset_id: tushare.cn_gdp
-    category: macro
-    asset_types: [macro]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=227
-    doc_status: OK
-    params:
-      q: {type: string, required: false}
-      start_q: {type: string, required: false}
-      end_q: {type: string, required: false}
-      fields: {type: string, required: false}
-    fields: [quarter, gdp, gdp_yoy, pi, pi_yoy, si, si_yoy, ti, ti_yoy]
-    default_fields: [quarter, gdp, gdp_yoy, pi, pi_yoy, si, si_yoy, ti, ti_yoy]
-    key_columns: [quarter]
-    symbol_param: null
-    symbol_column: null
-    date_params:
-      q: {kind: point, column: quarter}
-      start_q: {kind: range_start}
-      end_q: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: quarter, fallback_visible_date_column: null}
-    wide_table_targets: [macro_series]
-    raw_dataset_name: tushare/cn_gdp
-    raw_view_name: raw_tushare_cn_gdp
-
-  - api_name: cn_cpi
-    dataset_id: tushare.cn_cpi
-    category: macro
-    asset_types: [macro]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=228
-    doc_status: OK
-    params:
-      m: {type: string, required: false}
-      start_m: {type: string, required: false}
-      end_m: {type: string, required: false}
-    fields: [month, nt_val, nt_yoy, nt_mom, nt_accu, town_val, town_yoy, town_mom, town_accu, cnt_val, cnt_yoy, cnt_mom, cnt_accu]
-    default_fields: [month, nt_val, nt_yoy, nt_mom, nt_accu, town_val, town_yoy, town_mom, town_accu, cnt_val, cnt_yoy, cnt_mom, cnt_accu]
-    key_columns: [month]
-    symbol_param: null
-    symbol_column: null
-    date_params:
-      m: {kind: point, column: month}
-      start_m: {kind: range_start}
-      end_m: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: month, fallback_visible_date_column: null}
-    wide_table_targets: [macro_series]
-    raw_dataset_name: tushare/cn_cpi
-    raw_view_name: raw_tushare_cn_cpi
-
-  - api_name: cn_ppi
-    dataset_id: tushare.cn_ppi
-    category: macro
-    asset_types: [macro]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=245
-    doc_status: OK
-    params:
-      m: {type: string, required: false}
-      start_m: {type: string, required: false}
-      end_m: {type: string, required: false}
-    fields: [month, ppi_yoy, ppi_mp_yoy, ppi_mp_qm_yoy, ppi_mp_rm_yoy, ppi_mp_p_yoy, ppi_cg_yoy, ppi_cg_f_yoy, ppi_cg_c_yoy, ppi_cg_adu_yoy, ppi_cg_dcg_yoy, ppi_mom, ppi_mp_mom, ppi_mp_qm_mom, ppi_mp_rm_mom, ppi_mp_p_mom, ppi_cg_mom, ppi_accu]
-    default_fields: [month, ppi_yoy, ppi_mom, ppi_accu]
-    key_columns: [month]
-    symbol_param: null
-    symbol_column: null
-    date_params:
-      m: {kind: point, column: month}
-      start_m: {kind: range_start}
-      end_m: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: month, fallback_visible_date_column: null}
-    wide_table_targets: [macro_series]
-    raw_dataset_name: tushare/cn_ppi
-    raw_view_name: raw_tushare_cn_ppi
-
-  - api_name: shibor
-    dataset_id: tushare.shibor
-    category: macro
-    asset_types: [macro]
-    implemented: true
-    doc_url: https://tushare.pro/document/2?doc_id=149
-    doc_status: OK
-    params:
-      date: {type: date, required: false}
-      start_date: {type: date, required: false}
-      end_date: {type: date, required: false}
-    fields: [date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y]
-    default_fields: [date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y]
-    key_columns: [date]
-    symbol_param: null
-    symbol_column: null
-    date_params:
-      date: {kind: point, column: date}
-      start_date: {kind: range_start}
-      end_date: {kind: range_end}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: true, visible_date_column: date, fallback_visible_date_column: null}
-    wide_table_targets: [macro_series]
-    raw_dataset_name: tushare/shibor
-    raw_view_name: raw_tushare_shibor
-
-  - api_name: adj_factor
-    dataset_id: tushare.adj_factor
-    category: corporate_action
-    asset_types: [stock]
-    implemented: false
-    doc_url: https://tushare.pro/document/2?doc_id=28
-    doc_status: OK
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: [corporate_actions]
-    raw_dataset_name: tushare/adj_factor
-    raw_view_name: raw_tushare_adj_factor
-
-  - api_name: moneyflow
-    dataset_id: tushare.moneyflow
-    category: market
-    asset_types: [stock]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/moneyflow
-    raw_view_name: raw_tushare_moneyflow
-
-  - api_name: margin
-    dataset_id: tushare.margin
-    category: market
-    asset_types: [stock]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/margin
-    raw_view_name: raw_tushare_margin
-
-  - api_name: top10_holders
-    dataset_id: tushare.top10_holders
-    category: fundamental
-    asset_types: [stock]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/top10_holders
-    raw_view_name: raw_tushare_top10_holders
-
-  - api_name: concept
-    dataset_id: tushare.concept
-    category: security
-    asset_types: [stock]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: null
-    symbol_column: null
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/concept
-    raw_view_name: raw_tushare_concept
-
-  - api_name: index_weight
-    dataset_id: tushare.index_weight
-    category: index
-    asset_types: [index]
-    implemented: false
-    doc_url: https://tushare.pro/document/2?doc_id=96
-    doc_status: OK
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: index_code
-    symbol_column: index_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/index_weight
-    raw_view_name: raw_tushare_index_weight
-
-  - api_name: index_dailybasic
-    dataset_id: tushare.index_dailybasic
-    category: index
-    asset_types: [index]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/index_dailybasic
-    raw_view_name: raw_tushare_index_dailybasic
-
-  - api_name: index_member
-    dataset_id: tushare.index_member
-    category: index
-    asset_types: [index]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: index_code
-    symbol_column: index_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/index_member
-    raw_view_name: raw_tushare_index_member
-
-  - api_name: fund_nav
-    dataset_id: tushare.fund_nav
-    category: fund
-    asset_types: [fund]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/fund_nav
-    raw_view_name: raw_tushare_fund_nav
-
-  - api_name: fund_portfolio
-    dataset_id: tushare.fund_portfolio
-    category: fund
-    asset_types: [fund]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/fund_portfolio
-    raw_view_name: raw_tushare_fund_portfolio
-
-  - api_name: repurchase
-    dataset_id: tushare.repurchase
-    category: corporate_action
-    asset_types: [stock]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: [corporate_actions]
-    raw_dataset_name: tushare/repurchase
-    raw_view_name: raw_tushare_repurchase
-
-  - api_name: share_float
-    dataset_id: tushare.share_float
-    category: corporate_action
-    asset_types: [stock]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: [corporate_actions]
-    raw_dataset_name: tushare/share_float
-    raw_view_name: raw_tushare_share_float
-
-  - api_name: stk_holdernumber
-    dataset_id: tushare.stk_holdernumber
-    category: fundamental
-    asset_types: [stock]
-    implemented: false
-    doc_status: DOC_UNAVAILABLE
-    params: {}
-    fields: []
-    default_fields: []
-    key_columns: []
-    symbol_param: ts_code
-    symbol_column: ts_code
-    date_params: {}
-    supports_symbol_range: false
-    supports_marketwide_by_date: false
-    pagination: {type: none}
-    pit: {safe: false, visible_date_column: null, fallback_visible_date_column: null}
-    wide_table_targets: []
-    raw_dataset_name: tushare/stk_holdernumber
-    raw_view_name: raw_tushare_stk_holdernumber
+- api_name: daily
+  dataset_id: tushare.daily
+  category: market
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=27
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 股票代码（支持多个股票同时提取，逗号分隔）
+    trade_date:
+      type: date
+      required: false
+      description: 交易日期（YYYYMMDD）
+    start_date:
+      type: date
+      required: false
+      description: 开始日期(YYYYMMDD)
+    end_date:
+      type: date
+      required: false
+      description: 结束日期(YYYYMMDD)
+  fields:
+  - ts_code
+  - trade_date
+  - open
+  - high
+  - low
+  - close
+  - pre_close
+  - change
+  - pct_chg
+  - vol
+  - amount
+  default_fields:
+  - ts_code
+  - trade_date
+  - open
+  - high
+  - low
+  - close
+  - pre_close
+  - change
+  - pct_chg
+  - vol
+  - amount
+  key_columns:
+  - ts_code
+  - trade_date
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    trade_date:
+      kind: point
+      column: trade_date
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: true
+  supports_marketwide_by_date: true
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: trade_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - daily_market
+  raw_dataset_name: tushare/daily
+  raw_view_name: raw_tushare_daily
+  description: 获取股票行情数据，或通过[**通用行情接口**]( https://tushare.pro/document/2?doc_id=109)获取数据，包含了前后复权数据
+  field_descriptions:
+    ts_code: 股票代码
+    trade_date: 交易日期
+    open: 开盘价
+    high: 最高价
+    low: 最低价
+    close: 收盘价
+    pre_close: 昨收价【除权价】
+    change: 涨跌额
+    pct_chg: 涨跌幅（%） 【基于除权后的昨收计算的涨跌幅：（今收-除权昨收）/除权昨收 】
+    vol: 成交量 （手）
+    amount: 成交额 （千元）
+  call_limit:
+    status: DOCUMENTED
+    raw: 调取说明：基础积分每分钟内可调取500次，每次6000条数据，一次请求相当于提取一个股票23年历史
+    requests_per_minute: 500
+    rows_per_request: 6000
+- api_name: daily_basic
+  dataset_id: tushare.daily_basic
+  category: market
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=32
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 股票代码（二选一）
+    trade_date:
+      type: date
+      required: false
+      description: 交易日期 （二选一）
+    start_date:
+      type: date
+      required: false
+      description: 开始日期(YYYYMMDD)
+    end_date:
+      type: date
+      required: false
+      description: 结束日期(YYYYMMDD)
+  fields:
+  - ts_code
+  - trade_date
+  - close
+  - turnover_rate
+  - turnover_rate_f
+  - volume_ratio
+  - pe
+  - pe_ttm
+  - pb
+  - ps
+  - ps_ttm
+  - dv_ratio
+  - dv_ttm
+  - total_share
+  - float_share
+  - free_share
+  - total_mv
+  - circ_mv
+  - limit_status
+  default_fields:
+  - ts_code
+  - trade_date
+  - close
+  - turnover_rate
+  - turnover_rate_f
+  - volume_ratio
+  - pe
+  - pe_ttm
+  - pb
+  - ps
+  - ps_ttm
+  - dv_ratio
+  - dv_ttm
+  - total_share
+  - float_share
+  - free_share
+  - total_mv
+  - circ_mv
+  key_columns:
+  - ts_code
+  - trade_date
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    trade_date:
+      kind: point
+      column: trade_date
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: true
+  supports_marketwide_by_date: true
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: trade_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - daily_market
+  raw_dataset_name: tushare/daily_basic
+  raw_view_name: raw_tushare_daily_basic
+  description: 获取全部股票每日重要的基本面指标，可用于选股分析、报表展示等。单次请求最大返回6000条数据，可按日线循环提取全部历史。
+  field_descriptions:
+    ts_code: TS股票代码
+    trade_date: 交易日期
+    close: 当日收盘价
+    turnover_rate: 换手率 (成交量/无限售流通股数)
+    turnover_rate_f: 换手率（自由流通股）(成交量/自由流通股数)
+    volume_ratio: 量比 VOL/MA
+    pe: 市盈率（总市值/净利润， 亏损的PE为空）
+    pe_ttm: 市盈率（ 总市值/净利润TTM，亏损的PE为空）
+    pb: 市净率（总市值/(净资产-其他权益工具)）
+    ps: 市销率 (总市值/营业收入(最新年报))
+    ps_ttm: 市销率（TTM）(总市值/营业收入TTM)
+    dv_ratio: 股息率 （%），除息日发生在去年期间的派现
+    dv_ttm: 股息率（TTM）（%），除息日在近12个月且分红报告期在12个月以内的派现
+    total_share: 总股本 （万股）
+    float_share: 流通股本 （万股）
+    free_share: 自由流通股本 （万）
+    total_mv: 总市值 （万元）
+    circ_mv: 流通市值（万元）
+    limit_status: 收盘涨跌状态：0-平盘，1-上涨(不含涨停)，2-涨停(不含一字涨停)，3-一字涨停，4-下跌(不含跌停)，5-跌停(不含一字跌停)，6-一字跌停
+  call_limit:
+    status: DOCUMENTED
+    raw: 获取全部股票每日重要的基本面指标，可用于选股分析、报表展示等。单次请求最大返回6000条数据，可按日线循环提取全部历史。
+    rows_per_request: 6000
+- api_name: suspend_d
+  dataset_id: tushare.suspend_d
+  category: market
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=31
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+    suspend_date:
+      type: date
+      required: false
+    resume_date:
+      type: date
+      required: false
+  fields:
+  - ts_code
+  - trade_date
+  - suspend_timing
+  - suspend_type
+  default_fields:
+  - ts_code
+  - trade_date
+  - suspend_type
+  key_columns:
+  - ts_code
+  - trade_date
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    suspend_date:
+      kind: range_start
+    resume_date:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: true
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: trade_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - daily_market
+  raw_dataset_name: tushare/suspend_d
+  raw_view_name: raw_tushare_suspend_d
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: 'official markdown fetch failed: empty response'
+- api_name: stk_limit
+  dataset_id: tushare.stk_limit
+  category: market
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=183
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 股票代码
+    trade_date:
+      type: date
+      required: false
+      description: 交易日期
+    start_date:
+      type: date
+      required: false
+      description: 开始日期
+    end_date:
+      type: date
+      required: false
+      description: 结束日期
+  fields:
+  - ts_code
+  - trade_date
+  - up_limit
+  - down_limit
+  default_fields:
+  - ts_code
+  - trade_date
+  - up_limit
+  - down_limit
+  key_columns:
+  - ts_code
+  - trade_date
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    trade_date:
+      kind: point
+      column: trade_date
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: true
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: trade_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - daily_market
+  raw_dataset_name: tushare/stk_limit
+  raw_view_name: raw_tushare_stk_limit
+  description: 获取全市场（包含A/B股和基金）每日涨跌停价格，包括涨停价格，跌停价格等，每个交易日8点40左右更新当日股票涨跌停价格。
+  field_descriptions:
+    ts_code: TS股票代码
+    trade_date: 交易日期
+    up_limit: 涨停价
+    down_limit: 跌停价
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: fund_basic
+  dataset_id: tushare.fund_basic
+  category: fund
+  asset_types:
+  - fund
+  - etf
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=19
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 基金代码
+    market:
+      type: string
+      required: false
+      description: '交易市场: E场内 O场外（默认E）'
+    status:
+      type: string
+      required: false
+      description: 存续状态 D摘牌 I发行 L上市中
+  fields:
+  - ts_code
+  - name
+  - management
+  - custodian
+  - fund_type
+  - found_date
+  - due_date
+  - list_date
+  - issue_date
+  - delist_date
+  - issue_amount
+  - m_fee
+  - c_fee
+  - duration_year
+  - p_value
+  - min_amount
+  - exp_return
+  - benchmark
+  - status
+  - invest_type
+  - type
+  - trustee
+  - purc_startdate
+  - redm_startdate
+  - market
+  default_fields:
+  - ts_code
+  - name
+  - management
+  - custodian
+  - fund_type
+  - found_date
+  - due_date
+  - list_date
+  - delist_date
+  - status
+  - market
+  key_columns:
+  - ts_code
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: list_date
+    fallback_visible_date_column: found_date
+  wide_table_targets:
+  - security_master
+  raw_dataset_name: tushare/fund_basic
+  raw_view_name: raw_tushare_fund_basic
+  description: 获取公募基金数据列表，包括场内和场外基金
+  field_descriptions:
+    ts_code: 基金代码
+    name: 简称
+    management: 管理人
+    custodian: 托管人
+    fund_type: 投资类型
+    found_date: 成立日期
+    due_date: 到期日期
+    list_date: 上市时间
+    issue_date: 发行日期
+    delist_date: 退市日期
+    issue_amount: 发行份额(亿)
+    m_fee: 管理费
+    c_fee: 托管费
+    duration_year: 存续期
+    p_value: 面值
+    min_amount: 起点金额(万元)
+    exp_return: 预期收益率
+    benchmark: 业绩比较基准
+    status: 存续状态D摘牌 I发行 L已上市
+    invest_type: 投资风格
+    type: 基金类型
+    trustee: 受托人
+    purc_startdate: 日常申购起始日
+    redm_startdate: 日常赎回起始日
+    market: E场内O场外
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: fund_daily
+  dataset_id: tushare.fund_daily
+  category: fund
+  asset_types:
+  - fund
+  - etf
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=127
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 基金代码
+    trade_date:
+      type: date
+      required: false
+      description: 交易日期(YYYYMMDD格式，下同)
+    start_date:
+      type: date
+      required: false
+      description: 开始日期
+    end_date:
+      type: date
+      required: false
+      description: 结束日期
+  fields:
+  - ts_code
+  - trade_date
+  - open
+  - high
+  - low
+  - close
+  - pre_close
+  - change
+  - pct_chg
+  - vol
+  - amount
+  default_fields:
+  - ts_code
+  - trade_date
+  - open
+  - high
+  - low
+  - close
+  - pre_close
+  - change
+  - pct_chg
+  - vol
+  - amount
+  key_columns:
+  - ts_code
+  - trade_date
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    trade_date:
+      kind: point
+      column: trade_date
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: true
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: trade_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - daily_market
+  raw_dataset_name: tushare/fund_daily
+  raw_view_name: raw_tushare_fund_daily
+  description: 获取ETF行情每日收盘后成交数据，历史超过10年
+  field_descriptions:
+    ts_code: TS代码
+    trade_date: 交易日期
+    open: 开盘价(元)
+    high: 最高价(元)
+    low: 最低价(元)
+    close: 收盘价(元)
+    pre_close: 昨收盘价(元)
+    change: 涨跌额(元)
+    pct_chg: 涨跌幅(%)
+    vol: 成交量(手)
+    amount: 成交额(千元)
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: index_basic
+  dataset_id: tushare.index_basic
+  category: index
+  asset_types:
+  - index
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=94
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: TS指数代码
+    symbol:
+      type: string
+      required: false
+      description: 指数代码，支持多值输入，如000300,000001
+    name:
+      type: string
+      required: false
+      description: 指数简称
+    market:
+      type: string
+      required: false
+      description: 交易所或服务商(默认SSE，详见下方说明)
+    publisher:
+      type: string
+      required: false
+      description: 发布商
+    category:
+      type: string
+      required: false
+      description: 指数类别
+  fields:
+  - ts_code
+  - name
+  - fullname
+  - market
+  - publisher
+  - index_type
+  - category
+  - base_date
+  - base_point
+  - list_date
+  - weight_rule
+  - desc
+  - exp_date
+  default_fields:
+  - ts_code
+  - name
+  - fullname
+  - market
+  - publisher
+  - index_type
+  - category
+  - base_date
+  - base_point
+  - list_date
+  - exp_date
+  key_columns:
+  - ts_code
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: list_date
+    fallback_visible_date_column: base_date
+  wide_table_targets:
+  - security_master
+  raw_dataset_name: tushare/index_basic
+  raw_view_name: raw_tushare_index_basic
+  description: 获取指数基础信息。
+  field_descriptions:
+    ts_code: TS代码
+    name: 简称
+    fullname: 指数全称
+    market: 市场
+    publisher: 发布方
+    index_type: 指数风格
+    category: 指数类别
+    base_date: 基期
+    base_point: 基点
+    list_date: 发布日期
+    weight_rule: 加权方式
+    desc: 描述
+    exp_date: 终止日期
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: index_daily
+  dataset_id: tushare.index_daily
+  category: index
+  asset_types:
+  - index
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=95
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: true
+      description: 指数代码，来源<a href="https://tushare.pro/document/2?doc_id=94">指数基础信息接口</a>
+    trade_date:
+      type: date
+      required: false
+      description: 交易日期 （日期格式：YYYYMMDD，下同）
+    start_date:
+      type: date
+      required: false
+      description: 开始日期
+    end_date:
+      type: date
+      required: false
+      description: 结束日期
+  fields:
+  - ts_code
+  - trade_date
+  - close
+  - open
+  - high
+  - low
+  - pre_close
+  - change
+  - pct_chg
+  - vol
+  - amount
+  default_fields:
+  - ts_code
+  - trade_date
+  - open
+  - high
+  - low
+  - close
+  - pre_close
+  - change
+  - pct_chg
+  - vol
+  - amount
+  key_columns:
+  - ts_code
+  - trade_date
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    trade_date:
+      kind: point
+      column: trade_date
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: true
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: trade_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - index_daily
+  raw_dataset_name: tushare/index_daily
+  raw_view_name: raw_tushare_index_daily
+  description: 获取指数每日行情，还可以通过bar接口获取。由于服务器压力，目前规则是单次调取最多取8000行记录，可以设置start和end日期补全。指数行情也可以通过[**通用行情接口**](
+    https://tushare.pro/document/2?doc_id=109)获取数据。本接口不包含[申万行业指数行情数据](https://tushare.pro/document/2?doc_id=327)。
+  field_descriptions:
+    ts_code: TS指数代码
+    trade_date: 交易日
+    close: 收盘点位
+    open: 开盘点位
+    high: 最高点位
+    low: 最低点位
+    pre_close: 昨日收盘点
+    change: 涨跌点
+    pct_chg: 涨跌幅（%）
+    vol: 成交量（手）
+    amount: 成交额（千元）
+  call_limit:
+    status: DOCUMENTED
+    raw: 获取指数每日行情，还可以通过bar接口获取。由于服务器压力，目前规则是单次调取最多取8000行记录，可以设置start和end日期补全。指数行情也可以通过[**通用行情接口**](
+      https://tushare.pro/document/2?doc_id=109)获取数据。本接口不包含[申万行业指数行情数据](https://tushare.pro/document/2?doc_id=327)。
+    rows_per_request: 8000
+- api_name: stock_basic
+  dataset_id: tushare.stock_basic
+  category: security
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=25
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: TS股票代码(<a href="https://tushare.pro/document/2?doc_id=14">格式说明</a>)
+    name:
+      type: string
+      required: false
+      description: 名称
+    exchange:
+      type: string
+      required: false
+      description: 交易所 SSE上交所 SZSE深交所 BSE北交所
+    market:
+      type: string
+      required: false
+      description: 市场类别 （主板/创业板/科创板/CDR/北交所）
+    is_hs:
+      type: string
+      required: false
+      description: 是否沪深港通标的，N否 H沪股通 S深股通
+    list_status:
+      type: string
+      required: false
+      description: 上市状态 L上市 D退市 P暂停上市 G 未交易，默认是L
+    limit:
+      type: integer
+      required: false
+    offset:
+      type: integer
+      required: false
+  fields:
+  - ts_code
+  - symbol
+  - name
+  - area
+  - industry
+  - market
+  - list_date
+  - exchange
+  - curr_type
+  - list_status
+  - delist_date
+  - is_hs
+  default_fields:
+  - ts_code
+  - symbol
+  - name
+  - area
+  - industry
+  - market
+  - list_date
+  - exchange
+  - list_status
+  - delist_date
+  key_columns:
+  - ts_code
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: limit_offset
+    limit_param: limit
+    offset_param: offset
+    page_size: 5000
+    max_pages: 20
+  pit:
+    safe: true
+    visible_date_column: list_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - security_master
+  raw_dataset_name: tushare/stock_basic
+  raw_view_name: raw_tushare_stock_basic
+  description: 获取基础信息数据，包括股票代码、名称、上市日期、退市日期等
+  field_descriptions:
+    ts_code: TS代码
+    symbol: 股票代码
+    name: 股票名称
+    area: 地域
+    industry: 所属行业
+    market: 市场类型（主板/创业板/科创板/CDR）
+    list_date: 上市日期
+    exchange: 交易所代码
+    curr_type: 交易货币
+    list_status: 上市状态 L上市 D退市 G过会未交易 P暂停上市
+    delist_date: 退市日期
+    is_hs: 是否沪深港通标的，N否 H沪股通 S深股通
+  call_limit:
+    status: DOCUMENTED
+    raw: 限量：每次最多返回6000行数据（覆盖全市场A股，会随股票总数增长而增加）；权限：2000积分起，每分钟请求50次。此接口是基础信息，调取一次就可以拉取完，建议保存倒本地存储后使用
+    requests_per_minute: 50
+    rows_per_request: 6000
+    points_required: 2000
+- api_name: namechange
+  dataset_id: tushare.namechange
+  category: security
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=100
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: TS代码
+    start_date:
+      type: date
+      required: false
+      description: 公告开始日期
+    end_date:
+      type: date
+      required: false
+      description: 公告结束日期
+    limit:
+      type: integer
+      required: false
+    offset:
+      type: integer
+      required: false
+  fields:
+  - ts_code
+  - name
+  - start_date
+  - end_date
+  - change_reason
+  default_fields:
+  - ts_code
+  - name
+  - start_date
+  - end_date
+  - change_reason
+  key_columns:
+  - ts_code
+  - start_date
+  - name
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: limit_offset
+    limit_param: limit
+    offset_param: offset
+    page_size: 5000
+    max_pages: 20
+  pit:
+    safe: true
+    visible_date_column: start_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - security_master
+  - corporate_actions
+  raw_dataset_name: tushare/namechange
+  raw_view_name: raw_tushare_namechange
+  description: 历史名称变更记录
+  field_descriptions:
+    ts_code: TS代码
+    name: 证券名称
+    start_date: 开始日期
+    end_date: 结束日期
+    change_reason: 变更原因
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: trade_cal
+  dataset_id: tushare.trade_cal
+  category: security
+  asset_types:
+  - calendar
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=26
+  doc_status: OK
+  params:
+    exchange:
+      type: string
+      required: false
+      description: 交易所 SSE上交所,SZSE深交所,CFFEX 中金所,SHFE 上期所,CZCE 郑商所,DCE 大商所,INE 上能源
+    start_date:
+      type: date
+      required: false
+      description: 开始日期 （格式：YYYYMMDD 下同）
+    end_date:
+      type: date
+      required: false
+      description: 结束日期
+    is_open:
+      type: string
+      required: false
+      description: 是否交易 '0'休市 '1'交易
+  fields:
+  - exchange
+  - cal_date
+  - is_open
+  - pretrade_date
+  default_fields:
+  - exchange
+  - cal_date
+  - is_open
+  - pretrade_date
+  key_columns:
+  - exchange
+  - cal_date
+  symbol_param: null
+  symbol_column: null
+  date_params:
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: cal_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - trade_calendar
+  raw_dataset_name: tushare/trade_cal
+  raw_view_name: raw_tushare_trade_cal
+  description: 获取各大交易所交易日历数据,默认提取的是上交所
+  field_descriptions:
+    exchange: 交易所 SSE上交所 SZSE深交所
+    cal_date: 日历日期
+    is_open: 是否交易 0休市 1交易
+    pretrade_date: 上一个交易日
+  call_limit:
+    status: DOCUMENTED
+    raw: 积分：需2000积分
+    points_required: 2000
+- api_name: income
+  dataset_id: tushare.income
+  category: fundamental
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=33
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 股票代码
+    ann_date:
+      type: date
+      required: false
+      description: 公告日期（YYYYMMDD格式，下同）
+    f_ann_date:
+      type: date
+      required: false
+      description: 实际公告日期
+    start_date:
+      type: date
+      required: false
+      description: 公告日开始日期
+    end_date:
+      type: date
+      required: false
+      description: 公告日结束日期
+    period:
+      type: date
+      required: false
+      description: 报告期(每个季度最后一天的日期，比如20171231表示年报，20170630半年报，20170930三季报)
+    report_type:
+      type: string
+      required: false
+      description: 报告类型，参考文档最下方说明
+    comp_type:
+      type: string
+      required: false
+      description: 公司类型（1一般工商业2银行3保险4证券）
+  fields:
+  - ts_code
+  - ann_date
+  - f_ann_date
+  - end_date
+  - report_type
+  - comp_type
+  - basic_eps
+  - diluted_eps
+  - total_revenue
+  - revenue
+  - operate_profit
+  - total_profit
+  - n_income
+  - n_income_attr_p
+  - update_flag
+  default_fields:
+  - ts_code
+  - ann_date
+  - f_ann_date
+  - end_date
+  - report_type
+  - comp_type
+  - basic_eps
+  - diluted_eps
+  - total_revenue
+  - revenue
+  - operate_profit
+  - total_profit
+  - n_income
+  - n_income_attr_p
+  - update_flag
+  key_columns:
+  - ts_code
+  - end_date
+  - ann_date
+  - report_type
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+    period:
+      kind: period
+  supports_symbol_range: true
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: f_ann_date
+    fallback_visible_date_column: ann_date
+  wide_table_targets:
+  - financial_reports_wide
+  - financial_current_wide
+  raw_dataset_name: tushare/income
+  raw_view_name: raw_tushare_income
+  description: 获取上市公司财务利润表数据
+  field_descriptions:
+    ts_code: TS代码
+    ann_date: 公告日期
+    f_ann_date: 实际公告日期
+    end_date: 报告期
+    report_type: 报告类型 见底部表
+    comp_type: 公司类型(1一般工商业2银行3保险4证券)
+    basic_eps: 基本每股收益
+    diluted_eps: 稀释每股收益
+    total_revenue: 营业总收入
+    revenue: 营业收入
+    operate_profit: 营业利润
+    total_profit: 利润总额
+    n_income: 净利润(含少数股东损益)
+    n_income_attr_p: 净利润(不含少数股东损益)
+    update_flag: 更新标识
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: balancesheet
+  dataset_id: tushare.balancesheet
+  category: fundamental
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=36
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 股票代码
+    ann_date:
+      type: date
+      required: false
+      description: 公告日期(YYYYMMDD格式，下同)
+    f_ann_date:
+      type: date
+      required: false
+    start_date:
+      type: date
+      required: false
+      description: 公告日开始日期
+    end_date:
+      type: date
+      required: false
+      description: 公告日结束日期
+    period:
+      type: date
+      required: false
+      description: 报告期(每个季度最后一天的日期，比如20171231表示年报，20170630半年报，20170930三季报)
+    report_type:
+      type: string
+      required: false
+      description: 报告类型：见下方详细说明
+    comp_type:
+      type: string
+      required: false
+      description: 公司类型：1一般工商业 2银行 3保险 4证券
+  fields:
+  - ts_code
+  - ann_date
+  - f_ann_date
+  - end_date
+  - report_type
+  - comp_type
+  - total_assets
+  - total_liab
+  - total_hldr_eqy_exc_min_int
+  - total_hldr_eqy_inc_min_int
+  - update_flag
+  default_fields:
+  - ts_code
+  - ann_date
+  - f_ann_date
+  - end_date
+  - report_type
+  - comp_type
+  - total_assets
+  - total_liab
+  - total_hldr_eqy_exc_min_int
+  - total_hldr_eqy_inc_min_int
+  - update_flag
+  key_columns:
+  - ts_code
+  - end_date
+  - ann_date
+  - report_type
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+    period:
+      kind: period
+  supports_symbol_range: true
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: f_ann_date
+    fallback_visible_date_column: ann_date
+  wide_table_targets:
+  - financial_reports_wide
+  - financial_current_wide
+  raw_dataset_name: tushare/balancesheet
+  raw_view_name: raw_tushare_balancesheet
+  description: 获取上市公司资产负债表
+  field_descriptions:
+    ts_code: TS股票代码
+    ann_date: 公告日期
+    f_ann_date: 实际公告日期
+    end_date: 报告期
+    report_type: 报表类型
+    comp_type: 公司类型(1一般工商业2银行3保险4证券)
+    total_assets: 资产总计
+    total_liab: 负债合计
+    total_hldr_eqy_exc_min_int: 股东权益合计(不含少数股东权益)
+    total_hldr_eqy_inc_min_int: 股东权益合计(含少数股东权益)
+    update_flag: 更新标识
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: cashflow
+  dataset_id: tushare.cashflow
+  category: fundamental
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=44
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: 股票代码
+    ann_date:
+      type: date
+      required: false
+      description: 公告日期（YYYYMMDD格式，下同）
+    f_ann_date:
+      type: date
+      required: false
+      description: 实际公告日期
+    start_date:
+      type: date
+      required: false
+      description: 公告日开始日期
+    end_date:
+      type: date
+      required: false
+      description: 公告日结束日期
+    period:
+      type: date
+      required: false
+      description: 报告期(每个季度最后一天的日期，比如20171231表示年报，20170630半年报，20170930三季报)
+    report_type:
+      type: string
+      required: false
+      description: 报告类型：见下方详细说明
+    comp_type:
+      type: string
+      required: false
+      description: 公司类型：1一般工商业 2银行 3保险 4证券
+  fields:
+  - ts_code
+  - ann_date
+  - f_ann_date
+  - end_date
+  - report_type
+  - comp_type
+  - net_profit
+  - c_fr_sale_sg
+  - n_cashflow_act
+  - n_cashflow_inv_act
+  - n_cash_flows_fnc_act
+  - update_flag
+  default_fields:
+  - ts_code
+  - ann_date
+  - f_ann_date
+  - end_date
+  - report_type
+  - comp_type
+  - net_profit
+  - c_fr_sale_sg
+  - n_cashflow_act
+  - n_cashflow_inv_act
+  - n_cash_flows_fnc_act
+  - update_flag
+  key_columns:
+  - ts_code
+  - end_date
+  - ann_date
+  - report_type
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+    period:
+      kind: period
+  supports_symbol_range: true
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: f_ann_date
+    fallback_visible_date_column: ann_date
+  wide_table_targets:
+  - financial_reports_wide
+  - financial_current_wide
+  raw_dataset_name: tushare/cashflow
+  raw_view_name: raw_tushare_cashflow
+  description: 获取上市公司现金流量表
+  field_descriptions:
+    ts_code: TS股票代码
+    ann_date: 公告日期
+    f_ann_date: 实际公告日期
+    end_date: 报告期
+    report_type: 报表类型
+    comp_type: 公司类型(1一般工商业2银行3保险4证券)
+    net_profit: 净利润
+    c_fr_sale_sg: 销售商品、提供劳务收到的现金
+    n_cashflow_act: 经营活动产生的现金流量净额
+    n_cashflow_inv_act: 投资活动产生的现金流量净额
+    n_cash_flows_fnc_act: 筹资活动产生的现金流量净额
+    update_flag: 更新标志(1最新）
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: fina_indicator
+  dataset_id: tushare.fina_indicator
+  category: fundamental
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=79
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: TS股票代码,e.g. 600001.SH/000001.SZ
+    ann_date:
+      type: date
+      required: false
+      description: 公告日期
+    start_date:
+      type: date
+      required: false
+      description: 报告期开始日期
+    end_date:
+      type: date
+      required: false
+      description: 报告期结束日期
+    period:
+      type: date
+      required: false
+      description: 报告期(每个季度最后一天的日期,比如20171231表示年报)
+  fields:
+  - ts_code
+  - ann_date
+  - end_date
+  - eps
+  - dt_eps
+  - total_revenue_ps
+  - revenue_ps
+  - capital_rese_ps
+  - surplus_rese_ps
+  - undist_profit_ps
+  - extra_item
+  - profit_dedt
+  - gross_margin
+  - current_ratio
+  - quick_ratio
+  - cash_ratio
+  - ar_turn
+  - ca_turn
+  - fa_turn
+  - assets_turn
+  - roe
+  - roe_dt
+  - roa
+  - roic
+  - debt_to_assets
+  - assets_to_eqt
+  - update_flag
+  default_fields:
+  - ts_code
+  - ann_date
+  - end_date
+  - eps
+  - dt_eps
+  - gross_margin
+  - current_ratio
+  - quick_ratio
+  - cash_ratio
+  - ar_turn
+  - ca_turn
+  - fa_turn
+  - assets_turn
+  - roe
+  - roe_dt
+  - roa
+  - roic
+  - debt_to_assets
+  - update_flag
+  key_columns:
+  - ts_code
+  - end_date
+  - ann_date
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+    period:
+      kind: period
+  supports_symbol_range: true
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: ann_date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - financial_reports_wide
+  - financial_current_wide
+  raw_dataset_name: tushare/fina_indicator
+  raw_view_name: raw_tushare_fina_indicator
+  description: 获取上市公司财务指标数据，为避免服务器压力，现阶段每次请求最多返回100条记录，可通过设置日期多次请求获取更多数据。
+  field_descriptions:
+    ts_code: TS代码
+    ann_date: 公告日期
+    end_date: 报告期
+    eps: 基本每股收益
+    dt_eps: 稀释每股收益
+    total_revenue_ps: 每股营业总收入
+    revenue_ps: 每股营业收入
+    capital_rese_ps: 每股资本公积
+    surplus_rese_ps: 每股盈余公积
+    undist_profit_ps: 每股未分配利润
+    extra_item: 非经常性损益
+    profit_dedt: 扣除非经常性损益后的净利润（扣非净利润）
+    gross_margin: 毛利
+    current_ratio: 流动比率
+    quick_ratio: 速动比率
+    cash_ratio: 保守速动比率
+    ar_turn: 应收账款周转率
+    ca_turn: 流动资产周转率
+    fa_turn: 固定资产周转率
+    assets_turn: 总资产周转率
+    roe: 净资产收益率
+    roe_dt: 净资产收益率(扣除非经常损益)
+    roa: 总资产报酬率
+    roic: 投入资本回报率
+    debt_to_assets: 资产负债率
+    assets_to_eqt: 权益乘数
+    update_flag: 更新标识
+  call_limit:
+    status: DOCUMENTED
+    raw: 获取上市公司财务指标数据，为避免服务器压力，现阶段每次请求最多返回100条记录，可通过设置日期多次请求获取更多数据。
+    rows_per_request: 100
+- api_name: dividend
+  dataset_id: tushare.dividend
+  category: corporate_action
+  asset_types:
+  - stock
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=103
+  doc_status: OK
+  params:
+    ts_code:
+      type: string
+      required: false
+      description: TS代码
+    ann_date:
+      type: date
+      required: false
+      description: 公告日
+    record_date:
+      type: date
+      required: false
+      description: 股权登记日期
+    ex_date:
+      type: date
+      required: false
+      description: 除权除息日
+    imp_ann_date:
+      type: date
+      required: false
+      description: 实施公告日
+  fields:
+  - ts_code
+  - end_date
+  - ann_date
+  - div_proc
+  - stk_div
+  - stk_bo_rate
+  - stk_co_rate
+  - cash_div
+  - cash_div_tax
+  - record_date
+  - ex_date
+  - pay_date
+  default_fields:
+  - ts_code
+  - end_date
+  - ann_date
+  - div_proc
+  - stk_div
+  - stk_bo_rate
+  - stk_co_rate
+  - cash_div
+  - cash_div_tax
+  - record_date
+  - ex_date
+  - pay_date
+  key_columns:
+  - ts_code
+  - end_date
+  - ann_date
+  - div_proc
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params:
+    ann_date:
+      kind: point
+      column: ann_date
+    record_date:
+      kind: point
+      column: record_date
+    ex_date:
+      kind: point
+      column: ex_date
+    imp_ann_date:
+      kind: point
+      column: imp_ann_date
+  supports_symbol_range: true
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: ann_date
+    fallback_visible_date_column: ex_date
+  wide_table_targets:
+  - corporate_actions
+  raw_dataset_name: tushare/dividend
+  raw_view_name: raw_tushare_dividend
+  description: 分红送股数据
+  field_descriptions:
+    ts_code: TS代码
+    end_date: 分红年度
+    ann_date: 预案公告日
+    div_proc: 实施进度
+    stk_div: 每股送转
+    stk_bo_rate: 每股送股比例
+    stk_co_rate: 每股转增比例
+    cash_div: 每股分红（税后）
+    cash_div_tax: 每股分红（税前）
+    record_date: 股权登记日
+    ex_date: 除权除息日
+    pay_date: 派息日
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: cn_gdp
+  dataset_id: tushare.cn_gdp
+  category: macro
+  asset_types:
+  - macro
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=227
+  doc_status: OK
+  params:
+    q:
+      type: string
+      required: false
+      description: 季度（2019Q1表示，2019年第一季度）
+    start_q:
+      type: string
+      required: false
+      description: 开始季度
+    end_q:
+      type: string
+      required: false
+      description: 结束季度
+    fields:
+      type: string
+      required: false
+      description: 指定输出字段（e.g. fields='quarter,gdp,gdp_yoy'）
+  fields:
+  - quarter
+  - gdp
+  - gdp_yoy
+  - pi
+  - pi_yoy
+  - si
+  - si_yoy
+  - ti
+  - ti_yoy
+  default_fields:
+  - quarter
+  - gdp
+  - gdp_yoy
+  - pi
+  - pi_yoy
+  - si
+  - si_yoy
+  - ti
+  - ti_yoy
+  key_columns:
+  - quarter
+  symbol_param: null
+  symbol_column: null
+  date_params:
+    q:
+      kind: point
+      column: quarter
+    start_q:
+      kind: range_start
+    end_q:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: quarter
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - macro_series
+  raw_dataset_name: tushare/cn_gdp
+  raw_view_name: raw_tushare_cn_gdp
+  description: 获取国民经济之GDP数据
+  field_descriptions:
+    quarter: 季度
+    gdp: GDP累计值（亿元）
+    gdp_yoy: 当季同比增速（%）
+    pi: 第一产业累计值（亿元）
+    pi_yoy: 第一产业同比增速（%）
+    si: 第二产业累计值（亿元）
+    si_yoy: 第二产业同比增速（%）
+    ti: 第三产业累计值（亿元）
+    ti_yoy: 第三产业同比增速（%）
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: cn_cpi
+  dataset_id: tushare.cn_cpi
+  category: macro
+  asset_types:
+  - macro
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=228
+  doc_status: OK
+  params:
+    m:
+      type: string
+      required: false
+      description: 月份（YYYYMM，下同），支持多个月份同时输入，逗号分隔
+    start_m:
+      type: string
+      required: false
+      description: 开始月份
+    end_m:
+      type: string
+      required: false
+      description: 结束月份
+  fields:
+  - month
+  - nt_val
+  - nt_yoy
+  - nt_mom
+  - nt_accu
+  - town_val
+  - town_yoy
+  - town_mom
+  - town_accu
+  - cnt_val
+  - cnt_yoy
+  - cnt_mom
+  - cnt_accu
+  default_fields:
+  - month
+  - nt_val
+  - nt_yoy
+  - nt_mom
+  - nt_accu
+  - town_val
+  - town_yoy
+  - town_mom
+  - town_accu
+  - cnt_val
+  - cnt_yoy
+  - cnt_mom
+  - cnt_accu
+  key_columns:
+  - month
+  symbol_param: null
+  symbol_column: null
+  date_params:
+    m:
+      kind: point
+      column: month
+    start_m:
+      kind: range_start
+    end_m:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: month
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - macro_series
+  raw_dataset_name: tushare/cn_cpi
+  raw_view_name: raw_tushare_cn_cpi
+  description: 获取CPI居民消费价格数据，包括全国、城市和农村的数据
+  field_descriptions:
+    month: 月份YYYYMM
+    nt_val: 全国当月值
+    nt_yoy: 全国同比（%）
+    nt_mom: 全国环比（%）
+    nt_accu: 全国累计值
+    town_val: 城市当月值
+    town_yoy: 城市同比（%）
+    town_mom: 城市环比（%）
+    town_accu: 城市累计值
+    cnt_val: 农村当月值
+    cnt_yoy: 农村同比（%）
+    cnt_mom: 农村环比（%）
+    cnt_accu: 农村累计值
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: cn_ppi
+  dataset_id: tushare.cn_ppi
+  category: macro
+  asset_types:
+  - macro
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=245
+  doc_status: OK
+  params:
+    m:
+      type: string
+      required: false
+      description: 月份（YYYYMM，下同），支持多个月份同时输入，逗号分隔
+    start_m:
+      type: string
+      required: false
+      description: 开始月份
+    end_m:
+      type: string
+      required: false
+      description: 结束月份
+  fields:
+  - month
+  - ppi_yoy
+  - ppi_mp_yoy
+  - ppi_mp_qm_yoy
+  - ppi_mp_rm_yoy
+  - ppi_mp_p_yoy
+  - ppi_cg_yoy
+  - ppi_cg_f_yoy
+  - ppi_cg_c_yoy
+  - ppi_cg_adu_yoy
+  - ppi_cg_dcg_yoy
+  - ppi_mom
+  - ppi_mp_mom
+  - ppi_mp_qm_mom
+  - ppi_mp_rm_mom
+  - ppi_mp_p_mom
+  - ppi_cg_mom
+  - ppi_accu
+  default_fields:
+  - month
+  - ppi_yoy
+  - ppi_mom
+  - ppi_accu
+  key_columns:
+  - month
+  symbol_param: null
+  symbol_column: null
+  date_params:
+    m:
+      kind: point
+      column: month
+    start_m:
+      kind: range_start
+    end_m:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: month
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - macro_series
+  raw_dataset_name: tushare/cn_ppi
+  raw_view_name: raw_tushare_cn_ppi
+  description: 获取PPI工业生产者出厂价格指数数据
+  field_descriptions:
+    month: 月份YYYYMM
+    ppi_yoy: PPI：全部工业品：当月同比
+    ppi_mp_yoy: PPI：生产资料：当月同比
+    ppi_mp_qm_yoy: PPI：生产资料：采掘业：当月同比
+    ppi_mp_rm_yoy: PPI：生产资料：原料业：当月同比
+    ppi_mp_p_yoy: PPI：生产资料：加工业：当月同比
+    ppi_cg_yoy: PPI：生活资料：当月同比
+    ppi_cg_f_yoy: PPI：生活资料：食品类：当月同比
+    ppi_cg_c_yoy: PPI：生活资料：衣着类：当月同比
+    ppi_cg_adu_yoy: PPI：生活资料：一般日用品类：当月同比
+    ppi_cg_dcg_yoy: PPI：生活资料：耐用消费品类：当月同比
+    ppi_mom: PPI：全部工业品：环比
+    ppi_mp_mom: PPI：生产资料：环比
+    ppi_mp_qm_mom: PPI：生产资料：采掘业：环比
+    ppi_mp_rm_mom: PPI：生产资料：原料业：环比
+    ppi_mp_p_mom: PPI：生产资料：加工业：环比
+    ppi_cg_mom: PPI：生活资料：环比
+    ppi_accu: PPI：全部工业品：累计同比
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: shibor
+  dataset_id: tushare.shibor
+  category: macro
+  asset_types:
+  - macro
+  implemented: true
+  doc_url: https://tushare.pro/document/2?doc_id=149
+  doc_status: OK
+  params:
+    date:
+      type: date
+      required: false
+      description: 日期 (日期输入格式：YYYYMMDD，下同)
+    start_date:
+      type: date
+      required: false
+      description: 开始日期
+    end_date:
+      type: date
+      required: false
+      description: 结束日期
+  fields:
+  - date
+  - 'on'
+  - 1w
+  - 2w
+  - 1m
+  - 3m
+  - 6m
+  - 9m
+  - 1y
+  default_fields:
+  - date
+  - 'on'
+  - 1w
+  - 2w
+  - 1m
+  - 3m
+  - 6m
+  - 9m
+  - 1y
+  key_columns:
+  - date
+  symbol_param: null
+  symbol_column: null
+  date_params:
+    date:
+      kind: point
+      column: date
+    start_date:
+      kind: range_start
+    end_date:
+      kind: range_end
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: true
+    visible_date_column: date
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - macro_series
+  raw_dataset_name: tushare/shibor
+  raw_view_name: raw_tushare_shibor
+  description: shibor利率
+  field_descriptions:
+    date: 日期
+    'on': 隔夜
+    1w: 1周
+    2w: 2周
+    1m: 1个月
+    3m: 3个月
+    6m: 6个月
+    9m: 9个月
+    1y: 1年
+  call_limit:
+    status: UNKNOWN
+    raw: null
+- api_name: adj_factor
+  dataset_id: tushare.adj_factor
+  category: corporate_action
+  asset_types:
+  - stock
+  implemented: false
+  doc_url: https://tushare.pro/document/2?doc_id=28
+  doc_status: OK
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - corporate_actions
+  raw_dataset_name: tushare/adj_factor
+  raw_view_name: raw_tushare_adj_factor
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: OK
+- api_name: moneyflow
+  dataset_id: tushare.moneyflow
+  category: market
+  asset_types:
+  - stock
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/moneyflow
+  raw_view_name: raw_tushare_moneyflow
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: margin
+  dataset_id: tushare.margin
+  category: market
+  asset_types:
+  - stock
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/margin
+  raw_view_name: raw_tushare_margin
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: top10_holders
+  dataset_id: tushare.top10_holders
+  category: fundamental
+  asset_types:
+  - stock
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/top10_holders
+  raw_view_name: raw_tushare_top10_holders
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: concept
+  dataset_id: tushare.concept
+  category: security
+  asset_types:
+  - stock
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: null
+  symbol_column: null
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/concept
+  raw_view_name: raw_tushare_concept
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: index_weight
+  dataset_id: tushare.index_weight
+  category: index
+  asset_types:
+  - index
+  implemented: false
+  doc_url: https://tushare.pro/document/2?doc_id=96
+  doc_status: OK
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: index_code
+  symbol_column: index_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/index_weight
+  raw_view_name: raw_tushare_index_weight
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: OK
+- api_name: index_dailybasic
+  dataset_id: tushare.index_dailybasic
+  category: index
+  asset_types:
+  - index
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/index_dailybasic
+  raw_view_name: raw_tushare_index_dailybasic
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: index_member
+  dataset_id: tushare.index_member
+  category: index
+  asset_types:
+  - index
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: index_code
+  symbol_column: index_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/index_member
+  raw_view_name: raw_tushare_index_member
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: fund_nav
+  dataset_id: tushare.fund_nav
+  category: fund
+  asset_types:
+  - fund
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/fund_nav
+  raw_view_name: raw_tushare_fund_nav
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: fund_portfolio
+  dataset_id: tushare.fund_portfolio
+  category: fund
+  asset_types:
+  - fund
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/fund_portfolio
+  raw_view_name: raw_tushare_fund_portfolio
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: repurchase
+  dataset_id: tushare.repurchase
+  category: corporate_action
+  asset_types:
+  - stock
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - corporate_actions
+  raw_dataset_name: tushare/repurchase
+  raw_view_name: raw_tushare_repurchase
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: share_float
+  dataset_id: tushare.share_float
+  category: corporate_action
+  asset_types:
+  - stock
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets:
+  - corporate_actions
+  raw_dataset_name: tushare/share_float
+  raw_view_name: raw_tushare_share_float
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
+- api_name: stk_holdernumber
+  dataset_id: tushare.stk_holdernumber
+  category: fundamental
+  asset_types:
+  - stock
+  implemented: false
+  doc_status: DOC_UNAVAILABLE
+  params: {}
+  fields: []
+  default_fields: []
+  key_columns: []
+  symbol_param: ts_code
+  symbol_column: ts_code
+  date_params: {}
+  supports_symbol_range: false
+  supports_marketwide_by_date: false
+  pagination:
+    type: none
+  pit:
+    safe: false
+    visible_date_column: null
+    fallback_visible_date_column: null
+  wide_table_targets: []
+  raw_dataset_name: tushare/stk_holdernumber
+  raw_view_name: raw_tushare_stk_holdernumber
+  description: null
+  field_descriptions: {}
+  call_limit:
+    status: UNKNOWN
+    raw: null
+    reason: DOC_UNAVAILABLE
