@@ -1930,22 +1930,6 @@ build_data_table_tool: AgentTool = tool(
 )
 
 
-run_remote_data_update_tool: AgentTool = tool(
-    ToolSpec(
-        name="run_remote_data_update",
-        description="通过本地受控同步器补齐 Tushare 远程数据，强制限速、锁和日期跨度上限。",
-        permission=PermissionLevel.RESEARCH_WRITE,
-        side_effect_level="write_formal",
-        input_schema=_UPDATE_INPUT_SCHEMA,
-        output_schema={"type": "object"},
-        deterministic=False,
-        timeout_seconds=300,
-    ),
-    fn=_run_remote_data_update,
-    timeout_seconds_for_call=_remote_data_update_timeout_seconds,
-)
-
-
 _FUNDAMENTAL_UPDATE_INPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -2000,46 +1984,6 @@ _MACRO_UPDATE_INPUT_SCHEMA = {
     "required": ["start_date", "end_date"],
     "additionalProperties": False,
 }
-
-
-run_fundamental_data_update_tool: AgentTool = tool(
-    ToolSpec(
-        name="run_fundamental_data_update",
-        description=(
-            "通过本地受控同步器补齐 Tushare 基本面与日频估值数据。"
-            "先用 dry_run=true, auto_chunk=true 查看缺口和批次计划；"
-            "允许 live update 时用 dry_run=false, auto_chunk=true, execute_plan=true "
-            "逐批执行并返回 post_update_coverage。"
-        ),
-        permission=PermissionLevel.RESEARCH_WRITE,
-        side_effect_level="write_formal",
-        input_schema=_FUNDAMENTAL_UPDATE_INPUT_SCHEMA,
-        output_schema={"type": "object"},
-        deterministic=False,
-        timeout_seconds=300,
-    ),
-    fn=_run_fundamental_data_update,
-)
-
-
-run_macro_data_update_tool: AgentTool = tool(
-    ToolSpec(
-        name="run_macro_data_update",
-        description=(
-            "通过本地受控同步器补齐 Tushare 宏观数据集。"
-            "可用 datasets 指定 cn_cpi、cn_ppi、cn_gdp、shibor。"
-            "超范围请求应使用 auto_chunk=true 拆窗；允许 live update 时设置 "
-            "execute_plan=true 后复查 post_update_coverage。"
-        ),
-        permission=PermissionLevel.RESEARCH_WRITE,
-        side_effect_level="write_formal",
-        input_schema=_MACRO_UPDATE_INPUT_SCHEMA,
-        output_schema={"type": "object"},
-        deterministic=False,
-        timeout_seconds=300,
-    ),
-    fn=_run_macro_data_update,
-)
 
 
 def build_remote_data_tools(deps: AgentToolDependencies) -> list[AgentTool]:
