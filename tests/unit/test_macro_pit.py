@@ -16,7 +16,7 @@ def test_load_macro_series_asof_filters_by_visible_date(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_macro_shibor",
+        "tushare/shibor",
     )
 
     frame, metadata = load_macro_series_asof(

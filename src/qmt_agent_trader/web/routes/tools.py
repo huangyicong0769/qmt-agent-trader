@@ -62,7 +62,7 @@ async def run_tool(tool_name: str, request: ToolRunRequest) -> ToolRunResponse:
         user_id=request.user_id,
     )
     input_data = dict(request.input_data)
-    if tool_name == "run_remote_data_update" and request.dry_run:
+    if tool_name == "run_tushare_fetch" and request.dry_run:
         input_data.setdefault("dry_run", True)
     try:
         result = runtime.run_tool(tool_name, input_data, context)

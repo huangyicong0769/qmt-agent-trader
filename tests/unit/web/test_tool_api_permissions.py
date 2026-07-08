@@ -68,7 +68,7 @@ def test_tool_api_allows_read_only_and_uses_autonomous_runtime_context(
     assert audit["status"] == "execution_ok_domain_unknown"
 
 
-def test_tool_api_injects_remote_data_update_dry_run_for_web_requests(
+def test_tool_api_injects_tushare_fetch_dry_run_for_web_requests(
     tmp_path, monkeypatch
 ) -> None:
     seen_inputs: list[dict[str, object]] = []
@@ -76,8 +76,8 @@ def test_tool_api_injects_remote_data_update_dry_run_for_web_requests(
     registry.register(
         tool(
             ToolSpec(
-                name="run_remote_data_update",
-                description="Update remote data",
+                name="run_tushare_fetch",
+                description="Fetch Tushare data",
                 permission=PermissionLevel.RESEARCH_WRITE,
             ),
             fn=lambda data, context: seen_inputs.append(data) or {"status": "planned"},
@@ -88,8 +88,8 @@ def test_tool_api_injects_remote_data_update_dry_run_for_web_requests(
     app.include_router(tools.router)
 
     response = TestClient(app).post(
-        "/run_remote_data_update/run",
-        json={"input_data": {"start_date": "20240101", "end_date": "20240103"}},
+        "/run_tushare_fetch/run",
+        json={"input_data": {"items": [{"api_name": "daily"}]}},
     )
 
     assert response.status_code == 200

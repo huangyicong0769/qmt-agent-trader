@@ -22,7 +22,7 @@ class MacroDatasetSpec:
 
     @property
     def raw_dataset(self) -> str:
-        return f"tushare_macro_{self.dataset_id}"
+        return f"tushare/{self.dataset_id}"
 
     @property
     def key_columns(self) -> list[str]:

@@ -47,7 +47,7 @@ def test_query_macro_series_pit_returns_pit_safe_series(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_macro_shibor",
+        "tushare/shibor",
     )
     set_data_lake(lake)
 
@@ -79,7 +79,7 @@ def test_query_macro_series_pit_blocks_strict_unvalidated_dataset(tmp_path) -> N
     lake.write_parquet(
         pd.DataFrame([{"month": "202401", "nt_val": 100.0}]),
         "raw",
-        "tushare_macro_cn_cpi",
+        "tushare/cn_cpi",
     )
     set_data_lake(lake)
 

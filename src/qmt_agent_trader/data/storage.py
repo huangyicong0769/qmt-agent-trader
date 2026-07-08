@@ -4,31 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import duckdb
 import pandas as pd
-
-from qmt_agent_trader.data.catalog import is_legacy_raw_batch_name
-
-
-@dataclass(frozen=True)
-class LegacyMigrationResult:
-    stable_name: str
-    legacy_names: list[str]
-    removed_names: list[str]
-    rows: int
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "stable_name": self.stable_name,
-            "legacy_names": self.legacy_names,
-            "removed_names": self.removed_names,
-            "rows": self.rows,
-        }
 
 
 class DataLake:
@@ -187,74 +168,6 @@ class DataLake:
         if not frames:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
-
-    def migrate_legacy_dataset(
-        self,
-        *,
-        layer: str,
-        stable_name: str,
-        legacy_prefix: str,
-        key_columns: list[str],
-        remove_legacy: bool = True,
-    ) -> LegacyMigrationResult:
-        legacy_names = [
-            name
-            for name in self.list_dataset_names(layer, prefix=legacy_prefix)
-            if name != stable_name and is_legacy_raw_batch_name(name)
-        ]
-        frames: list[pd.DataFrame] = []
-        for name in legacy_names:
-            frame = self.read_parquet(layer, name)
-            if "_empty" in frame.columns:
-                frame = frame.drop(columns=["_empty"])
-            if not frame.empty:
-                frames.append(frame)
-
-        if self.dataset_path(layer, stable_name).exists():
-            stable = self.read_parquet(layer, stable_name)
-            if "_empty" in stable.columns:
-                stable = stable.drop(columns=["_empty"])
-            if not stable.empty:
-                frames.append(stable)
-
-        if frames:
-            merged = (
-                pd.concat(frames, ignore_index=True)
-                .drop_duplicates(key_columns, keep="last")
-                .sort_values(key_columns)
-                .reset_index(drop=True)
-            )
-            self.write_incremental_parquet(
-                merged,
-                layer,
-                stable_name,
-                key_columns=key_columns,
-            )
-        elif legacy_names:
-            self.write_incremental_parquet(
-                pd.DataFrame(),
-                layer,
-                stable_name,
-                key_columns=key_columns,
-            )
-
-        removed_names: list[str] = []
-        if remove_legacy:
-            for name in legacy_names:
-                path = self.dataset_path(layer, name)
-                if path.exists():
-                    path.unlink()
-                    removed_names.append(name)
-
-        rows = 0
-        if self.dataset_path(layer, stable_name).exists():
-            rows = len(self.read_parquet(layer, stable_name))
-        return LegacyMigrationResult(
-            stable_name=stable_name,
-            legacy_names=legacy_names,
-            removed_names=removed_names,
-            rows=rows,
-        )
 
     def query_parquet(self, sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
         with self.connect() as con:

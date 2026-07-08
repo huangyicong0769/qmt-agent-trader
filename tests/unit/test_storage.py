@@ -40,7 +40,7 @@ def test_incremental_parquet_merges_by_key(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
         key_columns=["ts_code", "trade_date"],
     )
     lake.write_incremental_parquet(
@@ -51,11 +51,11 @@ def test_incremental_parquet_merges_by_key(tmp_path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
         key_columns=["ts_code", "trade_date"],
     )
 
-    merged = lake.read_parquet("raw", "tushare_daily").sort_values(["ts_code", "trade_date"])
+    merged = lake.read_parquet("raw", "tushare/daily").sort_values(["ts_code", "trade_date"])
 
     assert merged.to_dict("records") == [
         {"ts_code": "000001.SZ", "trade_date": "20240102", "close": 10.5},
@@ -70,16 +70,16 @@ def test_incremental_parquet_accepts_empty_fetch_frames(tmp_path) -> None:
     lake.write_incremental_parquet(
         pd.DataFrame(),
         "raw",
-        "tushare_suspend",
+        "tushare/suspend_d",
         key_columns=["ts_code", "trade_date"],
     )
 
-    loaded = lake.read_parquet("raw", "tushare_suspend")
+    loaded = lake.read_parquet("raw", "tushare/suspend_d")
     assert list(loaded.columns) == ["ts_code", "trade_date"]
     assert loaded.empty
 
 
-def test_migrate_legacy_dataset_merges_batches_and_removes_old_files(tmp_path) -> None:
+def test_catalog_exposes_unmigrated_legacy_batches_instead_of_hiding_them(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
         pd.DataFrame(
@@ -107,28 +107,15 @@ def test_migrate_legacy_dataset_merges_batches_and_removes_old_files(tmp_path) -
         "tushare_daily_adjusted",
     )
 
-    result = lake.migrate_legacy_dataset(
-        layer="raw",
-        stable_name="tushare_daily",
-        legacy_prefix="tushare_daily_",
-        key_columns=["ts_code", "trade_date"],
-        remove_legacy=True,
-    )
-
-    assert result.legacy_names == [
+    assert lake.list_dataset_names("raw", prefix="tushare_daily_") == [
         "tushare_daily_20240101_20240102",
         "tushare_daily_20240102_20240103",
+        "tushare_daily_adjusted",
     ]
-    assert result.removed_names == result.legacy_names
-    assert result.rows == 3
     assert lake.dataset_path("raw", "tushare_daily_adjusted").exists()
-    assert not lake.dataset_path("raw", "tushare_daily_20240101_20240102").exists()
-    assert not lake.dataset_path("raw", "tushare_daily_20240102_20240103").exists()
-    assert lake.read_parquet("raw", "tushare_daily").to_dict("records") == [
-        {"ts_code": "000001.SZ", "trade_date": "20240102", "close": 10.5},
-        {"ts_code": "000002.SZ", "trade_date": "20240102", "close": 20.0},
-        {"ts_code": "000003.SZ", "trade_date": "20240103", "close": 30.0},
-    ]
+    assert lake.dataset_path("raw", "tushare_daily_20240101_20240102").exists()
+    assert lake.dataset_path("raw", "tushare_daily_20240102_20240103").exists()
+    assert not lake.dataset_path("raw", "tushare/daily").exists()
 
 
 def test_fetch_state_and_events_are_persisted(tmp_path) -> None:
@@ -136,7 +123,7 @@ def test_fetch_state_and_events_are_persisted(tmp_path) -> None:
 
     lake.record_fetch_result(
         source="tushare",
-        dataset="tushare_daily",
+        dataset="tushare.daily",
         start_date="20240101",
         end_date="20240103",
         status="success",
@@ -145,13 +132,13 @@ def test_fetch_state_and_events_are_persisted(tmp_path) -> None:
         error=None,
     )
 
-    state = lake.fetch_state("tushare", "tushare_daily")
-    events = lake.fetch_events("tushare", "tushare_daily")
+    state = lake.fetch_state("tushare", "tushare.daily")
+    events = lake.fetch_events("tushare", "tushare.daily")
 
     assert state == [
         {
             "source": "tushare",
-            "dataset": "tushare_daily",
+            "dataset": "tushare.daily",
             "start_date": "20240101",
             "end_date": "20240103",
             "status": "success",
@@ -183,12 +170,12 @@ def test_read_parquet_filtered_pushes_date_symbol_and_column_filters(tmp_path) -
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
 
     loaded = lake.read_parquet_filtered(
         "raw",
-        "tushare_daily",
+        "tushare/daily",
         columns=["ts_code", "trade_date", "close"],
         start="20240103",
         end="20240104",

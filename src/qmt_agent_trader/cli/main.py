@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Annotated
 
+import pandas as pd
 import typer
 from rich import print
 from rich.console import Console, Group
@@ -44,15 +46,7 @@ from qmt_agent_trader.data.providers.tushare.fetcher import TushareFetcher
 from qmt_agent_trader.data.providers.tushare.provider import TushareProvider
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
-from qmt_agent_trader.data.tushare_client import TushareClient
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
-from qmt_agent_trader.services.data_update_service import (
-    RequestLimiter,
-    TushareDataUpdateService,
-    build_data_update_plan,
-    build_fundamental_update_plan,
-    build_macro_update_plan,
-)
 from qmt_agent_trader.services.order_plan_service import (
     build_sample_paper_order_plan,
     load_order_plan,
@@ -105,12 +99,6 @@ def _broker_client() -> RemoteQMTBrokerClient:
         api_key=api_key,
         hmac_secret=secret,
     )
-
-
-def _tushare_client() -> TushareClient:
-    settings = _settings()
-    token = settings.tushare_token.get_secret_value() if settings.tushare_token else None
-    return TushareClient(token=token)
 
 
 def _generic_tushare_client() -> GenericTushareClient:
@@ -168,37 +156,6 @@ def serve_web(
 
     web_app = create_app()
     uvicorn.run(web_app, host=host, port=port, reload=reload)
-
-
-@data_app.command("update")
-def data_update(
-    from_date: Annotated[str, typer.Option("--from")],
-    to_date: Annotated[str, typer.Option("--to")],
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-    skip_daily: Annotated[bool, typer.Option("--skip-daily")] = False,
-    skip_basics: Annotated[bool, typer.Option("--skip-basics")] = False,
-) -> None:
-    """Update the local data lake from Tushare Pro."""
-    client = _tushare_client()
-    if dry_run:
-        plan = build_data_update_plan(client, from_date, to_date)
-        print_json({"status": "planned", "requests": plan})
-        return
-    settings = _settings()
-    result = TushareDataUpdateService(
-        client,
-        _data_lake(),
-        limiter=RequestLimiter(
-            min_interval_seconds=settings.remote_data_min_interval_seconds
-        ),
-        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
-    ).update(
-        from_date,
-        to_date,
-        include_daily=not skip_daily,
-        include_basics=not skip_basics,
-    )
-    print_json(result.as_dict())
 
 
 @data_app.command("capabilities")
@@ -287,98 +244,14 @@ def data_build_table(
     print_json(DataTableBuilder(_data_lake()).build(table, snapshot_as_of_date=snapshot_as_of_date))
 
 
-@data_app.command("update-fundamentals")
-def data_update_fundamentals(
-    from_date: Annotated[str, typer.Option("--from")],
-    to_date: Annotated[str, typer.Option("--to")],
-    ts_code: Annotated[str | None, typer.Option("--ts-code")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-    skip_daily_basic: Annotated[bool, typer.Option("--skip-daily-basic")] = False,
-    skip_financial_statements: Annotated[
-        bool, typer.Option("--skip-financial-statements")
-    ] = False,
-    skip_dividend: Annotated[bool, typer.Option("--skip-dividend")] = False,
-) -> None:
-    """Update Tushare fundamentals into the raw data lake."""
-    client = _tushare_client()
-    if dry_run:
-        print_json(
-            {
-                "status": "planned",
-                "requests": build_fundamental_update_plan(
-                    client,
-                    from_date,
-                    to_date,
-                    ts_code=ts_code,
-                    include_daily_basic=not skip_daily_basic,
-                    include_financial_statements=not skip_financial_statements,
-                    include_dividend=not skip_dividend,
-                ),
-            }
-        )
-        return
-    settings = _settings()
-    result = TushareDataUpdateService(
-        client,
-        _data_lake(),
-        limiter=RequestLimiter(
-            min_interval_seconds=settings.remote_data_min_interval_seconds
-        ),
-        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
-    ).update_fundamentals(
-        from_date,
-        to_date,
-        ts_code=ts_code,
-        include_daily_basic=not skip_daily_basic,
-        include_financial_statements=not skip_financial_statements,
-        include_dividend=not skip_dividend,
-    )
-    print_json(result.as_dict())
-
-
-@data_app.command("update-macro")
-def data_update_macro(
-    from_date: Annotated[str, typer.Option("--from")],
-    to_date: Annotated[str, typer.Option("--to")],
-    datasets: Annotated[str | None, typer.Option("--datasets")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-) -> None:
-    """Update configured Tushare macro datasets into the raw data lake."""
-    dataset_ids = _csv_values(datasets)
-    client = _tushare_client()
-    if dry_run:
-        print_json(
-            {
-                "status": "planned",
-                "requests": build_macro_update_plan(
-                    client,
-                    from_date,
-                    to_date,
-                    datasets=dataset_ids or None,
-                ),
-            }
-        )
-        return
-    settings = _settings()
-    result = TushareDataUpdateService(
-        client,
-        _data_lake(),
-        limiter=RequestLimiter(
-            min_interval_seconds=settings.remote_data_min_interval_seconds
-        ),
-        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
-    ).update_macro(from_date, to_date, datasets=dataset_ids or None)
-    print_json(result.as_dict())
-
-
 @data_app.command("validate")
 def data_validate() -> None:
     """Validate local data lake artifacts."""
     lake = _data_lake()
     expected = [
-        lake.dataset_path("raw", "tushare_trade_calendar"),
-        lake.dataset_path("raw", "tushare_stock_basic"),
-        lake.dataset_path("raw", "tushare_etf_basic"),
+        lake.dataset_path("raw", "tushare/trade_cal"),
+        lake.dataset_path("raw", "tushare/stock_basic"),
+        lake.dataset_path("raw", "tushare/fund_basic"),
     ]
     missing = [str(path) for path in expected if not path.exists()]
     print_json(
@@ -395,27 +268,27 @@ def data_validate_fundamentals() -> None:
     """Validate local fundamentals datasets and PIT columns."""
     lake = _data_lake()
     specs = {
-        "tushare_daily_basic": {
+        "tushare/daily_basic": {
             "required_columns": ["ts_code", "trade_date"],
             "pit_columns": ["trade_date"],
             "pit_safe": True,
         },
-        "tushare_income": {
+        "tushare/income": {
             "required_columns": ["ts_code", "end_date", "ann_date"],
             "pit_columns": ["ann_date", "f_ann_date"],
             "pit_safe": True,
         },
-        "tushare_balancesheet": {
+        "tushare/balancesheet": {
             "required_columns": ["ts_code", "end_date", "ann_date"],
             "pit_columns": ["ann_date", "f_ann_date"],
             "pit_safe": True,
         },
-        "tushare_cashflow": {
+        "tushare/cashflow": {
             "required_columns": ["ts_code", "end_date", "ann_date"],
             "pit_columns": ["ann_date", "f_ann_date"],
             "pit_safe": True,
         },
-        "tushare_fina_indicator": {
+        "tushare/fina_indicator": {
             "required_columns": ["ts_code", "end_date", "ann_date"],
             "pit_columns": ["ann_date"],
             "pit_safe": True,
@@ -438,44 +311,6 @@ def data_validate_macro() -> None:
         for spec in MACRO_DATASETS.values()
     }
     print_json({"status": "ok", "datasets": _dataset_validation(lake, specs)})
-
-
-@data_app.command("migrate-legacy")
-def data_migrate_legacy(
-    keep_legacy: Annotated[bool, typer.Option("--keep-legacy")] = False,
-) -> None:
-    """Migrate legacy Tushare batch files into stable incremental datasets."""
-    lake = _data_lake()
-    migrations = [
-        lake.migrate_legacy_dataset(
-            layer="raw",
-            stable_name="tushare_daily",
-            legacy_prefix="tushare_daily_",
-            key_columns=["ts_code", "trade_date"],
-            remove_legacy=not keep_legacy,
-        ),
-        lake.migrate_legacy_dataset(
-            layer="raw",
-            stable_name="tushare_suspend",
-            legacy_prefix="tushare_suspend_",
-            key_columns=["ts_code", "trade_date"],
-            remove_legacy=not keep_legacy,
-        ),
-        lake.migrate_legacy_dataset(
-            layer="raw",
-            stable_name="tushare_stk_limit",
-            legacy_prefix="tushare_stk_limit_",
-            key_columns=["ts_code", "trade_date"],
-            remove_legacy=not keep_legacy,
-        ),
-    ]
-    print_json(
-        {
-            "status": "ok",
-            "remove_legacy": not keep_legacy,
-            "migrations": [item.as_dict() for item in migrations],
-        }
-    )
 
 
 @data_app.command("migrate-new-layout")
@@ -517,15 +352,22 @@ def data_migrate_new_layout(
     }
     migrations: list[dict[str, object]] = []
     for old_name, (new_name, keys) in mapping.items():
-        old_path = lake.dataset_path("raw", old_name)
-        if not old_path.exists():
+        source_names = _legacy_raw_sources_for_new_layout(lake, old_name)
+        if not source_names:
             continue
-        frame = lake.read_parquet("raw", old_name)
+        frames = []
+        for source_name in source_names:
+            frame = lake.read_parquet("raw", source_name)
+            if "_empty" in frame.columns:
+                frame = frame.drop(columns=["_empty"])
+            if not frame.empty:
+                frames.append(frame)
+        frame = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
         missing = [key for key in keys if key not in frame.columns]
         if missing:
             migrations.append(
                 {
-                    "old_name": old_name,
+                    "legacy_sources": source_names,
                     "new_name": new_name,
                     "status": "SKIPPED",
                     "missing_key_columns": missing,
@@ -534,10 +376,13 @@ def data_migrate_new_layout(
             continue
         path = lake.write_incremental_parquet(frame, "raw", new_name, key_columns=keys)
         if not keep_legacy:
-            old_path.unlink()
+            for source_name in source_names:
+                source_path = lake.dataset_path("raw", source_name)
+                if source_path.exists():
+                    source_path.unlink()
         migrations.append(
             {
-                "old_name": old_name,
+                "legacy_sources": source_names,
                 "new_name": new_name,
                 "status": "migrated",
                 "path": str(path),
@@ -546,6 +391,19 @@ def data_migrate_new_layout(
             }
         )
     print_json({"status": "ok", "migrations": migrations})
+
+
+def _legacy_raw_sources_for_new_layout(lake: DataLake, stable_name: str) -> list[str]:
+    names: list[str] = []
+    if lake.dataset_path("raw", stable_name).exists():
+        names.append(stable_name)
+    batch_pattern = re.compile(rf"^{re.escape(stable_name)}_\d{{8}}_\d{{8}}$")
+    names.extend(
+        name
+        for name in lake.list_dataset_names("raw", prefix=f"{stable_name}_")
+        if batch_pattern.match(name)
+    )
+    return sorted(dict.fromkeys(names))
 
 
 @data_app.command("qmt-sync")
