@@ -1233,10 +1233,10 @@ def _query_fundamentals_pit(
     status = "OK"
     if missing_symbols or missing_fields:
         status = "PARTIAL_COVERAGE"
-    repair_action = None
-    verification_action = None
+    partial_repair_action: dict[str, Any] | None = None
+    verification_action: dict[str, Any] | None = None
     if status == "PARTIAL_COVERAGE":
-        repair_action = _fundamental_repair_action(
+        partial_repair_action = _fundamental_repair_action(
             fields=fields,
             symbols=symbols,
             as_of_date=str(as_of),
@@ -1274,9 +1274,9 @@ def _query_fundamentals_pit(
                 else []
             ),
             "next_repair_tool": (
-                repair_action["tool"] if repair_action else None
+                partial_repair_action["tool"] if partial_repair_action else None
             ),
-            "repair_action": repair_action,
+            "repair_action": partial_repair_action,
             "verification_action": verification_action,
         },
     })
@@ -1470,7 +1470,7 @@ def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -
     )
     if metadata.get("status") == "INVALID_REQUEST":
         known_datasets = sorted(MACRO_DATASETS)
-        repair_action = {
+        repair_action: dict[str, Any] = {
             "type": "fix_request_argument",
             "tool": "list_tushare_capabilities",
             "reason": "unknown_macro_dataset",

@@ -152,13 +152,13 @@ class TushareFetcher:
                 column for column in item["fields"] if column not in result_frame.columns
             ]
             if missing_columns or requested_missing:
-                error = {
+                schema_error: dict[str, Any] = {
                     "status": "SCHEMA_MISMATCH",
                     "api_name": spec.api_name,
                     "missing_columns": sorted(set(missing_columns + requested_missing)),
                     "message": "Tushare response missing required columns; write skipped.",
                 }
-                errors.append(error)
+                errors.append(schema_error)
                 dataset_results.append(
                     _dataset_result(
                         item,
@@ -168,7 +168,7 @@ class TushareFetcher:
                         coverage_status="INVALID_REQUEST",
                         reason="schema_mismatch",
                         write_skipped=True,
-                        errors=[error],
+                        errors=[schema_error],
                     )
                 )
                 self._record_metadata(
@@ -176,7 +176,7 @@ class TushareFetcher:
                     status="SCHEMA_MISMATCH",
                     row_count=0,
                     checksum=None,
-                    error=error,
+                    error=schema_error,
                 )
                 continue
             path = self.lake.write_incremental_dataset(
