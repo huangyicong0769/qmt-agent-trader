@@ -22,7 +22,8 @@ Implemented or partially implemented surfaces include:
 
 - Mac-side Typer CLI entry point: `qmt-agent`.
 - Local data-lake commands backed by DuckDB and Parquet.
-- Tushare update planning and local data update services.
+- Registry-driven Tushare capability discovery, fetch planning, local fetch execution,
+  and data-table builds.
 - Factor, backtest, strategy, broker, and order-plan modules.
 - LLM agent runtime experiments with tool permissions and audit boundaries.
 - NiceGUI web-studio and Textual TUI entry points.
@@ -117,8 +118,9 @@ uv run qmt-agent tui
 
 # Data lake
 uv run qmt-agent data validate
-uv run qmt-agent data update --from 20240101 --to 20240131 --dry-run
-uv run qmt-agent data migrate-legacy
+uv run qmt-agent data capabilities --category market
+uv run qmt-agent data plan-fetch --api daily --symbols 000001.SZ --from 20240101 --to 20240131
+uv run qmt-agent data migrate-new-layout
 
 # Agent experiments
 uv run qmt-agent agent tools
@@ -149,7 +151,7 @@ The current default configuration is deliberately conservative:
 - Live submit refuses execution unless live trading is enabled and the caller
   provides explicit confirmation.
 - Agent-visible tools are permissioned and audited.
-- Local data update tools enforce rate limits, date-span limits, timeouts, and
+- Registry-driven Tushare fetch tools enforce rate limits, request budgets, schema checks, and
   write locks.
 
 These are engineering guardrails, not proof that the system is safe for real
@@ -161,19 +163,23 @@ The local data lake lives under `data/` and is not committed. Stable datasets ar
 written below `data/lake`, with DuckDB metadata in `data/qmt_agent_trader.duckdb`.
 
 ```bash
-uv run qmt-agent data update --from 20240101 --to 20240131 --dry-run
-uv run qmt-agent data update --from 20240101 --to 20240131
+uv run qmt-agent data capabilities --category market
+uv run qmt-agent data plan-fetch --api daily --symbols 000001.SZ --from 20240101 --to 20240131
+uv run qmt-agent data fetch --api daily --symbols 000001.SZ --from 20240101 --to 20240131 --execute-plan
+uv run qmt-agent data build-table --table daily_market
 uv run qmt-agent data validate
 ```
 
-Legacy Tushare batch files such as `raw/tushare_daily_20240101_20240131.parquet`
-can be migrated with:
+Legacy Tushare raw files such as `raw/tushare_daily.parquet` and
+`raw/tushare_daily_20240101_20240131.parquet` are one-way migrated into the new
+`raw/tushare/*.parquet` layout with:
 
 ```bash
-uv run qmt-agent data migrate-legacy
+uv run qmt-agent data migrate-new-layout
 ```
 
-Use `--keep-legacy` if old batch files should remain after migration.
+Use `--keep-legacy` only for an explicit audit snapshot. The runtime query and
+Agent fetch tools do not read the old layout.
 
 ## LLM and MCP configuration
 
@@ -279,7 +285,7 @@ uv run pytest tests/unit/test_strategy_registry.py
 - [ ] Add an operations runbook for starting, stopping, and health-checking the
   Windows gateway.
 - [ ] Add a failure-mode guide for stale market data, partial data coverage,
-  remote data update timeouts, and gateway connectivity errors.
+  Tushare fetch timeouts, and gateway connectivity errors.
 - [ ] Add an audit-log retention policy for `logs/audit/*.jsonl`.
 - [ ] Define a formal promotion path from generated strategies to reviewed,
   tracked strategy modules.

@@ -253,7 +253,7 @@ def _build_macro_long_from_raw(lake: DataLake) -> pd.DataFrame:
             var_name="source_field",
             value_name="value",
         )
-        melted["macro_id"] = source.replace("tushare/", "").replace("tushare_macro_", "")
+        melted["macro_id"] = source.replace("tushare/", "")
         melted["macro_id"] = melted["macro_id"] + "." + melted["source_field"].astype(str)
         melted["period"] = melted[period_column].astype(str)
         melted["period_type"] = period_type

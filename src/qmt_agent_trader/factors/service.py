@@ -166,7 +166,9 @@ def compute_factor_to_lake(
         raise ValueError(f"factor is not saved in registry: {name}")
     bars = _load_factor_input(lake, name=name, date=target_date, registry=factor_registry)
     if bars.empty:
-        raise ValueError("no factor input data found; run data update first")
+        raise ValueError(
+            "no factor input data found; run data fetch and build_data_table first"
+        )
 
     factor_frame = compute_factor_frame(bars, name, registry=factor_registry)
     output = factor_frame[factor_frame["trade_date"] == target_date].reset_index(drop=True)
@@ -217,7 +219,7 @@ def _load_factor_input(
     if missing:
         raise ValueError(
             f"factor '{name}' missing fundamentals data columns: {missing}; "
-            "run data update-fundamentals first"
+            "run data fetch for the required Tushare endpoints and build_data_table first"
         )
     return frame
 
@@ -362,7 +364,9 @@ def _factor_validation_frame(
         symbols=symbols,
     )
     if bars.empty:
-        raise ValueError("no daily bars found in data lake; run data update first")
+        raise ValueError(
+            "no daily bars found in data lake; run data fetch and build_data_table first"
+        )
     factor_frame = compute_factor_frame(bars, name, registry=factor_registry)
     validation = factor_frame.merge(
         _forward_returns(bars),

@@ -50,7 +50,9 @@ def run_single_symbol_backtest(
 ) -> BacktestRunSummary:
     bars = load_daily_bars(lake)
     if bars.empty:
-        raise ValueError("no daily bars found in data lake; run data update first")
+        raise ValueError(
+            "no daily bars found in data lake; run data fetch and build_data_table first"
+        )
 
     chosen_symbol = symbol or str(bars["symbol"].iloc[0])
     symbol_bars = bars[bars["symbol"] == chosen_symbol].sort_values("trade_date")

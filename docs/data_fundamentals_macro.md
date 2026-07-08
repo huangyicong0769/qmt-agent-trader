@@ -14,11 +14,14 @@ Supported raw datasets:
 - `tushare/fina_indicator`
 - `tushare/dividend`
 
-Update commands:
+Fetch and build commands:
 
 ```bash
-uv run qmt-agent data update-fundamentals --from 20200101 --to 20260630 --dry-run
-uv run qmt-agent data update-fundamentals --from 20200101 --to 20260630 --ts-code 000001.SZ
+uv run qmt-agent data capabilities --category fundamental
+uv run qmt-agent data plan-fetch --api daily_basic --symbols 000001.SZ --from 20200101 --to 20260630 --fields ts_code,trade_date,pe_ttm,pb,total_mv
+uv run qmt-agent data fetch --api daily_basic --symbols 000001.SZ --from 20200101 --to 20260630 --fields ts_code,trade_date,pe_ttm,pb,total_mv --execute-plan
+uv run qmt-agent data build-table --table financial_reports_wide
+uv run qmt-agent data build-table --table financial_current_wide --snapshot-as-of-date 20260630
 uv run qmt-agent data validate-fundamentals
 ```
 
@@ -57,10 +60,13 @@ Supported macro dataset registry:
 - `cn_ppi`
 - `shibor`
 
-Update commands:
+Fetch and build commands:
 
 ```bash
-uv run qmt-agent data update-macro --from 20200101 --to 20260630 --datasets cn_cpi,cn_ppi,shibor --dry-run
+uv run qmt-agent data capabilities --category macro
+uv run qmt-agent data plan-fetch --api cn_cpi --from 20200101 --to 20260630
+uv run qmt-agent data fetch --api cn_cpi --from 20200101 --to 20260630 --execute-plan
+uv run qmt-agent data build-table --table macro_series
 uv run qmt-agent data validate-macro
 ```
 

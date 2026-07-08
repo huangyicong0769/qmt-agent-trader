@@ -72,7 +72,9 @@ def run_factor_rank_sensitivity(
     """Run a real data-lake factor-rank robustness simulation."""
     bars = load_daily_bars(lake)
     if bars.empty:
-        raise ValueError("no daily bars found in data lake; run data update first")
+        raise ValueError(
+            "no daily bars found in data lake; run data fetch and build_data_table first"
+        )
     grid = SensitivityGrid(
         cost_multipliers=tuple(cost_multipliers or [1.0, 2.0, 3.0]),
         slippage_bps=tuple(slippage_bps or [0.0, 5.0, 10.0]),
