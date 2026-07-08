@@ -139,10 +139,12 @@ def test_plan_tushare_fetch_reports_new_layout_local_coverage(tmp_path) -> None:
     partial = plan_tool.run(request, ToolContext(run_id="r-coverage-partial"))
 
     assert missing["status"] == "planned"
-    assert missing["coverage_status"] == "NO_DATA"
+    assert missing["coverage_status"] == "NOT_VERIFIED"
+    assert missing["local_coverage_status"] == "NO_DATA"
     assert missing["local_coverage"][0]["reason"] == "raw_dataset_missing"
     assert partial["status"] == "planned"
-    assert partial["coverage_status"] == "PARTIAL_COVERAGE"
+    assert partial["coverage_status"] == "NOT_VERIFIED"
+    assert partial["local_coverage_status"] == "PARTIAL_COVERAGE"
     assert partial["local_coverage"][0]["missing_symbols"] == ["000002.SZ"]
     assert partial["local_coverage"][0]["partial_reasons"] == [
         "starts_after_requested_start",
@@ -183,7 +185,8 @@ def test_plan_tushare_fetch_reports_missing_symbols_without_date_range(tmp_path)
         ToolContext(run_id="r-symbol-only-coverage"),
     )
 
-    assert result["coverage_status"] == "PARTIAL_COVERAGE"
+    assert result["coverage_status"] == "NOT_VERIFIED"
+    assert result["local_coverage_status"] == "PARTIAL_COVERAGE"
     assert result["local_coverage"][0]["missing_symbols"] == ["000002.SZ"]
     assert result["local_coverage"][0]["partial_reasons"] == ["missing_symbols"]
 

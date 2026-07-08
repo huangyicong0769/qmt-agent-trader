@@ -262,7 +262,8 @@ def test_tushare_fetcher_rejects_schema_mismatch_without_write(tmp_path) -> None
 
     result = TushareFetcher(client, lake, sleep=lambda _: None).run(plan, execute_plan=True)
 
-    assert result.status == "error"
+    assert result.status == "SCHEMA_MISMATCH"
+    assert result.evidence_status == "INVALID"
     assert result.errors[0]["status"] == "SCHEMA_MISMATCH"
     assert not lake.dataset_path("raw", "tushare/daily_basic").exists()
 

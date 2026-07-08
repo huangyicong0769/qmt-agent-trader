@@ -8,6 +8,13 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.agent.data_tool_outcome import (
+    data_tool_invalid_request,
+    data_tool_no_data,
+    data_tool_not_configured,
+    data_tool_ok,
+    data_tool_weak,
+)
 from qmt_agent_trader.agent.permissions import PermissionLevel
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
@@ -112,14 +119,20 @@ def _list_tushare_capabilities(
         category=_optional_str(input_data.get("category")),
         asset_type=_optional_str(input_data.get("asset_type")),
     )
-    return {"status": "OK", "source": capability.source, "endpoints": capability.endpoints}
+    return data_tool_ok(
+        status="OK",
+        source=capability.source,
+        endpoints=capability.endpoints,
+        coverage_status="NOT_VERIFIED",
+        message="Tushare capabilities listed; no data coverage was verified.",
+    )
 
 
 def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     try:
         items = _parse_fetch_items(input_data)
     except ValueError as exc:
-        return {"status": "INVALID_REQUEST", "message": str(exc)}
+        return data_tool_invalid_request(message=str(exc), reason="invalid_fetch_items")
     lake = _get_lake()
     if lake is not None:
         items = _attach_trade_dates_for_marketwide_fetches(items, lake)
@@ -136,24 +149,24 @@ def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dic
 def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     lake = _get_lake()
     if lake is None:
-        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+        return data_tool_not_configured(status="NOT_AVAILABLE", message="data lake not wired")
     settings = _get_settings()
     execute_plan = bool(input_data.get("execute_plan", False))
     dry_run = bool(input_data.get("dry_run", False))
     if not dry_run and not execute_plan:
-        return {
-            "status": "INVALID_REQUEST",
-            "message": "run_tushare_fetch requires execute_plan=true for live execution",
-        }
+        return data_tool_invalid_request(
+            message="run_tushare_fetch requires execute_plan=true for live execution",
+            reason="execute_plan_required",
+        )
     if not dry_run and settings.tushare_token is None and _client_factory is None:
-        return {
-            "status": "NOT_CONFIGURED",
-            "message": "TUSHARE_TOKEN is required for live Tushare fetch",
-        }
+        return data_tool_not_configured(
+            message="TUSHARE_TOKEN is required for live Tushare fetch",
+            reason="missing_tushare_token",
+        )
     try:
         items = _parse_fetch_items(input_data)
     except ValueError as exc:
-        return {"status": "INVALID_REQUEST", "message": str(exc)}
+        return data_tool_invalid_request(message=str(exc), reason="invalid_fetch_items")
 
     items = _attach_trade_dates_for_marketwide_fetches(items, lake)
     provider = _tushare_provider(lake)
@@ -176,10 +189,32 @@ def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict
 def _build_data_table(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
     lake = _get_lake()
     if lake is None:
-        return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
+        return data_tool_not_configured(status="NOT_AVAILABLE", message="data lake not wired")
     table = str(input_data.get("table", ""))
     snapshot = _optional_str(input_data.get("snapshot_as_of_date"))
-    return DataTableBuilder(lake).build(table, snapshot_as_of_date=snapshot)
+    result = DataTableBuilder(lake).build(table, snapshot_as_of_date=snapshot)
+    result_extra = {
+        key: value for key, value in result.items() if key not in {"status", "message", "reason"}
+    }
+    if result.get("status") == "INVALID_REQUEST":
+        return data_tool_invalid_request(
+            message=str(result.get("message") or "invalid table"),
+            reason="invalid_silver_table",
+            **result_extra,
+        )
+    rows = int(result.get("rows", 0) or 0)
+    if rows <= 0:
+        return data_tool_no_data(
+            status=str(result.get("status", "built")),
+            message=f"{table} built with 0 rows.",
+            reason="zero_rows_built",
+            **result_extra,
+        )
+    return data_tool_weak(
+        status=str(result.get("status", "built")),
+        message=f"{table} built with {rows} rows; query tools must verify research coverage.",
+        **result_extra,
+    )
 
 
 def _attach_plan_summary(payload: dict[str, Any], *, lake: DataLake | None) -> None:
@@ -199,11 +234,11 @@ def _attach_plan_summary(payload: dict[str, Any], *, lake: DataLake | None) -> N
         }
     )
     if lake is None:
-        payload["coverage_status"] = "UNKNOWN"
+        payload["local_coverage_status"] = "UNKNOWN"
         return
     local_coverage = [_local_coverage_for_planned_item(item, lake) for item in items]
     payload["local_coverage"] = local_coverage
-    payload["coverage_status"] = _aggregate_local_coverage(local_coverage)
+    payload["local_coverage_status"] = _aggregate_local_coverage(local_coverage)
 
 
 def _local_coverage_for_planned_item(

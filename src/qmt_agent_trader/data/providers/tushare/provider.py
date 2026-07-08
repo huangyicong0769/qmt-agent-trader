@@ -69,5 +69,11 @@ class TushareProvider:
                 status="NOT_AVAILABLE",
                 source=self.source_name,
                 metadata={"message": "Tushare fetcher is not wired"},
+                execution_status="OK",
+                domain_status="NOT_CONFIGURED",
+                evidence_status="BLOCKED",
+                recommendation_status="BLOCKED",
+                coverage_status="BLOCKED",
+                blockers=["Tushare fetcher is not wired"],
             )
         return self.fetcher.run(plan, execute_plan=execute_plan, dry_run=dry_run)
