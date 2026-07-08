@@ -32,6 +32,7 @@ from qmt_agent_trader.data.bars import (
 from qmt_agent_trader.data.catalog import visible_dataset_names
 from qmt_agent_trader.data.fundamentals import (
     DAILY_BASIC_DATASET,
+    DAILY_BASIC_FIELDS,
     DEFAULT_FUNDAMENTAL_FIELDS,
     FINANCIAL_DATASETS,
     load_fundamentals_asof,
@@ -115,7 +116,21 @@ def _query_universe(input_data: dict[str, Any], _context: ToolContext) -> dict[s
         return {"status": "NOT_AVAILABLE", "message": "data lake not wired"}
 
     as_of = input_data.get("as_of_date", _today_yyyymmdd())
-    universe_type = input_data.get("universe_type", "stock")
+    universe_type = str(input_data.get("universe_type", "stock")).lower()
+    if universe_type == "all":
+        universe_type = "mixed"
+    if universe_type not in {"stock", "etf", "mixed"}:
+        return _with_query_evidence_status(
+            {
+                "status": "INVALID_REQUEST",
+                "symbols": [],
+                "metadata": {
+                    "status": "INVALID_REQUEST",
+                    "reason": "unsupported_universe_type",
+                    "allowed_universe_types": ["stock", "etf", "mixed"],
+                },
+            }
+        )
     filters = input_data.get("filters", {})
     theme = str(filters.get("theme", "")).lower()
     exclude_st = filters.get("exclude_st", True)
@@ -124,6 +139,19 @@ def _query_universe(input_data: dict[str, Any], _context: ToolContext) -> dict[s
 
     try:
         if theme == "cyclical":
+            if universe_type != "stock":
+                return _with_query_evidence_status(
+                    {
+                        "status": "INVALID_REQUEST",
+                        "symbols": [],
+                        "metadata": {
+                            "status": "INVALID_REQUEST",
+                            "reason": "theme_universe_requires_stock",
+                            "theme": theme,
+                            "universe_type": universe_type,
+                        },
+                    }
+                )
             return build_theme_universe(
                 lake,
                 as_of=as_of,
@@ -132,9 +160,20 @@ def _query_universe(input_data: dict[str, Any], _context: ToolContext) -> dict[s
                 exclude_suspended=bool(exclude_suspended),
                 min_listed_days=min_listed_days,
             )
-        bars = _load_recent_bars_for_universe(lake, end=str(as_of))
+        bars = _load_recent_bars_for_universe(lake, end=str(as_of), universe_type=universe_type)
         if bars.empty:
-            return {"status": "NOT_AVAILABLE", "symbols": [], "metadata": {"reason": "no data"}}
+            return _with_query_evidence_status(
+                {
+                    "status": "NO_DATA",
+                    "symbols": [],
+                    "metadata": {
+                        "status": "NO_DATA",
+                        "reason": "no data",
+                        "universe_type": universe_type,
+                        "coverage_status": "NO_DATA",
+                    },
+                }
+            )
 
         recent = bars
         symbols = recent["symbol"].astype(str).tolist()
@@ -145,17 +184,30 @@ def _query_universe(input_data: dict[str, Any], _context: ToolContext) -> dict[s
             susp_mask = recent.set_index("symbol")["suspended"]
             symbols = [s for s in symbols if not susp_mask.get(s, False)]
 
-        return {
+        metadata: dict[str, Any] = {
+            "status": "OK",
+            "as_of_date": str(recent["trade_date"].iloc[0]),
+            "universe_type": universe_type,
+            "count": len(symbols),
+        }
+        if universe_type == "mixed" and "asset_type" in recent.columns:
+            metadata["asset_type_by_symbol"] = {
+                str(row.symbol): str(row.asset_type)
+                for row in recent[["symbol", "asset_type"]].itertuples(index=False)
+            }
+        return _with_query_evidence_status({
             "status": "OK",
             "symbols": symbols[:2000],
-            "metadata": {
-                "as_of_date": str(recent["trade_date"].iloc[0]),
-                "universe_type": universe_type,
-                "count": len(symbols),
-            },
-        }
+            "metadata": metadata,
+        })
     except Exception as exc:
-        return {"status": "NOT_AVAILABLE", "symbols": [], "metadata": {"error": str(exc)}}
+        return _with_query_evidence_status(
+            {
+                "status": "ERROR",
+                "symbols": [],
+                "metadata": {"status": "ERROR", "error": str(exc)},
+            }
+        )
 
 
 query_universe_tool: AgentTool = tool(
@@ -213,10 +265,20 @@ THEME_INDUSTRY_ONTOLOGY = {
 CYCLICAL_INDUSTRIES = set().union(*THEME_INDUSTRY_ONTOLOGY["cyclical"].values())
 
 
-def _load_recent_bars_for_universe(lake: DataLake, *, end: str) -> Any:
+def _load_recent_bars_for_universe(
+    lake: DataLake,
+    *,
+    end: str,
+    universe_type: str = "stock",
+) -> Any:
     frames: list[Any] = []
     end_key = _date_key(end)
-    for dataset in ("tushare/daily", "tushare/fund_daily"):
+    datasets = {
+        "stock": (("tushare/daily", "stock"),),
+        "etf": (("tushare/fund_daily", "etf"),),
+        "mixed": (("tushare/daily", "stock"), ("tushare/fund_daily", "etf")),
+    }[universe_type]
+    for dataset, asset_type in datasets:
         path = lake.dataset_path("raw", dataset)
         if not path.exists():
             continue
@@ -239,10 +301,21 @@ def _load_recent_bars_for_universe(lake: DataLake, *, end: str) -> Any:
             {"end_date": end_key},
         )
         if not frame.empty:
+            frame = frame.copy()
+            frame["asset_type"] = asset_type
             frames.append(frame)
     if not frames:
         return normalize_tushare_daily(pd.DataFrame())
-    recent = normalize_tushare_daily(pd.concat(frames, ignore_index=True))
+    normalized_frames: list[pd.DataFrame] = []
+    for frame in frames:
+        asset_type = str(frame["asset_type"].iloc[0])
+        normalized = normalize_tushare_daily(frame.drop(columns=["asset_type"], errors="ignore"))
+        if not normalized.empty:
+            normalized["asset_type"] = asset_type
+            normalized_frames.append(normalized)
+    if not normalized_frames:
+        return normalize_tushare_daily(pd.DataFrame())
+    recent = pd.concat(normalized_frames, ignore_index=True)
     return _apply_fast_universe_state(lake, recent)
 
 
@@ -255,7 +328,7 @@ def build_theme_universe(
     exclude_suspended: bool = True,
     min_listed_days: int = 60,
 ) -> dict[str, Any]:
-    recent = _load_recent_bars_for_universe(lake, end=as_of)
+    recent = _load_recent_bars_for_universe(lake, end=as_of, universe_type="stock")
     if recent.empty:
         return {"status": "NOT_AVAILABLE", "symbols": [], "metadata": {"reason": "no data"}}
     if theme == "cyclical":
@@ -484,12 +557,25 @@ def _with_query_evidence_status(payload: dict[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     status = str(payload.get("status") or metadata.get("status") or "UNKNOWN")
     enriched = dict(payload)
+    enriched["status"] = status
     enriched["execution_status"] = ExecutionStatus.OK.value
     enriched["raw_status"] = payload.get("status") or metadata.get("status")
     enriched["message"] = payload.get("message") or metadata.get("message")
     enriched["reason"] = payload.get("reason") or metadata.get("reason")
     enriched["next_repair_tool"] = payload.get("next_repair_tool") or metadata.get(
         "next_repair_tool"
+    )
+    enriched["suggested_repair"] = payload.get("suggested_repair") or metadata.get(
+        "suggested_repair"
+    )
+    enriched["repair_action"] = payload.get("repair_action") or metadata.get("repair_action")
+    enriched["verification_action"] = payload.get("verification_action") or metadata.get(
+        "verification_action"
+    )
+    enriched["coverage_status"] = (
+        payload.get("coverage_status")
+        or metadata.get("coverage_status")
+        or _coverage_status_for_query_status(status)
     )
     warnings: list[str] = []
     for key in ("warning", "warnings"):
@@ -543,6 +629,22 @@ def _with_query_evidence_status(payload: dict[str, Any]) -> dict[str, Any]:
         blockers.append(str(reason))
     enriched["blockers"] = blockers
     return enriched
+
+
+def _coverage_status_for_query_status(status: str) -> str:
+    if status in {"OK", "ok"}:
+        return "OK"
+    if status in {"PARTIAL_COVERAGE", "PARTIAL", "PIT_NOT_VALIDATED"}:
+        return "PARTIAL_COVERAGE"
+    if status in {"NO_DATA", "NO_MATCHING_BARS"}:
+        return "NO_DATA"
+    if status == "INVALID_REQUEST":
+        return "INVALID_REQUEST"
+    if status in {"NOT_AVAILABLE", "NOT_CONFIGURED"}:
+        return "BLOCKED"
+    if status == "ERROR":
+        return "INVALID_REQUEST"
+    return "UNKNOWN"
 
 # ── query_bars ───────────────────────────────────────────────────────────────
 
@@ -1032,6 +1134,13 @@ def _query_fundamentals_pit(
 
     datasets_used = _fundamental_datasets_used(lake, include_daily_basic, include_financials)
     if not datasets_used:
+        repair_action = _fundamental_repair_action(
+            fields=fields,
+            symbols=symbols,
+            as_of_date=str(as_of),
+            missing_symbols=symbols,
+            missing_fields={field: symbols for field in fields},
+        )
         return _with_query_evidence_status({
             "rows": [],
             "metadata": {
@@ -1042,7 +1151,15 @@ def _query_fundamentals_pit(
                 "datasets_used": [],
                 "coverage_status": "NO_DATA",
                 "missing_ranges": [{"start_date": str(as_of), "end_date": str(as_of)}],
-                "next_repair_tool": "run_tushare_fetch",
+                "next_repair_tool": repair_action["tool"],
+                "repair_action": repair_action,
+                "verification_action": _fundamental_verification_action(
+                    symbols=symbols,
+                    as_of_date=str(as_of),
+                    fields=fields,
+                    include_daily_basic=include_daily_basic,
+                    include_financials=include_financials,
+                ),
                 "pit_rule": "visible_date <= as_of_date",
             },
         })
@@ -1070,6 +1187,13 @@ def _query_fundamentals_pit(
         })
 
     if frame.empty:
+        repair_action = _fundamental_repair_action(
+            fields=fields,
+            symbols=symbols,
+            as_of_date=str(as_of),
+            missing_symbols=symbols,
+            missing_fields={field: symbols for field in fields},
+        )
         return _with_query_evidence_status({
             "rows": [],
             "metadata": {
@@ -1080,7 +1204,15 @@ def _query_fundamentals_pit(
                 "datasets_used": datasets_used,
                 "coverage_status": "NO_DATA",
                 "missing_ranges": [{"start_date": str(as_of), "end_date": str(as_of)}],
-                "next_repair_tool": "run_tushare_fetch",
+                "next_repair_tool": repair_action["tool"],
+                "repair_action": repair_action,
+                "verification_action": _fundamental_verification_action(
+                    symbols=symbols,
+                    as_of_date=str(as_of),
+                    fields=fields,
+                    include_daily_basic=include_daily_basic,
+                    include_financials=include_financials,
+                ),
                 "pit_rule": "visible_date <= as_of_date",
             },
         })
@@ -1101,6 +1233,23 @@ def _query_fundamentals_pit(
     status = "OK"
     if missing_symbols or missing_fields:
         status = "PARTIAL_COVERAGE"
+    repair_action = None
+    verification_action = None
+    if status == "PARTIAL_COVERAGE":
+        repair_action = _fundamental_repair_action(
+            fields=fields,
+            symbols=symbols,
+            as_of_date=str(as_of),
+            missing_symbols=missing_symbols,
+            missing_fields=missing_fields,
+        )
+        verification_action = _fundamental_verification_action(
+            symbols=symbols,
+            as_of_date=str(as_of),
+            fields=fields,
+            include_daily_basic=include_daily_basic,
+            include_financials=include_financials,
+        )
     return _with_query_evidence_status({
         "rows": records_jsonable(output),
         "metadata": {
@@ -1125,10 +1274,140 @@ def _query_fundamentals_pit(
                 else []
             ),
             "next_repair_tool": (
-                "run_tushare_fetch" if status == "PARTIAL_COVERAGE" else None
+                repair_action["tool"] if repair_action else None
             ),
+            "repair_action": repair_action,
+            "verification_action": verification_action,
         },
     })
+
+
+def _fundamental_repair_action(
+    *,
+    fields: list[str],
+    symbols: list[str],
+    as_of_date: str,
+    missing_symbols: list[str],
+    missing_fields: dict[str, Any],
+) -> dict[str, Any]:
+    fields_to_fetch = sorted({*fields, *[str(field) for field in missing_fields]})
+    endpoint_fields: dict[str, list[str]] = {}
+    unknown_fields: list[str] = []
+    for field in fields_to_fetch:
+        endpoint = _fundamental_endpoint_for_field(field)
+        if endpoint is None:
+            unknown_fields.append(field)
+            continue
+        endpoint_fields.setdefault(endpoint, []).append(field)
+    if unknown_fields and not endpoint_fields:
+        return {
+            "type": "capability_discovery_required",
+            "tool": "list_tushare_capabilities",
+            "reason": "unknown_fundamental_field_source",
+            "fields": unknown_fields,
+        }
+
+    fetch_symbols = missing_symbols or symbols
+    fetch_items: list[dict[str, Any]] = []
+    for endpoint, endpoint_specific_fields in sorted(endpoint_fields.items()):
+        identity = _fundamental_identity_fields(endpoint)
+        fetch_items.append(
+            {
+                "api_name": endpoint,
+                "symbols": fetch_symbols,
+                "fields": [*identity, *endpoint_specific_fields],
+                "start_date": _fundamental_fetch_start(as_of_date, endpoint),
+                "end_date": as_of_date,
+            }
+        )
+    if unknown_fields:
+        return {
+            "type": "capability_discovery_required",
+            "tool": "list_tushare_capabilities",
+            "reason": "unknown_fundamental_field_source",
+            "fields": unknown_fields,
+            "candidate_fetch_items": fetch_items,
+        }
+    return {
+        "type": "fetch_missing_data",
+        "tool": "run_tushare_fetch",
+        "reason": _fundamental_repair_reason(endpoint_fields),
+        "fetch_items": fetch_items,
+        "execute_plan": True,
+    }
+
+
+def _fundamental_verification_action(
+    *,
+    symbols: list[str],
+    as_of_date: str,
+    fields: list[str],
+    include_daily_basic: bool,
+    include_financials: bool,
+) -> dict[str, Any]:
+    return {
+        "tool": "query_fundamentals_pit",
+        "input": {
+            "symbols": symbols,
+            "as_of_date": as_of_date,
+            "fields": fields,
+            "include_daily_basic": include_daily_basic,
+            "include_financials": include_financials,
+        },
+    }
+
+
+def _fundamental_endpoint_for_field(field: str) -> str | None:
+    if field in DAILY_BASIC_FIELDS:
+        return "daily_basic"
+    mapping = {
+        "roe": "fina_indicator",
+        "roe_dt": "fina_indicator",
+        "roa": "fina_indicator",
+        "gross_margin": "fina_indicator",
+        "debt_to_assets": "fina_indicator",
+        "current_ratio": "fina_indicator",
+        "net_profit_yoy": "fina_indicator",
+        "revenue_yoy": "fina_indicator",
+        "n_income_attr_p": "income",
+        "total_revenue": "income",
+        "revenue": "income",
+        "total_profit": "income",
+        "n_income": "income",
+        "n_cashflow_act": "cashflow",
+        "net_cash_flows_oper_act": "cashflow",
+        "c_cash_equ_end_period": "cashflow",
+        "total_assets": "balancesheet",
+        "total_liab": "balancesheet",
+        "total_hldr_eqy_inc_min_int": "balancesheet",
+        "cash_div": "dividend",
+        "stk_div": "dividend",
+    }
+    return mapping.get(field)
+
+
+def _fundamental_identity_fields(endpoint: str) -> list[str]:
+    if endpoint == "daily_basic":
+        return ["ts_code", "trade_date"]
+    if endpoint == "dividend":
+        return ["ts_code", "end_date", "ann_date", "div_proc"]
+    if endpoint == "fina_indicator":
+        return ["ts_code", "ann_date", "end_date"]
+    return ["ts_code", "ann_date", "f_ann_date", "end_date", "report_type"]
+
+
+def _fundamental_fetch_start(as_of_date: str, endpoint: str) -> str:
+    if endpoint == "daily_basic":
+        return as_of_date
+    return f"{as_of_date[:4]}0101"
+
+
+def _fundamental_repair_reason(endpoint_fields: dict[str, list[str]]) -> str:
+    if set(endpoint_fields) == {"daily_basic"}:
+        return "missing_daily_basic_coverage"
+    if endpoint_fields:
+        return "missing_financial_statement_coverage"
+    return "missing_fundamental_coverage"
 
 
 query_fundamentals_pit_tool: AgentTool = tool(
@@ -1190,25 +1469,71 @@ def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -
         fields=fields,
     )
     if metadata.get("status") == "INVALID_REQUEST":
+        known_datasets = sorted(MACRO_DATASETS)
+        repair_action = {
+            "type": "fix_request_argument",
+            "tool": "list_tushare_capabilities",
+            "reason": "unknown_macro_dataset",
+            "invalid_dataset": dataset,
+            "known_datasets": known_datasets,
+            "suggested_dataset": _suggest_macro_dataset(dataset, known_datasets),
+        }
         metadata = {
             **metadata,
-            "known_datasets": sorted(MACRO_DATASETS),
-            "next_repair_tool": "run_tushare_fetch",
+            "coverage_status": "INVALID_REQUEST",
+            "known_datasets": known_datasets,
+            "next_repair_tool": "list_tushare_capabilities",
+            "repair_action": repair_action,
+            "suggested_repair": repair_action,
         }
     if metadata.get("status") == "NO_DATA":
         start = str(input_data.get("start_date") or input_data.get("as_of_date", _today_yyyymmdd()))
         end = str(input_data.get("end_date") or input_data.get("as_of_date", _today_yyyymmdd()))
+        repair_action = {
+            "type": "fetch_missing_data",
+            "tool": "run_tushare_fetch",
+            "reason": "known_macro_dataset_missing_local_data",
+            "fetch_items": [
+                {
+                    "api_name": dataset,
+                    "start_date": start,
+                    "end_date": end,
+                }
+            ],
+            "execute_plan": True,
+        }
         metadata = {
             **metadata,
             "coverage_status": "NO_DATA",
             "missing_ranges": [{"start_date": start, "end_date": end}],
             "next_repair_tool": "run_tushare_fetch",
             "known_datasets": sorted(MACRO_DATASETS),
+            "repair_action": repair_action,
+            "verification_action": _macro_verification_action(
+                dataset=dataset,
+                as_of_date=str(input_data.get("as_of_date", _today_yyyymmdd())),
+                start_date=start,
+                end_date=end,
+                strict_pit=strict_pit,
+            ),
+        }
+    if not frame.empty:
+        actual_start, actual_end = _macro_actual_window(frame)
+        metadata = {
+            **metadata,
+            "actual_start": actual_start,
+            "actual_end": actual_end,
+            "visible_window": {
+                "actual_start": actual_start,
+                "actual_end": actual_end,
+                "pit_safe": metadata.get("pit_safe"),
+            },
         }
     if metadata.get("pit_safe") is False and strict_pit:
         metadata = {
             **metadata,
             "status": "PIT_NOT_VALIDATED",
+            "coverage_status": "PARTIAL_COVERAGE",
             "warning": (
                 "This dataset uses conservative visibility approximation; do not use "
                 "for production backtests unless release timing is validated."
@@ -1234,6 +1559,78 @@ def _query_macro_series_pit(input_data: dict[str, Any], _context: ToolContext) -
     return _with_query_evidence_status(
         {"rows": macro_records_jsonable(output), "metadata": metadata}
     )
+
+
+def _suggest_macro_dataset(dataset: str, known_datasets: list[str]) -> str | None:
+    normalized = dataset.lower().replace("-", "_")
+    if normalized == "cpi" and "cn_cpi" in known_datasets:
+        return "cn_cpi"
+    if normalized == "ppi" and "cn_ppi" in known_datasets:
+        return "cn_ppi"
+    if normalized == "gdp" and "cn_gdp" in known_datasets:
+        return "cn_gdp"
+    for known in known_datasets:
+        if normalized in known or known in normalized:
+            return known
+    return None
+
+
+def _macro_verification_action(
+    *,
+    dataset: str,
+    as_of_date: str,
+    start_date: str,
+    end_date: str,
+    strict_pit: bool,
+) -> dict[str, Any]:
+    return {
+        "tool": "query_macro_series_pit",
+        "input": {
+            "dataset": dataset,
+            "as_of_date": as_of_date,
+            "start_date": start_date,
+            "end_date": end_date,
+            "strict_pit": strict_pit,
+        },
+    }
+
+
+def _macro_actual_window(frame: pd.DataFrame) -> tuple[str | None, str | None]:
+    if frame.empty:
+        return None, None
+    if "month" in frame.columns:
+        column = frame.loc[:, "month"]
+        if isinstance(column, pd.DataFrame):
+            column = column.iloc[:, 0]
+        values = column.astype(str).dropna()
+        if values.empty:
+            return None, None
+        return str(values.min()), str(values.max())
+    if "quarter" in frame.columns:
+        column = frame.loc[:, "quarter"]
+        if isinstance(column, pd.DataFrame):
+            column = column.iloc[:, 0]
+        values = column.astype(str).dropna()
+        if values.empty:
+            return None, None
+        return str(values.min()), str(values.max())
+    if "date" in frame.columns:
+        column = frame.loc[:, "date"]
+        if isinstance(column, pd.DataFrame):
+            column = column.iloc[:, 0]
+        values = pd.to_datetime(column, errors="coerce").dropna()
+        if values.empty:
+            return None, None
+        return str(values.min().date()), str(values.max().date())
+    if "period_date" in frame.columns:
+        values = pd.to_datetime(frame["period_date"], errors="coerce").dropna()
+    elif "visible_date" in frame.columns:
+        values = pd.to_datetime(frame["visible_date"], errors="coerce").dropna()
+    else:
+        return None, None
+    if values.empty:
+        return None, None
+    return str(values.min().date()), str(values.max().date())
 
 
 query_macro_series_pit_tool: AgentTool = tool(

@@ -129,3 +129,101 @@ def test_query_fundamentals_pit_reports_partial_coverage(tmp_path) -> None:
     assert result["metadata"]["status"] == "PARTIAL_COVERAGE"
     assert result["metadata"]["missing_symbols"] == ["000002.SZ"]
     assert result["metadata"]["missing_fields"] == {"roe": ["000001.SZ"]}
+    assert result["repair_action"]["fetch_items"][0]["api_name"] == "daily_basic"
+    assert result["repair_action"]["fetch_items"][1]["api_name"] == "fina_indicator"
+
+
+def test_query_fundamentals_pit_repairs_missing_daily_basic_fields(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "end_date": "20231231", "ann_date": "20240110"}]),
+        "raw",
+        "tushare/fina_indicator",
+    )
+    set_data_lake(lake)
+
+    result = query_fundamentals_pit_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "as_of_date": "20240131",
+            "fields": ["pe_ttm", "pb", "total_mv"],
+        },
+        ToolContext(run_id="fundamentals-daily-basic-repair"),
+    )
+
+    assert result["status"] == "PARTIAL_COVERAGE"
+    assert result["repair_action"]["reason"] == "missing_daily_basic_coverage"
+    assert result["repair_action"]["fetch_items"] == [
+        {
+            "api_name": "daily_basic",
+            "symbols": ["000001.SZ"],
+            "fields": ["ts_code", "trade_date", "pb", "pe_ttm", "total_mv"],
+            "start_date": "20240131",
+            "end_date": "20240131",
+        }
+    ]
+
+
+def test_query_fundamentals_pit_repairs_roe_with_fina_indicator(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.8}]),
+        "raw",
+        "tushare/daily_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_fundamentals_pit_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "as_of_date": "20240131",
+            "fields": ["roe"],
+        },
+        ToolContext(run_id="fundamentals-roe-repair"),
+    )
+
+    assert result["repair_action"]["fetch_items"][0]["api_name"] == "fina_indicator"
+
+
+def test_query_fundamentals_pit_repairs_total_revenue_with_income(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.8}]),
+        "raw",
+        "tushare/daily_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_fundamentals_pit_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "as_of_date": "20240131",
+            "fields": ["total_revenue"],
+        },
+        ToolContext(run_id="fundamentals-income-repair"),
+    )
+
+    assert result["repair_action"]["fetch_items"][0]["api_name"] == "income"
+
+
+def test_query_fundamentals_pit_unknown_field_requires_capability_discovery(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.8}]),
+        "raw",
+        "tushare/daily_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_fundamentals_pit_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "as_of_date": "20240131",
+            "fields": ["mystery_ratio"],
+        },
+        ToolContext(run_id="fundamentals-unknown-repair"),
+    )
+
+    assert result["next_repair_tool"] == "list_tushare_capabilities"
+    assert result["repair_action"]["type"] == "capability_discovery_required"
+    assert result["repair_action"]["tool"] == "list_tushare_capabilities"
