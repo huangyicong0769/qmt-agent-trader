@@ -261,7 +261,14 @@ def test_run_tushare_fetch_live_writes_new_layout_and_metadata(tmp_path) -> None
         ToolContext(run_id="r-fetch-live", dry_run=False),
     )
 
-    assert result["status"] == "updated"
+    assert result["status"] == "PARTIAL_UPDATE"
+    assert result["domain_status"] == "PARTIAL"
+    assert result["evidence_status"] == "INCOMPLETE"
+    assert result["coverage_status"] == "PARTIAL_COVERAGE"
+    assert result["dataset_results"][0]["partial_reasons"] == [
+        "starts_after_requested_start",
+        "ends_before_requested_end",
+    ]
     assert client.calls == [
         (
             "daily_basic",

@@ -204,7 +204,13 @@ def test_tushare_fetcher_writes_new_raw_layout_and_metadata(tmp_path) -> None:
         execute_plan=True,
     )
 
-    assert result.status == "updated"
+    assert result.status == "PARTIAL_UPDATE"
+    assert result.domain_status == "PARTIAL"
+    assert result.evidence_status == "INCOMPLETE"
+    assert result.dataset_results[0]["partial_reasons"] == [
+        "starts_after_requested_start",
+        "ends_before_requested_end",
+    ]
     assert lake.dataset_path("raw", "tushare/daily_basic").exists()
     assert not lake.dataset_path("raw", "tushare_daily_basic").exists()
     assert client.calls[0][0] == "daily_basic"
