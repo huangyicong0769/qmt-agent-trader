@@ -649,6 +649,8 @@ def _fallback_tool_result_summary(result: Any, content: str) -> dict[str, Any]:
             "data_update_needed",
             "next_repair_tool",
             "suggested_repair",
+            "repair_action",
+            "verification_action",
             "research_only",
             "review_required",
             "live_trading_allowed",
@@ -674,6 +676,8 @@ def _fallback_tool_result_summary(result: Any, content: str) -> dict[str, Any]:
                     "missing_ranges",
                     "data_update_needed",
                     "next_repair_tool",
+                    "repair_action",
+                    "verification_action",
                 )
                 if key in metadata
             }
