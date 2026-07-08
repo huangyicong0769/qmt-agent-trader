@@ -49,6 +49,8 @@ class EvidenceLedger:
             "diagnostic_status": result.get("diagnostic_status"),
             "reason": result.get("reason"),
             "message": result.get("message"),
+            "coverage_status": result.get("coverage_status"),
+            "dataset_results": result.get("dataset_results", []),
             "blockers": result.get("blockers", []),
             "warnings": result.get("warnings", []),
             "next_repair_tool": result.get("next_repair_tool"),
@@ -121,6 +123,26 @@ class EvidenceLedger:
                         }
                     )
                     break
+        coverage_overclaim = _coverage_overclaim_excerpt(final_answer_raw)
+        if coverage_overclaim:
+            for item in self.tool_results:
+                incomplete = _incomplete_data_evidence(item)
+                if incomplete:
+                    conflicts.append(
+                        {
+                            "type": "DATA_COVERAGE_OVERCLAIM",
+                            "severity": "HIGH",
+                            "answer_excerpt": coverage_overclaim,
+                            "evidence_ref": item.get("tool_name"),
+                            "coverage_status": item.get("coverage_status"),
+                            "dataset_results": incomplete,
+                            "message": (
+                                "Final answer claims data completion or successful "
+                                "coverage while structured tool evidence is incomplete."
+                            ),
+                        }
+                    )
+                    break
         has_conflict = bool(conflicts)
         return {
             "has_conflict": has_conflict,
@@ -168,6 +190,17 @@ class EvidenceLedger:
                     "message": "Tool evidence is invalid or blocked.",
                 }
             )
+        coverage_status = str(result.get("coverage_status") or "")
+        if coverage_status in {"PARTIAL_COVERAGE", "NO_DATA", "INVALID_REQUEST", "BLOCKED"}:
+            self.conflicts.append(
+                {
+                    "type": "DATA_COVERAGE_NOT_COMPLETE",
+                    "severity": "MEDIUM",
+                    "tool_name": tool_name,
+                    "coverage_status": coverage_status,
+                    "message": "Structured data coverage is not complete.",
+                }
+            )
 
 
 def _recommendation_excerpt(text: str) -> str | None:
@@ -180,6 +213,54 @@ def _recommendation_excerpt(text: str) -> str | None:
         if match:
             return match.group(0).strip()
     return None
+
+
+def _coverage_overclaim_excerpt(text: str) -> str | None:
+    patterns = [
+        r".{0,20}(已补齐|补齐完成|数据完整|覆盖完整|完整覆盖|全部成功|成功更新|更新成功|3/3.*成功).{0,40}",
+        r".{0,20}(complete|fully covered|all successful|successfully updated).{0,40}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+    return None
+
+
+def _incomplete_data_evidence(item: dict[str, Any]) -> list[dict[str, Any]]:
+    coverage_status = str(item.get("coverage_status") or "")
+    incomplete_statuses = {
+        "PARTIAL_COVERAGE",
+        "NO_DATA",
+        "NOT_VERIFIED",
+        "INVALID_REQUEST",
+        "BLOCKED",
+    }
+    dataset_results = item.get("dataset_results")
+    incomplete_results: list[dict[str, Any]] = []
+    if isinstance(dataset_results, list):
+        for result in dataset_results:
+            if not isinstance(result, dict):
+                continue
+            status = str(result.get("status") or "")
+            rows = int(result.get("rows", 0) or 0)
+            result_coverage = str(result.get("coverage_status") or "")
+            if status != "updated" or rows <= 0 or result_coverage in incomplete_statuses:
+                incomplete_results.append(
+                    {
+                        "dataset_id": result.get("dataset_id"),
+                        "api_name": result.get("api_name"),
+                        "status": status,
+                        "rows": rows,
+                        "coverage_status": result_coverage,
+                        "reason": result.get("reason"),
+                    }
+                )
+    if incomplete_results:
+        return incomplete_results
+    if coverage_status in incomplete_statuses:
+        return [{"coverage_status": coverage_status}]
+    return []
 
 
 def _result_ref_fields(result: dict[str, Any]) -> dict[str, Any]:

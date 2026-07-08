@@ -52,3 +52,38 @@ def test_final_answer_conflict_report_preserves_raw_answer() -> None:
         item["type"] == "UNSUPPORTED_RECOMMENDATION"
         for item in report["conflicts"]
     )
+
+
+def test_final_answer_conflict_report_flags_data_coverage_overclaim() -> None:
+    ledger = EvidenceLedger(run_id="run-data-coverage")
+    ledger.record_tool_result(
+        "run_tushare_fetch",
+        {
+            "execution_status": "OK",
+            "domain_status": "PARTIAL",
+            "evidence_status": "INCOMPLETE",
+            "recommendation_status": "UNKNOWN",
+            "coverage_status": "PARTIAL_COVERAGE",
+            "raw_status": "PARTIAL_UPDATE",
+            "dataset_results": [
+                {
+                    "dataset_id": "tushare.fund_daily",
+                    "api_name": "fund_daily",
+                    "status": "NO_DATA",
+                    "rows": 0,
+                    "coverage_status": "NO_DATA",
+                    "reason": "zero_rows_returned",
+                }
+            ],
+        },
+    )
+
+    report = ledger.final_answer_conflict_report("远程数据已经全部成功更新，覆盖完整。")
+
+    assert report["has_conflict"] is True
+    assert report["severity"] == "HIGH"
+    conflict = next(
+        item for item in report["conflicts"] if item["type"] == "DATA_COVERAGE_OVERCLAIM"
+    )
+    assert conflict["evidence_ref"] == "run_tushare_fetch"
+    assert conflict["dataset_results"][0]["dataset_id"] == "tushare.fund_daily"

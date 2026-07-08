@@ -202,17 +202,19 @@ class TushareFetcher:
                 "rows": len(result_frame),
             }
             writes.append(write)
+            coverage_result = _coverage_result_for_frame(item, result_frame)
             dataset_results.append(
                 {
                     **_dataset_result(
                         item,
                         api_name=spec.api_name,
-                        status="updated",
+                        status=coverage_result["status"],
                         rows=len(result_frame),
-                        coverage_status="OK",
-                        reason=None,
+                        coverage_status=coverage_result["coverage_status"],
+                        reason=coverage_result["reason"],
                         write_skipped=False,
                     ),
+                    **coverage_result["metadata"],
                     "path": str(path),
                     "view": spec.raw_view_name,
                 }
@@ -381,6 +383,70 @@ def _dataset_result(
     }
 
 
+def _coverage_result_for_frame(item: dict[str, Any], frame: pd.DataFrame) -> dict[str, Any]:
+    params = dict(item.get("params", {}))
+    requested_symbols = [str(symbol) for symbol in item.get("symbols", [])]
+    requested_start, requested_end = _coverage_bounds_from_params(params)
+    metadata: dict[str, Any] = {
+        "missing_symbols": [],
+        "partial_reasons": [],
+    }
+    partial_reasons: list[str] = []
+
+    if requested_symbols and "ts_code" in frame.columns:
+        present_symbols = set(frame["ts_code"].dropna().astype(str))
+        missing_symbols = [symbol for symbol in requested_symbols if symbol not in present_symbols]
+        metadata["missing_symbols"] = missing_symbols
+        if missing_symbols:
+            partial_reasons.append("missing_symbols")
+
+    date_column = _coverage_date_column(item, frame)
+    metadata["date_column"] = date_column
+    if requested_start and requested_end:
+        if date_column is None:
+            metadata["partial_reasons"] = ["coverage_range_not_derivable", *partial_reasons]
+            return {
+                "status": "updated",
+                "coverage_status": "NOT_VERIFIED",
+                "reason": "coverage_range_not_derivable",
+                "metadata": metadata,
+            }
+        comparable = frame[date_column].dropna().astype(str).str.replace("-", "", regex=False)
+        if comparable.empty:
+            metadata["partial_reasons"] = ["coverage_range_empty", *partial_reasons]
+            return {
+                "status": "PARTIAL_UPDATE",
+                "coverage_status": "PARTIAL_COVERAGE",
+                "reason": "coverage_range_empty",
+                "metadata": metadata,
+            }
+        start_key = requested_start.replace("-", "")
+        end_key = requested_end.replace("-", "")
+        actual_start = str(comparable.min())
+        actual_end = str(comparable.max())
+        metadata["actual_start"] = actual_start
+        metadata["actual_end"] = actual_end
+        if actual_start > start_key:
+            partial_reasons.append("starts_after_requested_start")
+        if actual_end < end_key:
+            partial_reasons.append("ends_before_requested_end")
+
+    metadata["partial_reasons"] = partial_reasons
+    if partial_reasons:
+        return {
+            "status": "PARTIAL_UPDATE",
+            "coverage_status": "PARTIAL_COVERAGE",
+            "reason": ",".join(partial_reasons),
+            "metadata": metadata,
+        }
+    return {
+        "status": "updated",
+        "coverage_status": "OK",
+        "reason": None,
+        "metadata": metadata,
+    }
+
+
 def _aggregate_fetch_outcome(
     dataset_results: list[dict[str, Any]],
     errors: list[dict[str, Any]],
@@ -390,7 +456,9 @@ def _aggregate_fetch_outcome(
         for item in dataset_results
         if item.get("status") == "updated" and int(item.get("rows", 0)) > 0
     ]
+    positive_rows = [item for item in dataset_results if int(item.get("rows", 0)) > 0]
     statuses = {str(item.get("status")) for item in dataset_results}
+    coverage_statuses = {str(item.get("coverage_status")) for item in dataset_results}
     blockers: list[str] = []
     if any(status == "SCHEMA_MISMATCH" for status in statuses):
         blockers.append("schema_mismatch")
@@ -414,10 +482,10 @@ def _aggregate_fetch_outcome(
             "blockers": ["zero_rows_returned"],
             "next_repair_tool": None,
         }
-    if updated and (
+    if positive_rows and (
         errors
         or any(status != "updated" for status in statuses)
-        or len(updated) != len(dataset_results)
+        or len(positive_rows) != len(dataset_results)
     ):
         return {
             "status": "PARTIAL_UPDATE",
@@ -426,6 +494,16 @@ def _aggregate_fetch_outcome(
             "recommendation_status": "UNKNOWN",
             "coverage_status": "PARTIAL_COVERAGE",
             "blockers": blockers,
+            "next_repair_tool": None,
+        }
+    if positive_rows and "NOT_VERIFIED" in coverage_statuses:
+        return {
+            "status": "updated",
+            "domain_status": "WARN",
+            "evidence_status": "WEAK",
+            "recommendation_status": "RESEARCH_ONLY",
+            "coverage_status": "NOT_VERIFIED",
+            "blockers": [],
             "next_repair_tool": None,
         }
     if updated and not errors and len(updated) == len(dataset_results):
@@ -492,6 +570,26 @@ def _verification_action_for_items(items: list[dict[str, Any]]) -> dict[str, Any
                     "as_of_date": end or start,
                 },
             }
+    return None
+
+
+def _coverage_date_column(item: dict[str, Any], frame: pd.DataFrame) -> str | None:
+    candidates = (
+        "trade_date",
+        "date",
+        "cal_date",
+        "month",
+        "quarter",
+        "end_date",
+        "ann_date",
+    )
+    declared = set(item.get("key_columns", [])) | set(item.get("fields", []))
+    for column in candidates:
+        if column in declared and column in frame.columns:
+            return column
+    for column in candidates:
+        if column in frame.columns:
+            return column
     return None
 
 

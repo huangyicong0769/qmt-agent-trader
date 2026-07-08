@@ -133,6 +133,88 @@ def test_fetcher_schema_mismatch_is_invalid_without_raw_write(tmp_path) -> None:
     assert not lake.dataset_path("raw", "tushare/daily_basic").exists()
 
 
+def test_fetcher_positive_rows_with_stale_requested_range_is_partial(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    plan = TushareFetchPlanner().plan(
+        [
+            FetchItem(
+                api_name="daily",
+                symbols=["000001.SZ"],
+                fields=["ts_code", "trade_date", "open", "high", "low", "close"],
+                start_date="20260707",
+                end_date="20260708",
+            )
+        ]
+    )
+
+    result = TushareFetcher(
+        FakeClient(
+            {
+                "daily": pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "000001.SZ",
+                            "trade_date": "20260707",
+                            "open": 1.0,
+                            "high": 1.1,
+                            "low": 0.9,
+                            "close": 1.0,
+                        }
+                    ]
+                )
+            }
+        ),
+        lake,
+    ).run(plan, execute_plan=True)
+
+    assert result.status == "PARTIAL_UPDATE"
+    assert result.domain_status == "PARTIAL"
+    assert result.evidence_status == "INCOMPLETE"
+    assert result.coverage_status == "PARTIAL_COVERAGE"
+    assert result.dataset_results[0]["status"] == "PARTIAL_UPDATE"
+    assert result.dataset_results[0]["actual_end"] == "20260707"
+    assert result.dataset_results[0]["partial_reasons"] == ["ends_before_requested_end"]
+
+
+def test_fetcher_positive_rows_with_missing_requested_symbol_is_partial(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    plan = TushareFetchPlanner().plan(
+        [
+            FetchItem(
+                api_name="daily",
+                symbols=["000001.SZ", "000002.SZ"],
+                fields=["ts_code", "trade_date", "open", "high", "low", "close"],
+                start_date="20260708",
+                end_date="20260708",
+            )
+        ]
+    )
+
+    result = TushareFetcher(
+        FakeClient(
+            {
+                "daily": pd.DataFrame(
+                    [
+                        {
+                            "ts_code": "000001.SZ",
+                            "trade_date": "20260708",
+                            "open": 1.0,
+                            "high": 1.1,
+                            "low": 0.9,
+                            "close": 1.0,
+                        }
+                    ]
+                )
+            }
+        ),
+        lake,
+    ).run(plan, execute_plan=True)
+
+    assert result.status == "PARTIAL_UPDATE"
+    assert result.dataset_results[0]["missing_symbols"] == ["000002.SZ"]
+    assert result.dataset_results[0]["partial_reasons"] == ["missing_symbols"]
+
+
 def test_fetcher_all_positive_rows_is_valid_update(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     plan = TushareFetchPlanner().plan(
