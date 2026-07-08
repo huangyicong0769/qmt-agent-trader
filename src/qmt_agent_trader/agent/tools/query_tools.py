@@ -596,8 +596,17 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
             include_trade_state=include_trade_state,
             order=order,
         )
+        coverage_metadata = (
+            _bars_coverage_metadata_from_lake(
+                lake,
+                symbols=symbols,
+                start=str(start),
+                end=str(end),
+            )
+            if symbols
+            else _bars_coverage_metadata(symbols, bars, end)
+        )
         if bars.empty:
-            coverage_metadata = _bars_coverage_metadata(symbols, bars, end)
             metadata: dict[str, Any] = {
                 "requested_start_date": str(start),
                 "requested_end_date": str(end),
@@ -616,7 +625,7 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
             return _with_query_evidence_status({"rows": [], "metadata": metadata})
         cols = [c for c in fields if c in bars.columns]
         output = bars[cols].head(limit).to_dict(orient="records")
-        coverage_metadata = _bars_coverage_metadata(symbols, bars, end)
+        actual_start, actual_end = _coverage_actual_bounds(coverage_metadata)
         return _with_query_evidence_status({
             "rows": output,
             "metadata": {
@@ -624,9 +633,13 @@ def _query_bars(input_data: dict[str, Any], _context: ToolContext) -> dict[str, 
                 "requested": len(symbols),
                 "requested_start_date": str(start),
                 "requested_end_date": str(end),
-                "actual_start_date": str(bars["trade_date"].min()),
-                "actual_end_date": str(bars["trade_date"].max()),
-                "data_freshness": _freshness(str(bars["trade_date"].max()), str(end)),
+                "actual_start_date": actual_start or str(bars["trade_date"].min()),
+                "actual_end_date": actual_end or str(bars["trade_date"].max()),
+                "data_freshness": (
+                    "covers_requested_end"
+                    if coverage_metadata.get("status") == "OK"
+                    else "stale_vs_requested_end"
+                ),
                 "returned": len(output),
                 "total_rows": len(bars),
                 "limit": limit,
@@ -866,8 +879,8 @@ def _bars_coverage_metadata(symbols: list[str], bars: Any, requested_end: str) -
             covered_symbols.append(symbol)
         coverage_by_symbol[symbol] = {
             "returned": returned,
-            "actual_start_date": str(actual_start),
-            "actual_end_date": str(actual_end),
+            "actual_start_date": _parse_date(str(actual_start)).isoformat(),
+            "actual_end_date": _parse_date(str(actual_end)).isoformat(),
             "data_freshness": data_freshness,
         }
 
@@ -877,13 +890,61 @@ def _bars_coverage_metadata(symbols: list[str], bars: Any, requested_end: str) -
         status = "PARTIAL_COVERAGE"
     else:
         status = "OK"
-    return {
+    payload: dict[str, Any] = {
         "status": status,
         "coverage_by_symbol": coverage_by_symbol,
         "missing_symbols": missing_symbols,
         "stale_symbols": stale_symbols,
         "covered_symbols": covered_symbols,
     }
+    if status != "OK":
+        payload["next_repair_tool"] = "run_tushare_fetch"
+    return payload
+
+
+def _bars_coverage_metadata_from_lake(
+    lake: DataLake,
+    *,
+    symbols: list[str],
+    start: str,
+    end: str,
+) -> dict[str, Any]:
+    if not symbols:
+        return _bars_coverage_metadata(symbols, pd.DataFrame(), end)
+    frames: list[pd.DataFrame] = []
+    for dataset in ("tushare/daily", "tushare/fund_daily"):
+        frame = lake.read_parquet_filtered(
+            "raw",
+            dataset,
+            columns=["ts_code", "trade_date"],
+            start=start,
+            end=end,
+            symbols=symbols,
+        )
+        if not frame.empty:
+            frames.append(frame.rename(columns={"ts_code": "symbol"}))
+    bars = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return _bars_coverage_metadata(symbols, bars, end)
+
+
+def _coverage_actual_bounds(metadata: dict[str, Any]) -> tuple[str | None, str | None]:
+    coverage = metadata.get("coverage_by_symbol")
+    if not isinstance(coverage, dict):
+        return None, None
+    starts: list[str] = []
+    ends: list[str] = []
+    for item in coverage.values():
+        if not isinstance(item, dict):
+            continue
+        start = item.get("actual_start_date")
+        end = item.get("actual_end_date")
+        if start:
+            starts.append(str(start))
+        if end:
+            ends.append(str(end))
+    if not starts or not ends:
+        return None, None
+    return _parse_date(min(starts)).isoformat(), _parse_date(max(ends)).isoformat()
 
 
 def _today_yyyymmdd() -> str:

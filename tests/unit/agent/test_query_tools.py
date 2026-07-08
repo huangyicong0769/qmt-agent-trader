@@ -12,7 +12,7 @@ from qmt_agent_trader.agent.tools.query_tools import (
 from qmt_agent_trader.data.storage import DataLake
 
 
-def test_list_data_catalog_hides_legacy_tushare_batches(tmp_path) -> None:
+def test_list_data_catalog_exposes_unmigrated_legacy_tushare_batches(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     frame = pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240102"}])
     lake.write_parquet(frame, "raw", "tushare/daily")
@@ -29,9 +29,9 @@ def test_list_data_catalog_hides_legacy_tushare_batches(tmp_path) -> None:
     assert "tushare/daily" in result["layers"]["raw"]
     assert "tushare_daily_adjusted" in result["layers"]["raw"]
     assert "factor_momentum_20d_20240102" in result["layers"]["gold"]
-    assert "tushare_daily_20240101_20240103" not in result["layers"]["raw"]
-    assert "tushare_suspend_20240101_20240103" not in result["layers"]["raw"]
-    assert "tushare_stk_limit_20240101_20240103" not in result["layers"]["raw"]
+    assert "tushare_daily_20240101_20240103" in result["layers"]["raw"]
+    assert "tushare_suspend_20240101_20240103" in result["layers"]["raw"]
+    assert "tushare_stk_limit_20240101_20240103" in result["layers"]["raw"]
 
 
 def test_query_bars_filters_symbol_alias_and_includes_symbol(tmp_path) -> None:
@@ -208,6 +208,7 @@ def test_query_bars_reports_partial_coverage_for_multi_symbol_request(tmp_path) 
     assert metadata["covered_symbols"] == ["000001.SZ", "000002.SZ"]
     assert metadata["missing_symbols"] == ["000003.SZ"]
     assert metadata["stale_symbols"] == []
+    assert metadata["next_repair_tool"] == "run_tushare_fetch"
     assert metadata["coverage_by_symbol"]["000001.SZ"]["returned"] == 1
     assert metadata["coverage_by_symbol"]["000003.SZ"]["returned"] == 0
 
@@ -248,6 +249,7 @@ def test_query_bars_reports_no_matching_bars_for_requested_symbols(tmp_path) -> 
     assert metadata["missing_symbols"] == ["000003.SZ", "000004.SZ"]
     assert metadata["covered_symbols"] == []
     assert metadata["stale_symbols"] == []
+    assert metadata["next_repair_tool"] == "run_tushare_fetch"
 
 
 def test_query_bars_reports_stale_symbols_when_end_is_not_covered(tmp_path) -> None:
@@ -294,9 +296,52 @@ def test_query_bars_reports_stale_symbols_when_end_is_not_covered(tmp_path) -> N
     assert metadata["covered_symbols"] == ["000002.SZ"]
     assert metadata["stale_symbols"] == ["000001.SZ"]
     assert metadata["missing_symbols"] == []
+    assert metadata["next_repair_tool"] == "run_tushare_fetch"
     assert metadata["coverage_by_symbol"]["000001.SZ"]["data_freshness"] == (
         "stale_vs_requested_end"
     )
+
+
+def test_query_bars_coverage_uses_full_raw_range_not_return_limit(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": f"2026062{day}",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "vol": 200,
+                }
+                for day in range(1, 6)
+            ]
+        ),
+        "raw",
+        "tushare/daily",
+    )
+    set_data_lake(lake)
+
+    result = query_bars_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "start_date": "20260621",
+            "end_date": "20260625",
+            "limit": 2,
+        },
+        ToolContext(run_id="bars-limit-coverage"),
+    )
+
+    assert len(result["rows"]) == 2
+    metadata = result["metadata"]
+    assert metadata["status"] == "OK"
+    assert metadata["actual_end_date"] == "2026-06-25"
+    assert metadata["data_freshness"] == "covers_requested_end"
+    assert metadata["coverage_by_symbol"]["000001.SZ"]["actual_end_date"] == "2026-06-25"
+    assert metadata["covered_symbols"] == ["000001.SZ"]
+    assert "next_repair_tool" not in metadata
 
 
 def test_query_bars_pushes_limit_and_can_skip_trade_state(tmp_path, monkeypatch) -> None:
