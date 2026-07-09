@@ -264,8 +264,11 @@ class UniverseResolver:
         if list_status and list_status not in {"L", "上市", "None", "nan"}:
             return "not_listed"
         list_date_raw = row.get("list_date")
-        if list_date_raw not in {None, "", "nan"}:
-            listed_days = (_parse_date(as_of_date) - _parse_date(str(list_date_raw))).days
+        if not _is_missing_scalar(list_date_raw):
+            try:
+                listed_days = (_parse_date(as_of_date) - _parse_date(str(list_date_raw))).days
+            except ValueError:
+                return "invalid_list_date"
             if listed_days < 0:
                 return "not_yet_listed"
             if listed_days < filters.min_listed_days:
@@ -606,6 +609,18 @@ def _rule_mask(series: pd.Series, rule: UniverseRule) -> pd.Series:
     if operator == "ends_with":
         return text.str.endswith(needle, na=False)
     return pd.Series(False, index=series.index)
+
+
+def _is_missing_scalar(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().lower()
+    return text in {"", "nan", "nat", "none", "<na>"}
 
 
 def _apply_limit(symbols: list[str], *, spec: UniverseSpec, limit: int) -> list[str]:

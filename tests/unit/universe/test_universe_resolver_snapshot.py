@@ -61,6 +61,92 @@ def test_resolver_builds_snapshot_stock_universe_with_exclusions(tmp_path: Path)
     assert excluded["000003.SZ"] == "st"
 
 
+def test_resolver_tolerates_missing_list_date(tmp_path: Path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([_bar("000001.SZ", "20240103")]),
+        "raw",
+        "tushare/daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "平安银行",
+                    "industry": "银行",
+                    "list_status": "L",
+                    "list_date": float("nan"),
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
+    )
+    spec = UniverseSpec(
+        universe_id="u_nan_list_date",
+        name="NaN list date",
+        source="agent_generated",
+        asset_types=["stock"],
+        selection=UniverseSelection(mode="all"),
+        filters=UniverseFilters(min_listed_days=30),
+        mode="snapshot",
+        created_at="2026-07-09T00:00:00+08:00",
+    )
+
+    result = UniverseResolver(lake).build(spec, as_of_date="20240103")
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["000001.SZ"]
+    assert "Invalid isoformat string" not in str(result)
+
+
+def test_resolver_reports_malformed_list_date_without_crashing(tmp_path: Path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([_bar("000001.SZ", "20240103")]),
+        "raw",
+        "tushare/daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "平安银行",
+                    "industry": "银行",
+                    "list_status": "L",
+                    "list_date": "not-a-date",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
+    )
+    spec = UniverseSpec(
+        universe_id="u_bad_list_date",
+        name="Bad list date",
+        source="agent_generated",
+        asset_types=["stock"],
+        selection=UniverseSelection(mode="all"),
+        filters=UniverseFilters(min_listed_days=30),
+        mode="snapshot",
+        created_at="2026-07-09T00:00:00+08:00",
+    )
+
+    result = UniverseResolver(lake).build(
+        spec,
+        as_of_date="20240103",
+        include_exclusions=True,
+    )
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == []
+    assert result["metadata"]["excluded_symbols"] == [
+        {"symbol": "000001.SZ", "reason": "invalid_list_date"}
+    ]
+
+
 def _bar(symbol: str, trade_date: str, *, suspended: bool = False) -> dict[str, object]:
     return {
         "ts_code": symbol,
