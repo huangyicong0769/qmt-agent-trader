@@ -15,12 +15,31 @@ from qmt_agent_trader.backtest.research_runner import (
 )
 from qmt_agent_trader.backtest.sensitivity import SensitivityScenario
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
-from qmt_agent_trader.data.bars import load_daily_bars
+from qmt_agent_trader.data.field_sources import FieldSourceIndex, fetch_columns_for_source
+from qmt_agent_trader.data.frequency import Frequency
+from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 from qmt_agent_trader.strategy.models import FactorLeg, StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
+
+BACKTEST_BASE_FIELDS = [
+    "symbol",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "turnover",
+    "suspended",
+    "limit_up",
+    "limit_down",
+    "st",
+]
 
 
 class StrategyBacktestConfig(BaseModel):
@@ -58,9 +77,21 @@ class StrategyBacktestResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     adapter_limitations: list[str] = Field(default_factory=list)
     requested_factor_ids: list[str] = Field(default_factory=list)
+    factor_id: str | None = None
     composite_method: str | None = None
     factor_weights: dict[str, float] = Field(default_factory=dict)
     factor_directions: dict[str, str] = Field(default_factory=dict)
+    reason: str | None = None
+    data_requirements: dict[str, object] = Field(default_factory=dict)
+    input_panel_metadata: dict[str, object] = Field(default_factory=dict)
+    missing_columns: list[str] = Field(default_factory=list)
+    available_columns: list[str] = Field(default_factory=list)
+    coverage_by_field: dict[str, object] = Field(default_factory=dict)
+    field_sources: dict[str, object] = Field(default_factory=dict)
+    unresolved_fields: list[object] = Field(default_factory=list)
+    missing_fields: dict[str, object] = Field(default_factory=dict)
+    next_repair_tool: str | None = None
+    suggested_repair: dict[str, object] = Field(default_factory=dict)
 
 
 def run_strategy_backtest(
@@ -96,22 +127,46 @@ def run_strategy_backtest(
         )
 
     load_symbols = config.symbols or _symbols_from_date_map(config.symbols_by_date)
-    bars = load_daily_bars(
+    factor_input_fields = _required_fields_for_backtest_factors(
+        factor_registry=factor_registry,
+        requested_factor_ids=requested_factor_ids,
+    )
+    panel, panel_metadata = build_target_frequency_panel(
         lake,
-        start=config.start_date,
-        end=config.end_date,
+        target_frequency=Frequency.DAILY,
+        target_start=config.start_date,
+        target_end=config.end_date,
+        required_fields=factor_input_fields,
         symbols=load_symbols or None,
     )
-    if bars.empty:
+    blocked = _blocked_backtest_from_panel_metadata(
+        run_id=run_id,
+        config=config,
+        spec=spec,
+        requested_factor_ids=requested_factor_ids,
+        factor_registry=factor_registry,
+        panel=panel,
+        panel_metadata=panel_metadata,
+    )
+    if blocked is not None:
+        return blocked
+    warnings.extend(
+        _partial_coverage_warnings(
+            panel_metadata=panel_metadata,
+            factor_registry=factor_registry,
+            requested_factor_ids=requested_factor_ids,
+        )
+    )
+    if panel.empty:
         return _error(
             run_id,
             config,
             spec,
             "DATA_NOT_READY",
-            "no bars available for requested range",
+            "no factor input panel rows available for requested range",
         )
-    actual_start = bars["trade_date"].min()
-    actual_end = bars["trade_date"].max()
+    actual_start = panel["trade_date"].min()
+    actual_end = panel["trade_date"].max()
     data_window = {
         "requested_start": config.start_date,
         "requested_end": config.end_date,
@@ -123,18 +178,6 @@ def run_strategy_backtest(
             else "covers_requested_end"
         ),
     }
-    runner = FactorRankResearchRunner(
-        bars,
-        FactorRankResearchConfig(
-            factor_name=used_factor_name,
-            factor_registry_root=lake.root.parent / "factors",
-            factor_registry=factor_registry,
-            top_n=config.top_n,
-            max_single_position_pct=config.max_single_position_pct,
-            initial_cash=config.initial_cash,
-            symbols_by_date=config.symbols_by_date,
-        ),
-    )
     scenario = SensitivityScenario(
         cost_multiplier=1.0,
         slippage_bps=config.slippage_bps,
@@ -143,6 +186,20 @@ def run_strategy_backtest(
         max_single_position_pct=config.max_single_position_pct,
     )
     try:
+        # TODO: preload factor lookback window before config.start_date,
+        # then trim signals to requested window.
+        runner = FactorRankResearchRunner(
+            panel,
+            FactorRankResearchConfig(
+                factor_name=used_factor_name,
+                factor_registry_root=lake.root.parent / "factors",
+                factor_registry=factor_registry,
+                top_n=config.top_n,
+                max_single_position_pct=config.max_single_position_pct,
+                initial_cash=config.initial_cash,
+                symbols_by_date=config.symbols_by_date,
+            ),
+        )
         result = runner.run(scenario)
     except Exception as exc:
         return _error(run_id, config, spec, "BACKTEST_FAILED", str(exc))
@@ -185,6 +242,7 @@ def run_strategy_backtest(
         "adapter_limitations": adapter_limitations,
         "config": config.model_dump(mode="json"),
         "data_window": data_window,
+        "input_panel_metadata": panel_metadata,
         "metrics": metrics,
         "leakage_report": leakage_report,
         "diagnostics": diagnostics,
@@ -212,6 +270,11 @@ def run_strategy_backtest(
         factor_weights=factor_weights,
         factor_directions=factor_directions,
         data_window=data_window,
+        input_panel_metadata=panel_metadata,
+        coverage_by_field=dict(panel_metadata.get("coverage_by_field") or {}),
+        field_sources=dict(panel_metadata.get("field_sources") or {}),
+        unresolved_fields=list(panel_metadata.get("unresolved_fields") or []),
+        missing_fields=dict(panel_metadata.get("missing_fields") or {}),
         warnings=warnings,
         adapter_limitations=adapter_limitations,
     )
@@ -304,6 +367,261 @@ def _execution_factor_registry(
         base_registry,
         "factor_rank_baseline_adapter",
     )
+
+
+def _required_fields_for_backtest_factors(
+    *,
+    factor_registry: FactorRegistry | None,
+    requested_factor_ids: list[str],
+) -> list[str]:
+    fields = list(BACKTEST_BASE_FIELDS)
+    if factor_registry is None:
+        return fields
+    for factor_id in requested_factor_ids:
+        saved = factor_registry.get_factor(factor_id)
+        if saved is None:
+            continue
+        for column in saved.required_columns:
+            if column not in fields:
+                fields.append(column)
+    return fields
+
+
+def _blocked_backtest_from_panel_metadata(
+    *,
+    run_id: str,
+    config: StrategyBacktestConfig,
+    spec: StrategySpec | None,
+    requested_factor_ids: list[str],
+    factor_registry: FactorRegistry | None,
+    panel: pd.DataFrame,
+    panel_metadata: dict[str, Any],
+) -> StrategyBacktestResult | None:
+    missing_columns = _missing_factor_input_columns(
+        panel=panel,
+        factor_registry=factor_registry,
+        requested_factor_ids=requested_factor_ids,
+    )
+    panel_status = str(panel_metadata.get("status") or "")
+    unresolved = _unresolved_fields_for_columns(panel_metadata, missing_columns)
+    missing_fields = _missing_fields_for_columns(panel_metadata, missing_columns)
+    no_data = panel.empty or panel_status == "NO_DATA"
+    should_block = bool(no_data or missing_columns or unresolved or missing_fields)
+    if not should_block:
+        return None
+
+    reason = (
+        "INPUT_PANEL_NO_DATA"
+        if no_data
+        else "INPUT_PANEL_PARTIAL_COVERAGE"
+        if panel_status == "PARTIAL_COVERAGE"
+        else "MISSING_FACTOR_INPUTS"
+    )
+    status = "DATA_NOT_READY" if no_data else "BLOCKED"
+    suggested_repair = _suggest_repair_for_factor_input_metadata(
+        panel_metadata,
+        missing_columns=missing_columns,
+        start_date=config.start_date,
+        end_date=config.end_date,
+        symbols=config.symbols or _symbols_from_date_map(config.symbols_by_date),
+        requested_factor_ids=requested_factor_ids,
+        strategy_id=config.strategy_id,
+        factor_name=config.factor_name,
+    )
+    message = (
+        "factor input panel has no rows for requested range"
+        if no_data
+        else f"factor input panel is missing required columns: {missing_columns}"
+    )
+    return StrategyBacktestResult(
+        run_id=run_id,
+        strategy_id=config.strategy_id,
+        strategy_version=spec.version if spec else "0.1.0",
+        status=status,
+        reason=reason,
+        message=message,
+        requested_factor_ids=requested_factor_ids,
+        factor_id=requested_factor_ids[0] if requested_factor_ids else config.factor_name,
+        factor_ids=requested_factor_ids,
+        execution_backend=(
+            "factor_rank_composite_adapter"
+            if len(requested_factor_ids) > 1
+            else "factor_rank_baseline_adapter"
+        ),
+        research_only=True,
+        live_trading_allowed=False,
+        data_window={
+            "requested_start": config.start_date,
+            "requested_end": config.end_date,
+            "symbols": config.symbols,
+        },
+        data_requirements={
+            "required_fields": list(panel_metadata.get("required_fields") or []),
+            "requested_factor_ids": requested_factor_ids,
+        },
+        input_panel_metadata=panel_metadata,
+        missing_columns=missing_columns,
+        available_columns=sorted(str(column) for column in panel.columns),
+        coverage_by_field=dict(panel_metadata.get("coverage_by_field") or {}),
+        field_sources=dict(panel_metadata.get("field_sources") or {}),
+        unresolved_fields=list(panel_metadata.get("unresolved_fields") or []),
+        missing_fields=dict(panel_metadata.get("missing_fields") or {}),
+        next_repair_tool="run_tushare_fetch",
+        suggested_repair=suggested_repair,
+        warnings=list(panel_metadata.get("warnings") or []),
+        diagnostics={
+            "status": "BLOCKED",
+            "checks": [
+                {
+                    "name": "factor_input_panel",
+                    "status": "BLOCKED",
+                    "observed": missing_columns,
+                    "threshold": "all requested factor required columns present with coverage",
+                    "message": message,
+                    "evidence_source": "input_panel_metadata",
+                }
+            ],
+        },
+    )
+
+
+def _missing_factor_input_columns(
+    *,
+    panel: pd.DataFrame,
+    factor_registry: FactorRegistry | None,
+    requested_factor_ids: list[str],
+) -> list[str]:
+    if factor_registry is None:
+        return []
+    missing: list[str] = []
+    for factor_id in requested_factor_ids:
+        saved = factor_registry.get_factor(factor_id)
+        if saved is None:
+            continue
+        for column in saved.required_columns:
+            if column in {"symbol", "trade_date"}:
+                continue
+            if column not in panel.columns:
+                if column not in missing:
+                    missing.append(column)
+                continue
+            if panel[column].isna().all() and column not in missing:
+                missing.append(column)
+    return missing
+
+
+def _partial_coverage_warnings(
+    *,
+    panel_metadata: dict[str, Any],
+    factor_registry: FactorRegistry | None,
+    requested_factor_ids: list[str],
+) -> list[str]:
+    if factor_registry is None:
+        return []
+    warnings: list[str] = []
+    coverage = panel_metadata.get("coverage_by_field")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    for field in _required_fields_for_backtest_factors(
+        factor_registry=factor_registry,
+        requested_factor_ids=requested_factor_ids,
+    ):
+        if field in {"symbol", "trade_date"}:
+            continue
+        item = coverage.get(field)
+        if not isinstance(item, dict):
+            continue
+        value = float(item.get("coverage") or 0.0)
+        if 0.0 < value < 1.0:
+            warnings.append(f"input_panel_partial_coverage:{field}:{value:.4f}")
+    return warnings
+
+
+def _unresolved_fields_for_columns(
+    panel_metadata: dict[str, Any],
+    columns: list[str],
+) -> list[dict[str, Any]]:
+    wanted = set(columns)
+    return [
+        item
+        for item in panel_metadata.get("unresolved_fields") or []
+        if isinstance(item, dict) and str(item.get("field")) in wanted
+    ]
+
+
+def _missing_fields_for_columns(
+    panel_metadata: dict[str, Any],
+    columns: list[str],
+) -> dict[str, Any]:
+    wanted = set(columns)
+    missing = panel_metadata.get("missing_fields")
+    if not isinstance(missing, dict):
+        return {}
+    return {field: value for field, value in missing.items() if field in wanted}
+
+
+def _suggest_repair_for_factor_input_metadata(
+    metadata: dict[str, Any],
+    *,
+    missing_columns: list[str],
+    start_date: str,
+    end_date: str,
+    symbols: list[str],
+    requested_factor_ids: list[str],
+    strategy_id: str,
+    factor_name: str | None,
+) -> dict[str, Any]:
+    source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
+    fields_by_api: dict[str, list[str]] = {}
+    sources_by_api: dict[str, Any] = {}
+    for field in missing_columns:
+        source = source_index.best_source_for_field(field, target_frequency=Frequency.DAILY)
+        if source is None:
+            field_sources = metadata.get("field_sources")
+            field_source = field_sources.get(field) if isinstance(field_sources, dict) else None
+            if isinstance(field_source, dict):
+                api_name = str(field_source.get("api_name") or "")
+                if api_name:
+                    fields_by_api.setdefault(api_name, []).append(field)
+            continue
+        fields_by_api.setdefault(source.api_name, []).append(field)
+        sources_by_api[source.api_name] = source
+
+    items: list[dict[str, Any]] = []
+    for api_name, fields in fields_by_api.items():
+        source = sources_by_api.get(api_name)
+        raw_fields = (
+            fetch_columns_for_source(source, fields)
+            if source is not None
+            else list(dict.fromkeys(fields))
+        )
+        item: dict[str, Any] = {
+            "api_name": api_name,
+            "symbols": symbols,
+            "fields": raw_fields,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+        if source is not None:
+            item["raw_dataset_name"] = source.raw_dataset_name
+        items.append(item)
+
+    return {
+        "tool": "run_tushare_fetch",
+        "execute_plan": True,
+        "items": items,
+        "missing_columns": missing_columns,
+        "verification_action": {
+            "tool": "run_backtest",
+            "args": {
+                "strategy_id": strategy_id,
+                "factor_name": factor_name,
+                "requested_factor_ids": requested_factor_ids,
+                "start_date": start_date,
+                "end_date": end_date,
+                "symbols": symbols,
+            },
+        },
+    }
 
 
 def _diagnostic_evidence(
