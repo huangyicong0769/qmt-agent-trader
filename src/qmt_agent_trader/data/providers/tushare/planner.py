@@ -56,6 +56,9 @@ class TushareFetchPlanner:
 
         if errors and not planned_items:
             first = errors[0]
+            estimated_request_count = int(
+                first.get("estimated_request_count") or estimated_request_count
+            )
             return FetchPlan(
                 status=str(first.get("status", "INVALID_REQUEST")),
                 source="tushare",
@@ -148,12 +151,37 @@ class TushareFetchPlanner:
                 "api_name": spec.api_name,
                 "reason": "strategy_not_implemented",
             }
+        if strategy == "symbols_required_for_marketwide_coverage":
+            return {
+                "status": "BLOCKED",
+                "api_name": spec.api_name,
+                "reason": "SYMBOLS_REQUIRED_FOR_MARKETWIDE_COVERAGE",
+                "message": (
+                    f"{spec.api_name} does not support marketwide-by-date fetch. "
+                    "Provide symbols or derive them from a valid universe first."
+                ),
+                "endpoint_capability": _endpoint_capability(spec),
+                "next_repair_action": "resolve_universe_symbols_then_replan_symbol_fanout",
+            }
         if strategy == "blocked_too_large":
+            budget = self.config.manual_request_budget
             return {
                 "status": "BLOCKED",
                 "api_name": spec.api_name,
                 "reason": "REQUEST_BUDGET_EXCEEDED",
-                "message": "symbol fanout exceeds planner threshold",
+                "message": f"estimated request count {len(item.symbols)} exceeds {budget}",
+                "estimated_request_count": len(item.symbols),
+                "budget": budget,
+                "symbols_count": len(item.symbols),
+                "date_range": {
+                    "start_date": item.start_date,
+                    "end_date": item.end_date,
+                    "trade_date": item.trade_date,
+                },
+                "endpoint_capability": _endpoint_capability(spec),
+                "next_repair_action": (
+                    "narrow_universe_increase_manual_budget_or_fetch_approved_batches"
+                ),
             }
         if (
             strategy == "marketwide_by_trade_date"
@@ -224,6 +252,10 @@ def _strategy_for(
     if spec.api_name in {"stock_basic", "fund_basic", "index_basic"} and not item.symbols:
         return "full_refresh"
     if item.symbols and spec.supports_symbol_range:
+        if not spec.supports_marketwide_by_date:
+            if len(item.symbols) <= config.manual_request_budget:
+                return "fanout_by_symbol_range"
+            return "blocked_too_large"
         if len(item.symbols) <= config.symbol_fanout_threshold:
             return "fanout_by_symbol_range"
         if spec.supports_marketwide_by_date:
@@ -233,6 +265,8 @@ def _strategy_for(
         return "marketwide_by_trade_date"
     if spec.supports_marketwide_by_date and item.start_date and item.end_date:
         return "marketwide_by_trade_date"
+    if not item.symbols and spec.supports_symbol_range and not spec.supports_marketwide_by_date:
+        return "symbols_required_for_marketwide_coverage"
     if not item.symbols:
         return "full_refresh"
     if spec.symbol_param:
@@ -301,6 +335,15 @@ def _expand_pagination(
         params.setdefault(offset_param, 0)
         expanded.append({**batch, "params": params, "pagination": pagination})
     return expanded
+
+
+def _endpoint_capability(spec: EndpointSpec) -> dict[str, Any]:
+    rows_per_request = spec.call_limit.get("rows_per_request")
+    return {
+        "supports_symbol_range": spec.supports_symbol_range,
+        "supports_marketwide_by_date": spec.supports_marketwide_by_date,
+        "rows_per_request": int(rows_per_request) if rows_per_request is not None else None,
+    }
 
 
 def _date_chunks(start: str, end: str, max_days: int) -> list[tuple[str, str]]:

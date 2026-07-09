@@ -173,6 +173,89 @@ def test_tushare_planner_uses_explicit_trade_dates_for_large_marketwide_fetch() 
     ]
 
 
+def test_fina_indicator_without_symbols_blocks_not_full_refresh() -> None:
+    planner = TushareFetchPlanner()
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="fina_indicator",
+                fields=["ts_code", "end_date", "roe"],
+                start_date="20240101",
+                end_date="20241231",
+            )
+        ]
+    )
+
+    assert plan.status == "BLOCKED"
+    assert plan.reason == "SYMBOLS_REQUIRED_FOR_MARKETWIDE_COVERAGE"
+    assert plan.errors[0]["endpoint_capability"] == {
+        "supports_symbol_range": True,
+        "supports_marketwide_by_date": False,
+        "rows_per_request": 100,
+    }
+
+
+def test_fina_indicator_with_small_symbol_list_fans_out_by_symbol() -> None:
+    planner = TushareFetchPlanner()
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="fina_indicator",
+                symbols=["000001.SZ", "600519.SH"],
+                fields=["ts_code", "end_date", "roe"],
+                start_date="20240101",
+                end_date="20241231",
+            )
+        ]
+    )
+
+    assert plan.status == "planned"
+    assert plan.items[0]["strategy"] == "fanout_by_symbol_range"
+    assert plan.estimated_request_count == 2
+
+
+def test_fina_indicator_with_large_symbol_list_blocks_on_budget() -> None:
+    planner = TushareFetchPlanner()
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="fina_indicator",
+                symbols=[f"{index:06d}.SZ" for index in range(1, 502)],
+                fields=["ts_code", "end_date", "roe"],
+                start_date="20240101",
+                end_date="20241231",
+            )
+        ]
+    )
+
+    assert plan.status == "BLOCKED"
+    assert plan.reason == "REQUEST_BUDGET_EXCEEDED"
+    assert plan.estimated_request_count == 501
+    assert plan.errors[0]["estimated_request_count"] == 501
+    assert plan.errors[0]["budget"] == 500
+    assert plan.errors[0]["symbols_count"] == 501
+
+
+def test_marketwide_endpoint_daily_basic_can_plan_by_trade_date() -> None:
+    planner = TushareFetchPlanner()
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="daily_basic",
+                fields=["ts_code", "trade_date", "pb"],
+                trade_date="20240102",
+            )
+        ]
+    )
+
+    assert plan.status == "planned"
+    assert plan.items[0]["strategy"] == "marketwide_by_trade_date"
+
+
 def test_tushare_fetcher_writes_new_raw_layout_and_metadata(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     frame = pd.DataFrame(
