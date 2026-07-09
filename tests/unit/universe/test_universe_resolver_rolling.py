@@ -62,13 +62,16 @@ def test_resolver_builds_rolling_universe_per_rebalance_date(tmp_path: Path) -> 
     assert result["rolling_symbols"] == {
         "20240102": ["000001.SZ", "000002.SZ"],
         "20240103": ["000002.SZ", "000003.SZ"],
-        "20240104": [],
+        "20240104": ["000003.SZ"],
     }
-    assert result["metadata"]["empty_dates"] == ["20240104"]
-    assert result["metadata"]["min_count"] == 0
+    assert result["metadata"]["empty_dates"] == []
+    assert result["metadata"]["min_count"] == 1
     assert result["metadata"]["max_count"] == 2
-    assert result["metadata"]["mean_count"] == 4 / 3
+    assert result["metadata"]["mean_count"] == 5 / 3
     assert result["metadata"]["changed_dates"] == 2
+    diagnostics = result["metadata"]["diagnostics_by_date"]["20240104"]
+    assert diagnostics["stale_symbol_count"] == 1
+    assert diagnostics["symbols_on_latest_global_trade_date"] == 2
     exclusions = result["metadata"]["excluded_symbols_by_date"]
     assert {item["symbol"]: item["reason"] for item in exclusions["20240103"]}["000001.SZ"] == "st"
     assert (

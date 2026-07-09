@@ -70,14 +70,16 @@ class UniverseResolver:
         limit: int,
         include_exclusions: bool,
     ) -> dict[str, Any]:
-        symbols, excluded = self._resolve_for_date(spec, as_of_date=as_of_date)
+        symbols, excluded, diagnostics = self._resolve_for_date(spec, as_of_date=as_of_date)
         symbols = _apply_limit(symbols, spec=spec, limit=limit)
+        diagnostics["selected_count"] = len(symbols)
         metadata: dict[str, Any] = {
             "count": len(symbols),
             "as_of_date": as_of_date,
             "fingerprint": fingerprint_symbols(spec, mode="snapshot", symbols=symbols),
             "spec_fingerprint": fingerprint_spec(spec),
             "excluded_symbols": excluded if include_exclusions else [],
+            "diagnostics": diagnostics,
         }
         return {
             "status": "OK",
@@ -104,9 +106,13 @@ class UniverseResolver:
         )
         rolling_symbols: dict[str, list[str]] = {}
         excluded_by_date: dict[str, list[dict[str, str]]] = {}
+        diagnostics_by_date: dict[str, dict[str, Any]] = {}
         for resolve_date in resolve_dates:
-            symbols, excluded = self._resolve_for_date(spec, as_of_date=resolve_date)
-            rolling_symbols[resolve_date] = _apply_limit(symbols, spec=spec, limit=limit)
+            symbols, excluded, diagnostics = self._resolve_for_date(spec, as_of_date=resolve_date)
+            resolved = _apply_limit(symbols, spec=spec, limit=limit)
+            rolling_symbols[resolve_date] = resolved
+            diagnostics["selected_count"] = len(resolved)
+            diagnostics_by_date[resolve_date] = diagnostics
             if include_exclusions:
                 excluded_by_date[resolve_date] = excluded
 
@@ -131,6 +137,7 @@ class UniverseResolver:
             "spec_fingerprint": fingerprint_spec(spec),
             "empty_dates": empty_dates,
             "changed_dates": changed_dates,
+            "diagnostics_by_date": diagnostics_by_date,
         }
         if include_exclusions:
             metadata["excluded_symbols_by_date"] = excluded_by_date
@@ -146,10 +153,11 @@ class UniverseResolver:
         spec: UniverseSpec,
         *,
         as_of_date: str,
-    ) -> tuple[list[str], list[dict[str, str]]]:
+    ) -> tuple[list[str], list[dict[str, str]], dict[str, Any]]:
         recent = self._load_recent_bars(as_of_date, spec.asset_types)
         stock_basic = self._stock_basic()
         candidates = self._select_candidates(spec, recent, stock_basic, as_of_date=as_of_date)
+        candidate_count = len(candidates)
         candidates = self._attach_metrics(candidates, spec, as_of_date=as_of_date)
         selected: list[dict[str, Any]] = []
         excluded: list[dict[str, str]] = []
@@ -163,10 +171,20 @@ class UniverseResolver:
         selected_frame = pd.DataFrame(selected)
         selected_frame = self._apply_rules(selected_frame, spec.selection.rules)
         selected_frame = self._apply_ranking(selected_frame, spec)
+        diagnostics = _universe_diagnostics(
+            recent=recent,
+            stock_basic=stock_basic,
+            candidates=candidates,
+            as_of_date=as_of_date,
+            selection_mode=spec.selection.mode,
+            selected_count=0 if selected_frame.empty else len(selected_frame),
+            candidate_count=candidate_count,
+            excluded=excluded,
+        )
         if selected_frame.empty:
-            return [], excluded
+            return [], excluded, diagnostics
         symbols = [str(item) for item in selected_frame["symbol"].astype(str).tolist()]
-        return sorted(dict.fromkeys(symbols)), excluded
+        return sorted(dict.fromkeys(symbols)), excluded, diagnostics
 
     def _select_candidates(
         self,
@@ -432,13 +450,18 @@ class UniverseResolver:
                     FROM read_parquet('{escaped_path}')
                     WHERE CAST(trade_date AS VARCHAR) <= $end_date
                 ),
-                latest AS (
-                    SELECT max(CAST(trade_date AS VARCHAR)) AS trade_date
+                ranked AS (
+                    SELECT
+                        *,
+                        row_number() OVER (
+                            PARTITION BY ts_code
+                            ORDER BY CAST(trade_date AS VARCHAR) DESC
+                        ) AS rn
                     FROM source
                 )
-                SELECT source.*
-                FROM source, latest
-                WHERE CAST(source.trade_date AS VARCHAR) = latest.trade_date
+                SELECT * EXCLUDE (rn)
+                FROM ranked
+                WHERE rn = 1
                 """,
                 {"end_date": as_of_date},
             )
@@ -571,6 +594,60 @@ def _merge_stock_basic_columns(frame: pd.DataFrame, stock_basic: pd.DataFrame) -
     ]
     basics = stock_basic[columns].rename(columns={"ts_code": "symbol"})
     return frame.merge(basics, on="symbol", how="left")
+
+
+def _universe_diagnostics(
+    *,
+    recent: pd.DataFrame,
+    stock_basic: pd.DataFrame,
+    candidates: pd.DataFrame,
+    as_of_date: str,
+    selection_mode: str,
+    selected_count: int,
+    candidate_count: int,
+    excluded: list[dict[str, str]],
+) -> dict[str, Any]:
+    latest_global_trade_date = None
+    symbols_on_latest = 0
+    symbols_with_bar = 0
+    stale_symbol_count = 0
+    max_staleness_days = 0
+    if not recent.empty and "trade_date" in recent.columns and "symbol" in recent.columns:
+        dates = pd.to_datetime(recent["trade_date"], errors="coerce")
+        latest = dates.max()
+        if pd.notna(latest):
+            latest_global_trade_date = f"{latest.date():%Y%m%d}"
+            symbols_on_latest = int(recent.loc[dates == latest, "symbol"].nunique())
+        as_of = _parse_date(as_of_date)
+        staleness = (pd.Timestamp(as_of) - dates).dt.days
+        stale_symbol_count = int(recent.loc[staleness > 0, "symbol"].nunique())
+        max_staleness_days = int(staleness.max()) if not staleness.empty else 0
+        symbols_with_bar = int(recent["symbol"].nunique())
+    stock_basic_count = (
+        int(stock_basic["ts_code"].astype(str).nunique())
+        if not stock_basic.empty and "ts_code" in stock_basic.columns
+        else 0
+    )
+    exclusion_counts: dict[str, int] = {}
+    for item in excluded:
+        reason = item.get("reason", "unknown")
+        exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+    return {
+        "as_of_date": as_of_date,
+        "candidate_count": candidate_count,
+        "selected_count": selected_count,
+        "recent_bar_symbol_count": symbols_with_bar,
+        "stock_basic_symbol_count": stock_basic_count,
+        "latest_global_trade_date": latest_global_trade_date,
+        "symbols_on_latest_global_trade_date": symbols_on_latest,
+        "symbols_with_bar_before_as_of": symbols_with_bar,
+        "stale_symbol_count": stale_symbol_count,
+        "max_bar_staleness_days": max_staleness_days,
+        "selection_mode": selection_mode,
+        "excluded_count": len(excluded),
+        "exclusion_counts": exclusion_counts,
+        "candidate_columns": sorted(str(column) for column in candidates.columns),
+    }
 
 
 def _rule_mask(series: pd.Series, rule: UniverseRule) -> pd.Series:

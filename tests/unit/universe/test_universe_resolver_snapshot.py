@@ -147,6 +147,89 @@ def test_resolver_reports_malformed_list_date_without_crashing(tmp_path: Path) -
     ]
 
 
+def test_broad_universe_uses_per_symbol_latest_asof_not_global_latest(
+    tmp_path: Path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    previous_symbols = [f"{index:06d}.SZ" for index in range(1, 2001)]
+    latest_symbols = previous_symbols[:3]
+    lake.write_parquet(
+        pd.DataFrame(
+            [_bar(symbol, "20260707") for symbol in previous_symbols]
+            + [_bar(symbol, "20260708") for symbol in latest_symbols]
+        ),
+        "raw",
+        "tushare/daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                _stock_basic(symbol, f"股票{index}", "测试")
+                for index, symbol in enumerate(previous_symbols)
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
+    )
+    spec = UniverseSpec(
+        universe_id="u_sparse_latest",
+        name="Sparse latest",
+        source="agent_generated",
+        asset_types=["stock"],
+        selection=UniverseSelection(mode="all"),
+        filters=UniverseFilters(min_listed_days=0),
+        mode="snapshot",
+        created_at="2026-07-09T00:00:00+08:00",
+    )
+
+    result = UniverseResolver(lake).build(spec, as_of_date="20260708", limit=2500)
+
+    assert result["status"] == "OK"
+    assert len(result["symbols"]) == 2000
+    diagnostics = result["metadata"]["diagnostics"]
+    assert diagnostics["latest_global_trade_date"] == "20260708"
+    assert diagnostics["symbols_on_latest_global_trade_date"] == 3
+    assert diagnostics["symbols_with_bar_before_as_of"] == 2000
+
+
+def test_snapshot_universe_exposes_staleness_diagnostics(tmp_path: Path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    symbols = ["000001.SZ", "000002.SZ", "000003.SZ"]
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                _bar("000001.SZ", "20260708"),
+                _bar("000002.SZ", "20260707"),
+                _bar("000003.SZ", "20260703"),
+            ]
+        ),
+        "raw",
+        "tushare/daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame([_stock_basic(symbol, symbol, "测试") for symbol in symbols]),
+        "raw",
+        "tushare/stock_basic",
+    )
+    spec = UniverseSpec(
+        universe_id="u_stale",
+        name="Stale bars",
+        source="agent_generated",
+        asset_types=["stock"],
+        selection=UniverseSelection(mode="all"),
+        filters=UniverseFilters(min_listed_days=0),
+        mode="snapshot",
+        created_at="2026-07-09T00:00:00+08:00",
+    )
+
+    result = UniverseResolver(lake).build(spec, as_of_date="20260708")
+
+    diagnostics = result["metadata"]["diagnostics"]
+    assert diagnostics["stale_symbol_count"] == 2
+    assert diagnostics["max_bar_staleness_days"] == 5
+    assert diagnostics["recent_bar_symbol_count"] == 3
+
+
 def _bar(symbol: str, trade_date: str, *, suspended: bool = False) -> dict[str, object]:
     return {
         "ts_code": symbol,
