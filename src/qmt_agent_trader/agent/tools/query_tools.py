@@ -30,15 +30,22 @@ from qmt_agent_trader.data.bars import (
     normalize_tushare_daily,
 )
 from qmt_agent_trader.data.catalog import visible_dataset_names
+from qmt_agent_trader.data.field_sources import (
+    FieldSourceIndex,
+    FieldSourceSpec,
+    FillPolicy,
+    fetch_columns_for_source,
+)
+from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.data.fundamentals import (
     DAILY_BASIC_DATASET,
-    DAILY_BASIC_FIELDS,
     DEFAULT_FUNDAMENTAL_FIELDS,
     FINANCIAL_DATASETS,
     load_fundamentals_asof,
     records_jsonable,
 )
 from qmt_agent_trader.data.macro import MACRO_DATASETS
+from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.transforms.macro_pit import (
     load_macro_series_asof,
@@ -1291,14 +1298,51 @@ def _fundamental_repair_action(
     missing_fields: dict[str, Any],
 ) -> dict[str, Any]:
     fields_to_fetch = sorted({*fields, *[str(field) for field in missing_fields]})
-    endpoint_fields: dict[str, list[str]] = {}
+    source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
+    endpoint_fields: dict[str, tuple[FieldSourceSpec, list[str]]] = {}
     unknown_fields: list[str] = []
+    event_fields: list[dict[str, str | None]] = []
+    ambiguous_fields: list[dict[str, Any]] = []
     for field in fields_to_fetch:
-        endpoint = _fundamental_endpoint_for_field(field)
-        if endpoint is None:
+        source = source_index.best_source_for_field(field, target_frequency=Frequency.DAILY)
+        candidates = source_index.sources_for_field(field)
+        if source is None:
+            if candidates:
+                ambiguous_fields.append(
+                    {
+                        "field": field,
+                        "candidates": [_source_candidate_metadata(item) for item in candidates],
+                    }
+                )
+                continue
             unknown_fields.append(field)
             continue
-        endpoint_fields.setdefault(endpoint, []).append(field)
+        if source.fill_policy is FillPolicy.NO_FILL:
+            event_fields.append({"field": field, "api_name": source.api_name})
+            continue
+        if source.fill_policy not in {FillPolicy.EXACT, FillPolicy.ASOF_SNAPSHOT}:
+            unknown_fields.append(field)
+            continue
+        _source, source_fields = endpoint_fields.setdefault(source.api_name, (source, []))
+        source_fields.append(field)
+    if ambiguous_fields and not endpoint_fields:
+        first = ambiguous_fields[0]
+        return {
+            "type": "AMBIGUOUS_FIELD_SOURCE",
+            "tool": "list_tushare_capabilities",
+            "reason": "multiple_candidate_sources",
+            "field": first["field"],
+            "candidates": first["candidates"],
+            "fields": [item["field"] for item in ambiguous_fields],
+        }
+    if event_fields and not endpoint_fields:
+        return {
+            "type": "event_transform_required",
+            "tool": None,
+            "reason": "event_field_requires_explicit_transform",
+            "fields": [str(item["field"]) for item in event_fields],
+            "candidates": event_fields,
+        }
     if unknown_fields and not endpoint_fields:
         return {
             "type": "capability_discovery_required",
@@ -1309,17 +1353,37 @@ def _fundamental_repair_action(
 
     fetch_symbols = missing_symbols or symbols
     fetch_items: list[dict[str, Any]] = []
-    for endpoint, endpoint_specific_fields in sorted(endpoint_fields.items()):
-        identity = _fundamental_identity_fields(endpoint)
+    for _api_name, (source, endpoint_specific_fields) in sorted(endpoint_fields.items()):
         fetch_items.append(
             {
-                "api_name": endpoint,
+                "api_name": source.api_name,
                 "symbols": fetch_symbols,
-                "fields": [*identity, *endpoint_specific_fields],
-                "start_date": _fundamental_fetch_start(as_of_date, endpoint),
+                "fields": fetch_columns_for_source(
+                    source,
+                    sorted(endpoint_specific_fields),
+                ),
+                "start_date": _fundamental_fetch_start(as_of_date, source),
                 "end_date": as_of_date,
             }
         )
+    if ambiguous_fields:
+        return {
+            "type": "AMBIGUOUS_FIELD_SOURCE",
+            "tool": "list_tushare_capabilities",
+            "reason": "multiple_candidate_sources",
+            "fields": [item["field"] for item in ambiguous_fields],
+            "candidate_fetch_items": fetch_items,
+            "ambiguous_fields": ambiguous_fields,
+        }
+    if event_fields:
+        return {
+            "type": "event_transform_required",
+            "tool": None,
+            "reason": "event_field_requires_explicit_transform",
+            "fields": [str(item["field"]) for item in event_fields],
+            "candidates": event_fields,
+            "candidate_fetch_items": fetch_items,
+        }
     if unknown_fields:
         return {
             "type": "capability_discovery_required",
@@ -1331,7 +1395,9 @@ def _fundamental_repair_action(
     return {
         "type": "fetch_missing_data",
         "tool": "run_tushare_fetch",
-        "reason": _fundamental_repair_reason(endpoint_fields),
+        "reason": _fundamental_repair_reason(
+            [source for source, _fields in endpoint_fields.values()]
+        ),
         "fetch_items": fetch_items,
         "execute_plan": True,
     }
@@ -1357,57 +1423,29 @@ def _fundamental_verification_action(
     }
 
 
-def _fundamental_endpoint_for_field(field: str) -> str | None:
-    if field in DAILY_BASIC_FIELDS:
-        return "daily_basic"
-    mapping = {
-        "roe": "fina_indicator",
-        "roe_dt": "fina_indicator",
-        "roa": "fina_indicator",
-        "gross_margin": "fina_indicator",
-        "debt_to_assets": "fina_indicator",
-        "current_ratio": "fina_indicator",
-        "net_profit_yoy": "fina_indicator",
-        "revenue_yoy": "fina_indicator",
-        "n_income_attr_p": "income",
-        "total_revenue": "income",
-        "revenue": "income",
-        "total_profit": "income",
-        "n_income": "income",
-        "n_cashflow_act": "cashflow",
-        "net_cash_flows_oper_act": "cashflow",
-        "c_cash_equ_end_period": "cashflow",
-        "total_assets": "balancesheet",
-        "total_liab": "balancesheet",
-        "total_hldr_eqy_inc_min_int": "balancesheet",
-        "cash_div": "dividend",
-        "stk_div": "dividend",
-    }
-    return mapping.get(field)
-
-
-def _fundamental_identity_fields(endpoint: str) -> list[str]:
-    if endpoint == "daily_basic":
-        return ["ts_code", "trade_date"]
-    if endpoint == "dividend":
-        return ["ts_code", "end_date", "ann_date", "div_proc"]
-    if endpoint == "fina_indicator":
-        return ["ts_code", "ann_date", "end_date"]
-    return ["ts_code", "ann_date", "f_ann_date", "end_date", "report_type"]
-
-
-def _fundamental_fetch_start(as_of_date: str, endpoint: str) -> str:
-    if endpoint == "daily_basic":
+def _fundamental_fetch_start(as_of_date: str, source: FieldSourceSpec) -> str:
+    if source.fill_policy is FillPolicy.EXACT:
         return as_of_date
-    return f"{as_of_date[:4]}0101"
+    parsed = pd.to_datetime(as_of_date).date()
+    return f"{parsed - pd.DateOffset(years=1):%Y%m%d}"
 
 
-def _fundamental_repair_reason(endpoint_fields: dict[str, list[str]]) -> str:
-    if set(endpoint_fields) == {"daily_basic"}:
+def _fundamental_repair_reason(sources: list[FieldSourceSpec]) -> str:
+    if {source.api_name for source in sources} == {"daily_basic"}:
         return "missing_daily_basic_coverage"
-    if endpoint_fields:
+    if any(source.fill_policy is FillPolicy.ASOF_SNAPSHOT for source in sources):
         return "missing_financial_statement_coverage"
     return "missing_fundamental_coverage"
+
+
+def _source_candidate_metadata(source: FieldSourceSpec) -> dict[str, Any]:
+    return {
+        "api_name": source.api_name,
+        "raw_dataset_name": source.raw_dataset_name,
+        "frequency": source.frequency.value,
+        "fill_policy": source.fill_policy.value,
+        "pit_safe": source.pit_safe,
+    }
 
 
 query_fundamentals_pit_tool: AgentTool = tool(

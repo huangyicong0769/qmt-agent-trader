@@ -32,7 +32,9 @@ def test_query_fundamentals_pit_returns_no_data_when_raw_missing(tmp_path) -> No
     assert result["metadata"]["missing_ranges"] == [
         {"start_date": "20240131", "end_date": "20240131"}
     ]
-    assert result["metadata"]["next_repair_tool"] == "run_tushare_fetch"
+    assert result["metadata"]["next_repair_tool"] == "list_tushare_capabilities"
+    assert result["repair_action"]["type"] == "capability_discovery_required"
+    assert result["repair_action"]["candidate_fetch_items"][0]["api_name"] == "daily_basic"
 
 
 def test_query_fundamentals_pit_returns_daily_and_financial_fields(tmp_path) -> None:
@@ -185,6 +187,35 @@ def test_query_fundamentals_pit_repairs_roe_with_fina_indicator(tmp_path) -> Non
     assert result["repair_action"]["fetch_items"][0]["api_name"] == "fina_indicator"
 
 
+def test_query_fundamentals_pit_repairs_debt_to_assets_from_field_source_index(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.8}]),
+        "raw",
+        "tushare/daily_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_fundamentals_pit_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "as_of_date": "20240131",
+            "fields": ["debt_to_assets"],
+        },
+        ToolContext(run_id="fundamentals-debt-repair"),
+    )
+
+    assert result["repair_action"]["fetch_items"][0] == {
+        "api_name": "fina_indicator",
+        "symbols": ["000001.SZ"],
+        "fields": ["ts_code", "ann_date", "end_date", "debt_to_assets"],
+        "start_date": "20230131",
+        "end_date": "20240131",
+    }
+
+
 def test_query_fundamentals_pit_repairs_total_revenue_with_income(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
@@ -227,3 +258,57 @@ def test_query_fundamentals_pit_unknown_field_requires_capability_discovery(tmp_
     assert result["next_repair_tool"] == "list_tushare_capabilities"
     assert result["repair_action"]["type"] == "capability_discovery_required"
     assert result["repair_action"]["tool"] == "list_tushare_capabilities"
+
+
+def test_query_fundamentals_pit_event_field_requires_explicit_transform(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.8}]),
+        "raw",
+        "tushare/daily_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_fundamentals_pit_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "as_of_date": "20240131",
+            "fields": ["cash_div"],
+        },
+        ToolContext(run_id="fundamentals-event-repair"),
+    )
+
+    assert result["repair_action"] == {
+        "type": "event_transform_required",
+        "tool": None,
+        "reason": "event_field_requires_explicit_transform",
+        "fields": ["cash_div"],
+        "candidates": [{"field": "cash_div", "api_name": "dividend"}],
+    }
+
+
+def test_query_fundamentals_pit_ambiguous_field_source_lists_candidates(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20240131", "pe_ttm": 4.8}]),
+        "raw",
+        "tushare/daily_basic",
+    )
+    set_data_lake(lake)
+
+    result = query_fundamentals_pit_tool.run(
+        {
+            "symbols": ["000001.SZ"],
+            "as_of_date": "20240131",
+            "fields": ["close"],
+        },
+        ToolContext(run_id="fundamentals-ambiguous-repair"),
+    )
+
+    assert result["repair_action"]["type"] == "AMBIGUOUS_FIELD_SOURCE"
+    assert result["repair_action"]["field"] == "close"
+    assert {item["api_name"] for item in result["repair_action"]["candidates"]} >= {
+        "daily",
+        "daily_basic",
+        "fund_daily",
+    }
