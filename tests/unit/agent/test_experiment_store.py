@@ -115,6 +115,100 @@ def test_get_experiment_tool_calls_returns_real_audit_entries(tmp_path) -> None:
     assert current_alias["count"] == 2
 
 
+def test_get_experiment_tool_calls_requests_range_when_result_is_too_large(tmp_path) -> None:
+    lake = DataLake(
+        root=tmp_path / "lake",
+        duckdb_path=tmp_path / "test.duckdb",
+    )
+    registry = build_agent_registry(
+        data_lake=lake,
+        audit_path=tmp_path / "audit.jsonl",
+        experiment_root=tmp_path / "experiments",
+        sandbox=CodeSandbox(tmp_path / "generated"),
+    )
+    context = ToolContext(
+        run_id="run_audit",
+        session_id="session_audit",
+        experiment_id="exp_audit",
+    )
+    for index in range(45):
+        registry.run_tool(
+            "list_strategy_candidates",
+            {"query": f"strategy-{index:02d}"},
+            context,
+        )
+
+    result = registry.run_tool("get_experiment_tool_calls", {}, context)
+
+    assert result["status"] == "RANGE_REQUIRED"
+    assert result["total_count"] == 45
+    assert result["record_numbering"] == "1-based oldest-to-newest"
+    assert result["range_parameter"] == "record_range"
+    assert result["suggested_ranges"] == [
+        {"record_range": {"start": 1, "end": 15}},
+        {"record_range": {"start": 16, "end": 30}},
+        {"record_range": {"start": 31, "end": 45}},
+    ]
+    assert "tool_calls" not in result
+
+
+def test_get_experiment_tool_calls_returns_requested_record_range(tmp_path) -> None:
+    lake = DataLake(
+        root=tmp_path / "lake",
+        duckdb_path=tmp_path / "test.duckdb",
+    )
+    registry = build_agent_registry(
+        data_lake=lake,
+        audit_path=tmp_path / "audit.jsonl",
+        experiment_root=tmp_path / "experiments",
+        sandbox=CodeSandbox(tmp_path / "generated"),
+    )
+    context = ToolContext(
+        run_id="run_audit",
+        session_id="session_audit",
+        experiment_id="exp_audit",
+    )
+    for index in range(45):
+        registry.run_tool(
+            "list_strategy_candidates",
+            {"query": f"strategy-{index:02d}"},
+            context,
+        )
+
+    result = registry.run_tool(
+        "get_experiment_tool_calls",
+        {"record_range": {"start": 16, "end": 30}},
+        context,
+    )
+
+    assert result["status"] == "ok"
+    assert result["total_count"] == 45
+    assert result["record_range"] == {"start": 16, "end": 30}
+    assert result["returned_count"] == 15
+    assert result["has_previous_range"] is True
+    assert result["has_next_range"] is True
+    assert result["tool_calls"][0]["record_number"] == 16
+    assert result["tool_calls"][-1]["record_number"] == 30
+    assert [item["tool_name"] for item in result["tool_calls"]] == [
+        "list_strategy_candidates"
+    ] * 15
+
+
+def test_get_experiment_tool_calls_schema_exposes_record_range(tmp_path) -> None:
+    schema = build_agent_registry(
+        data_lake=DataLake(
+            root=tmp_path / "lake",
+            duckdb_path=tmp_path / "test.duckdb",
+        ),
+        audit_path=tmp_path / "audit.jsonl",
+        experiment_root=tmp_path / "experiments",
+        sandbox=CodeSandbox(tmp_path / "generated"),
+    ).describe_tool("get_experiment_tool_calls").input_schema
+
+    assert "record_range" in schema["properties"]
+    assert "limit" not in schema["properties"]
+
+
 def test_add_artifact(store: ExperimentStore) -> None:
     exp = store.create_experiment("strategy_engineering")
     store.add_artifact(exp.experiment_id, "/path/to/code.py")

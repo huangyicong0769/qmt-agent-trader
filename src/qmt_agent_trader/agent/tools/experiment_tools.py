@@ -26,6 +26,7 @@ _audit_logger_var: ContextVar[AuditLogger | None] = ContextVar(
     "experiment_tool_audit_logger",
     default=None,
 )
+_MAX_TOOL_CALL_RANGE_SIZE = 15
 
 
 def set_experiment_store(store: ExperimentStore) -> None:
@@ -147,7 +148,6 @@ def _get_experiment_tool_calls(
         session_id = session_id or str(context.session_id or "")
     if not experiment_id and not run_id and not session_id and context.experiment_id:
         experiment_id = context.experiment_id
-    limit = int(input_data.get("limit") or 50)
     if not experiment_id and not run_id and not session_id:
         return {"status": "error", "message": "experiment_id, run_id, or session_id is required"}
 
@@ -167,14 +167,55 @@ def _get_experiment_tool_calls(
             continue
         if entry.get("status") == "started":
             continue
-        calls.append(_summarize_audit_entry(entry))
+        calls.append(_summarize_audit_entry(entry, record_number=len(calls) + 1))
+    record_range = _parse_record_range(input_data.get("record_range"), total_count=len(calls))
+    if record_range.get("status") == "error":
+        return record_range
+    if record_range.get("status") == "RANGE_REQUIRED":
+        return _range_required_response(
+            experiment_id=experiment_id,
+            run_id=run_id,
+            session_id=session_id,
+            total_count=len(calls),
+        )
+    if record_range:
+        start = int(record_range["start"])
+        end = int(record_range["end"])
+        selected_calls = calls[start - 1 : end]
+        return {
+            "status": "ok",
+            "experiment_id": experiment_id or None,
+            "run_id": run_id or None,
+            "session_id": session_id or None,
+            "count": len(calls),
+            "total_count": len(calls),
+            "record_numbering": "1-based oldest-to-newest",
+            "record_range": {"start": start, "end": end},
+            "returned_count": len(selected_calls),
+            "has_previous_range": start > 1,
+            "has_next_range": end < len(calls),
+            "tool_calls": selected_calls,
+        }
+    if len(calls) > _MAX_TOOL_CALL_RANGE_SIZE:
+        return _range_required_response(
+            experiment_id=experiment_id,
+            run_id=run_id,
+            session_id=session_id,
+            total_count=len(calls),
+        )
     return {
         "status": "ok",
         "experiment_id": experiment_id or None,
         "run_id": run_id or None,
         "session_id": session_id or None,
         "count": len(calls),
-        "tool_calls": calls[-limit:],
+        "total_count": len(calls),
+        "record_numbering": "1-based oldest-to-newest",
+        "record_range": {"start": 1, "end": len(calls)} if calls else None,
+        "returned_count": len(calls),
+        "has_previous_range": False,
+        "has_next_range": False,
+        "tool_calls": calls,
     }
 
 
@@ -191,7 +232,20 @@ get_experiment_tool_calls_tool: AgentTool = tool(
                 "experiment_id": {"type": "string"},
                 "run_id": {"type": "string"},
                 "session_id": {"type": "string"},
-                "limit": {"type": "integer"},
+                "record_range": {
+                    "type": "object",
+                    "description": (
+                        "Optional 1-based inclusive range of matching audit records, "
+                        "numbered oldest-to-newest. Use suggested_ranges when status "
+                        "is RANGE_REQUIRED."
+                    ),
+                    "properties": {
+                        "start": {"type": "integer", "minimum": 1},
+                        "end": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["start", "end"],
+                    "additionalProperties": False,
+                },
             },
             "additionalProperties": False,
         },
@@ -202,9 +256,10 @@ get_experiment_tool_calls_tool: AgentTool = tool(
 )
 
 
-def _summarize_audit_entry(entry: dict[str, Any]) -> dict[str, Any]:
+def _summarize_audit_entry(entry: dict[str, Any], *, record_number: int) -> dict[str, Any]:
     output = entry.get("output_data")
     return {
+        "record_number": record_number,
         "timestamp": entry.get("timestamp"),
         "run_id": entry.get("run_id"),
         "session_id": entry.get("session_id"),
@@ -243,6 +298,82 @@ def _compact_output(output: dict[str, Any]) -> dict[str, Any]:
             len(output["strategies"]) if isinstance(output["strategies"], list) else None
         )
     return compact
+
+
+def _parse_record_range(value: Any, *, total_count: int) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        return {
+            "status": "error",
+            "message": "record_range must be an object with integer start and end",
+        }
+    raw_start = value.get("start")
+    raw_end = value.get("end")
+    if raw_start is None or raw_end is None:
+        return {
+            "status": "error",
+            "message": "record_range.start and record_range.end must be integers",
+        }
+    try:
+        start = int(raw_start)
+        end = int(raw_end)
+    except (TypeError, ValueError):
+        return {
+            "status": "error",
+            "message": "record_range.start and record_range.end must be integers",
+        }
+    if start < 1 or end < start:
+        return {
+            "status": "error",
+            "message": "record_range must satisfy 1 <= start <= end",
+        }
+    if total_count == 0:
+        return {
+            "status": "error",
+            "message": "record_range was provided but no matching records exist",
+        }
+    if total_count and start > total_count:
+        return {
+            "status": "error",
+            "message": f"record_range.start exceeds total_count {total_count}",
+        }
+    end = min(end, total_count)
+    if end - start + 1 > _MAX_TOOL_CALL_RANGE_SIZE:
+        return {"status": "RANGE_REQUIRED"}
+    return {"start": start, "end": end}
+
+
+def _range_required_response(
+    *,
+    experiment_id: str,
+    run_id: str,
+    session_id: str,
+    total_count: int,
+) -> dict[str, Any]:
+    return {
+        "status": "RANGE_REQUIRED",
+        "message": (
+            "tool call records are too large for one response; call again with "
+            "record_range using one of suggested_ranges"
+        ),
+        "experiment_id": experiment_id or None,
+        "run_id": run_id or None,
+        "session_id": session_id or None,
+        "count": total_count,
+        "total_count": total_count,
+        "record_numbering": "1-based oldest-to-newest",
+        "range_parameter": "record_range",
+        "suggested_ranges": _suggest_record_ranges(total_count),
+    }
+
+
+def _suggest_record_ranges(total_count: int) -> list[dict[str, dict[str, int]]]:
+    ranges: list[dict[str, dict[str, int]]] = []
+    for start in range(1, total_count + 1, _MAX_TOOL_CALL_RANGE_SIZE):
+        end = min(start + _MAX_TOOL_CALL_RANGE_SIZE - 1, total_count)
+        ranges.append({"record_range": {"start": start, "end": end}})
+    return ranges
 
 
 def _normalize_session_id(value: Any, context: ToolContext) -> str:
