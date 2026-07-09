@@ -10,6 +10,22 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.data.contracts import (
+    AlignmentPolicy,
+    ContractBundle,
+    CoverageEvidence,
+    FetchShape,
+    FetchShapeName,
+    PITModel,
+    SourceCapability,
+    SourceCapabilityMatch,
+    TargetCalendar,
+    coverage_evidence_from_panel,
+    find_capability_match,
+    observation_grid_from_panel,
+    repair_plan_from_evidence,
+    source_capability_from_field_source,
+)
 from qmt_agent_trader.data.field_sources import (
     FieldSourceIndex,
     FieldSourceSpec,
@@ -20,7 +36,7 @@ from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
-from qmt_agent_trader.factors.registry import FactorRegistry
+from qmt_agent_trader.factors.registry import FactorRegistry, input_requirements_for_factor
 
 
 @dataclass(frozen=True)
@@ -418,18 +434,53 @@ def check_factor_input_readiness(
         required_fields=list(saved.required_columns),
         symbols=symbols,
     )
+    contract_bundle = _factor_input_contract_bundle(
+        panel,
+        saved=saved,
+        metadata=metadata,
+    )
     repair_action = _factor_input_repair_action(
         metadata,
         symbols=symbols or [],
         start=start,
         end=end,
+        contract_bundle=contract_bundle,
     )
     status = _readiness_status(panel, metadata, saved.required_columns)
+    if status == "OK" and _contract_has_blockers(contract_bundle):
+        status = "PARTIAL_COVERAGE"
     return {
         "status": status,
+        "contract_status": _contract_readiness_status(contract_bundle),
+        "reason": (
+            "UNSATISFIED_DATA_REQUIREMENT"
+            if _contract_has_blockers(contract_bundle)
+            else "DATA_REQUIREMENTS_SATISFIED"
+        ),
         "target_frequency": Frequency.DAILY.value,
         "factor_name": factor_name,
         "required_columns": list(saved.required_columns),
+        "requirements": [
+            requirement.model_dump(mode="json")
+            for requirement in contract_bundle.requirements
+        ],
+        "source_matches": [
+            match.model_dump(mode="json")
+            for match in contract_bundle.source_matches
+        ],
+        "observation_grid": (
+            contract_bundle.observation_grid.model_dump(mode="json")
+            if contract_bundle.observation_grid is not None
+            else None
+        ),
+        "coverage_evidence": [
+            evidence.model_dump(mode="json")
+            for evidence in contract_bundle.coverage_evidence
+        ],
+        "repair_plans": [
+            plan.model_dump(mode="json")
+            for plan in contract_bundle.repair_plans
+        ],
         "field_sources": metadata["field_sources"],
         "fill_policy_by_field": {
             field: source["fill_policy"]
@@ -487,7 +538,15 @@ def _factor_input_repair_action(
     symbols: list[str],
     start: str | None,
     end: str | None,
+    contract_bundle: ContractBundle | None = None,
 ) -> dict[str, Any]:
+    if contract_bundle is not None and contract_bundle.repair_plans:
+        return _contract_repair_action(
+            contract_bundle,
+            symbols=symbols,
+            start=start,
+            end=end,
+        )
     unresolved = metadata.get("unresolved_fields") or []
     if unresolved:
         event_fields = [
@@ -550,6 +609,196 @@ def _factor_input_repair_action(
         "fetch_items": fetch_items,
         "execute_plan": True,
     }
+
+
+def _factor_input_contract_bundle(
+    panel: pd.DataFrame,
+    *,
+    saved: Any,
+    metadata: dict[str, Any],
+) -> ContractBundle:
+    requirements = list(input_requirements_for_factor(saved))
+    grid = observation_grid_from_panel(
+        panel,
+        target_frequency=Frequency.DAILY,
+        calendar=TargetCalendar.TRADING_DAYS,
+    )
+    registry = default_tushare_registry()
+    source_index = FieldSourceIndex.from_tushare_registry(registry)
+    matches: list[SourceCapabilityMatch] = []
+    evidence_items: list[CoverageEvidence] = []
+    repair_plans = []
+    for requirement in requirements:
+        match = _match_requirement_to_source(
+            requirement,
+            source_index=source_index,
+            metadata=metadata,
+        )
+        matched_source = match.source if match is not None else None
+        evidence = coverage_evidence_from_panel(
+            panel,
+            requirement=requirement,
+            matched_source=matched_source,
+            grid=grid,
+        )
+        evidence_items.append(evidence)
+        if match is not None:
+            matches.append(match)
+            repair_plan = repair_plan_from_evidence(
+                requirement=requirement,
+                match=match,
+                evidence=evidence,
+                grid=grid,
+            )
+            if repair_plan is not None:
+                repair_plans.append(repair_plan)
+    return ContractBundle(
+        requirements=requirements,
+        source_matches=matches,
+        observation_grid=grid,
+        coverage_evidence=evidence_items,
+        repair_plans=repair_plans,
+    )
+
+
+def _match_requirement_to_source(
+    requirement: Any,
+    *,
+    source_index: FieldSourceIndex,
+    metadata: dict[str, Any],
+) -> SourceCapabilityMatch | None:
+    if requirement.field in metadata.get("field_sources", {}):
+        field_source = source_index.best_source_for_field(
+            requirement.field,
+            target_frequency=requirement.target_frequency,
+        )
+        if field_source is None:
+            return None
+        endpoint = default_tushare_registry().require(field_source.api_name)
+        capability = source_capability_from_field_source(field_source, endpoint)
+        return find_capability_match(requirement, [capability])
+    if requirement.field in {"open", "high", "low", "close", "vol", "amount", "turnover"}:
+        return SourceCapabilityMatch(
+            requirement=requirement,
+            source=_canonical_daily_bars_capability(requirement.field),
+            selected_fetch_shape=FetchShape(
+                name=FetchShapeName.SYMBOL_TIME_RANGE,
+                unit="canonical daily bars over a date range",
+                symbol_param="ts_code",
+                start_param="start_date",
+                end_param="end_date",
+            ),
+            explanation="field is already provided by canonical daily bar skeleton",
+        )
+    candidates = []
+    for source in source_index.sources_for_field(requirement.field):
+        endpoint = default_tushare_registry().require(source.api_name)
+        candidates.append(source_capability_from_field_source(source, endpoint))
+    return find_capability_match(requirement, candidates)
+
+
+def _canonical_daily_bars_capability(field: str) -> SourceCapability:
+    return SourceCapability(
+        source_id="canonical.daily_bars",
+        provider="local",
+        api_name="daily_bars",
+        raw_dataset_name="tushare/daily",
+        canonical_dataset_name="daily_bars",
+        fields=(
+            "symbol",
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "vol",
+            "amount",
+            "turnover",
+        ),
+        native_frequency=Frequency.DAILY,
+        time_axis="trade_date",
+        entity_axis="symbol",
+        fetch_shapes=(
+            FetchShape(
+                name=FetchShapeName.SYMBOL_TIME_RANGE,
+                unit="canonical daily bars over a date range",
+                symbol_param="ts_code",
+                start_param="start_date",
+                end_param="end_date",
+            ),
+        ),
+        pit_model=PITModel(
+            visible_time_field="trade_date",
+            visible_time_semantics="same-day market data visibility",
+        ),
+        default_alignment_policy=AlignmentPolicy.EXACT,
+        limitations=(),
+    )
+
+
+def _contract_repair_action(
+    contract_bundle: ContractBundle,
+    *,
+    symbols: list[str],
+    start: str | None,
+    end: str | None,
+) -> dict[str, Any]:
+    fetch_items = []
+    for plan in contract_bundle.repair_plans:
+        fields = list(plan.fetch_plan.fields)
+        source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
+        field_source = source_index.best_source_for_field(
+            plan.requirement.field,
+            target_frequency=plan.requirement.target_frequency,
+        )
+        if field_source is None:
+            continue
+        fetch_items.append(
+            _fetch_item_for_source(
+                field_source,
+                fields=fields,
+                symbols=symbols,
+                start=start,
+                end=end,
+            )
+        )
+    return {
+        "type": "fetch_missing_data",
+        "tool": "run_tushare_fetch",
+        "reason": "UNSATISFIED_OBSERVATION_COVERAGE",
+        "fetch_items": fetch_items,
+        "items": fetch_items,
+        "execute_plan": True,
+        "contract_repair_plans": [
+            plan.model_dump(mode="json")
+            for plan in contract_bundle.repair_plans
+        ],
+        "verification_actions": [
+            "build_data_table(daily_market)",
+            "check_factor_input_readiness",
+            "run_backtest",
+        ],
+    }
+
+
+def _contract_readiness_status(contract_bundle: ContractBundle) -> str:
+    if not contract_bundle.requirements:
+        return "INVALID_REQUIREMENT"
+    if any(
+        evidence.status == "UNRESOLVED"
+        for evidence in contract_bundle.coverage_evidence
+    ):
+        return "UNRESOLVED_SOURCE"
+    if _contract_has_blockers(contract_bundle):
+        return "PARTIAL_REPAIRABLE" if contract_bundle.repair_plans else "PARTIAL_INFEASIBLE"
+    return "READY"
+
+
+def _contract_has_blockers(contract_bundle: ContractBundle) -> bool:
+    return any(
+        evidence.status != "SATISFIED"
+        for evidence in contract_bundle.coverage_evidence
+    )
 
 
 def _fetch_item_for_source(

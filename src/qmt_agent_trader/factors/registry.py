@@ -13,6 +13,15 @@ from typing import Any
 import pandas as pd
 
 from qmt_agent_trader.core.ids import shanghai_now_iso
+from qmt_agent_trader.data.contracts import (
+    AlignmentPolicy,
+    CoveragePolicy,
+    EntityScope,
+    FactorInputRequirement,
+    StalenessPolicy,
+    TargetCalendar,
+)
+from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.factors.library.price_volume import (
     amount_zscore_20d,
     momentum,
@@ -47,6 +56,7 @@ class SavedFactor:
     created_by: str
     created_at: str
     status: str = "saved"
+    input_requirements: tuple[FactorInputRequirement, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SavedFactor:
@@ -61,11 +71,19 @@ class SavedFactor:
             created_by=str(data.get("created_by") or "unknown"),
             created_at=str(data.get("created_at") or shanghai_now_iso()),
             status=str(data.get("status") or "saved"),
+            input_requirements=tuple(
+                FactorInputRequirement.model_validate(item)
+                for item in data.get("input_requirements", ())
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["required_columns"] = list(self.required_columns)
+        data["input_requirements"] = [
+            requirement.model_dump(mode="json")
+            for requirement in self.input_requirements
+        ]
         return data
 
 
@@ -140,6 +158,7 @@ class FactorRegistry:
         required_columns: tuple[str, ...],
         lookback: int,
         params: dict[str, Any] | None = None,
+        input_requirements: tuple[FactorInputRequirement, ...] = (),
         created_by: str = "agent",
     ) -> SavedFactor:
         if implementation_ref.startswith("builtin:"):
@@ -164,6 +183,7 @@ class FactorRegistry:
             params=params or {},
             created_by=created_by,
             created_at=shanghai_now_iso(),
+            input_requirements=input_requirements,
         )
         self._saved[factor_id] = record
         self._persist_file_registry()
@@ -222,20 +242,44 @@ class FactorRegistry:
 
 
 def _builtin_saved_factors() -> dict[str, SavedFactor]:
-    builtins = {
-        "momentum_20d": (20, ("symbol", "trade_date", "close")),
-        "momentum_60d": (60, ("symbol", "trade_date", "close")),
-        "reversal_5d": (5, ("symbol", "trade_date", "close")),
-        "volatility_20d": (20, ("symbol", "trade_date", "close")),
-        "turnover_20d": (20, ("symbol", "trade_date", "turnover")),
-        "amount_zscore_20d": (20, ("symbol", "trade_date", "amount")),
-        "size_log_mktcap": (0, ("symbol", "trade_date", "total_mv")),
-        "pe_ttm_rank": (0, ("symbol", "trade_date", "pe_ttm")),
-        "pb_rank": (0, ("symbol", "trade_date", "pb")),
-        "dividend_yield": (0, ("symbol", "trade_date", "dv_ttm")),
-        "roe_rank": (0, ("symbol", "trade_date", "roe")),
-        "gross_margin_rank": (0, ("symbol", "trade_date", "gross_margin")),
-        "debt_to_assets_rank": (0, ("symbol", "trade_date", "debt_to_assets")),
+    builtins: dict[str, tuple[int, tuple[str, ...], tuple[FactorInputRequirement, ...]]] = {
+        "momentum_20d": (20, ("symbol", "trade_date", "close"), _daily_bar_requirements("close")),
+        "momentum_60d": (60, ("symbol", "trade_date", "close"), _daily_bar_requirements("close")),
+        "reversal_5d": (5, ("symbol", "trade_date", "close"), _daily_bar_requirements("close")),
+        "volatility_20d": (20, ("symbol", "trade_date", "close"), _daily_bar_requirements("close")),
+        "turnover_20d": (
+            20,
+            ("symbol", "trade_date", "turnover"),
+            _daily_bar_requirements("turnover"),
+        ),
+        "amount_zscore_20d": (
+            20,
+            ("symbol", "trade_date", "amount"),
+            _daily_bar_requirements("amount"),
+        ),
+        "size_log_mktcap": (
+            0,
+            ("symbol", "trade_date", "total_mv"),
+            _exact_daily_requirements("total_mv"),
+        ),
+        "pe_ttm_rank": (0, ("symbol", "trade_date", "pe_ttm"), _exact_daily_requirements("pe_ttm")),
+        "pb_rank": (0, ("symbol", "trade_date", "pb"), _exact_daily_requirements("pb")),
+        "dividend_yield": (
+            0,
+            ("symbol", "trade_date", "dv_ttm"),
+            _exact_daily_requirements("dv_ttm"),
+        ),
+        "roe_rank": (0, ("symbol", "trade_date", "roe"), _asof_financial_requirements("roe")),
+        "gross_margin_rank": (
+            0,
+            ("symbol", "trade_date", "gross_margin"),
+            _asof_financial_requirements("gross_margin"),
+        ),
+        "debt_to_assets_rank": (
+            0,
+            ("symbol", "trade_date", "debt_to_assets"),
+            _asof_financial_requirements("debt_to_assets"),
+        ),
     }
     now = "builtin"
     return {
@@ -249,9 +293,76 @@ def _builtin_saved_factors() -> dict[str, SavedFactor]:
             params={},
             created_by="system",
             created_at=now,
+            input_requirements=requirements,
         )
-        for factor_id, (lookback, columns) in builtins.items()
+        for factor_id, (lookback, columns, requirements) in builtins.items()
     }
+
+
+def input_requirements_for_factor(saved: SavedFactor) -> tuple[FactorInputRequirement, ...]:
+    if saved.input_requirements:
+        return saved.input_requirements
+    return tuple(
+        _default_requirement_for_column(column)
+        for column in saved.required_columns
+        if column not in {"symbol", "trade_date"}
+    )
+
+
+def _daily_bar_requirements(field: str) -> tuple[FactorInputRequirement, ...]:
+    return (
+        FactorInputRequirement(
+            field=field,
+            target_frequency=Frequency.DAILY,
+            target_calendar=TargetCalendar.TRADING_DAYS,
+            entity_scope=EntityScope.STOCK_CROSS_SECTION,
+            alignment_policy=AlignmentPolicy.EXACT,
+            pit_required=True,
+            coverage_policy=CoveragePolicy(
+                min_required_field_coverage=0.80,
+                min_cross_sectional_coverage=0.50,
+            ),
+            allowed_source_frequencies=(Frequency.DAILY,),
+        ),
+    )
+
+
+def _exact_daily_requirements(field: str) -> tuple[FactorInputRequirement, ...]:
+    return _daily_bar_requirements(field)
+
+
+def _asof_financial_requirements(field: str) -> tuple[FactorInputRequirement, ...]:
+    return (
+        FactorInputRequirement(
+            field=field,
+            target_frequency=Frequency.DAILY,
+            target_calendar=TargetCalendar.TRADING_DAYS,
+            entity_scope=EntityScope.STOCK_CROSS_SECTION,
+            alignment_policy=AlignmentPolicy.ASOF,
+            pit_required=True,
+            coverage_policy=CoveragePolicy(
+                min_required_field_coverage=0.80,
+                min_cross_sectional_coverage=0.50,
+            ),
+            staleness_policy=StalenessPolicy(max_staleness_days=365, p95_staleness_days=270),
+            allowed_source_frequencies=(Frequency.QUARTERLY,),
+        ),
+    )
+
+
+def _default_requirement_for_column(field: str) -> FactorInputRequirement:
+    return FactorInputRequirement(
+        field=field,
+        target_frequency=Frequency.DAILY,
+        target_calendar=TargetCalendar.TRADING_DAYS,
+        entity_scope=EntityScope.STOCK_CROSS_SECTION,
+        alignment_policy=AlignmentPolicy.EXACT,
+        pit_required=True,
+        coverage_policy=CoveragePolicy(
+            min_required_field_coverage=0.80,
+            min_cross_sectional_coverage=0.50,
+        ),
+    )
 
 def _compute_builtin(name: str, bars: pd.DataFrame) -> pd.Series:
     if name == "momentum_20d":

@@ -302,6 +302,76 @@ def test_readiness_reports_repair_action_for_missing_exact_source(tmp_path) -> N
     ]
 
 
+def test_readiness_uses_contract_grid_for_partial_exact_daily_coverage(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    start = date(2024, 1, 1)
+    daily_rows = []
+    daily_basic_rows = []
+    for offset in range(10):
+        trade_date = start + timedelta(days=offset)
+        for symbol, base in [("000001.SZ", 10.0), ("000002.SZ", 20.0)]:
+            daily_rows.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": f"{trade_date:%Y%m%d}",
+                    "open": base + offset,
+                    "high": base + offset + 1,
+                    "low": base + offset - 1,
+                    "close": base + offset,
+                }
+            )
+            if offset in {0, 1}:
+                daily_basic_rows.append(
+                    {
+                        "ts_code": symbol,
+                        "trade_date": f"{trade_date:%Y%m%d}",
+                        "pb": 1.0 + offset,
+                    }
+                )
+    lake.write_parquet(pd.DataFrame(daily_rows), "raw", "tushare/daily")
+    lake.write_parquet(pd.DataFrame(daily_basic_rows), "raw", "tushare/daily_basic")
+
+    readiness = check_factor_input_readiness(
+        lake,
+        factor_name="pb_rank",
+        start="20240101",
+        end="20240110",
+        symbols=["000001.SZ", "000002.SZ"],
+    )
+
+    evidence = readiness["coverage_evidence"][0]
+    repair_plan = readiness["repair_plans"][0]
+    fetch_plan = repair_plan["fetch_plan"]
+
+    assert readiness["status"] == "PARTIAL_COVERAGE"
+    assert readiness["contract_status"] == "PARTIAL_REPAIRABLE"
+    assert readiness["reason"] == "UNSATISFIED_DATA_REQUIREMENT"
+    assert evidence["field"] == "pb"
+    assert evidence["required_cells"] == 20
+    assert evidence["observed_non_null_cells"] == 4
+    assert evidence["field_coverage"] == 0.2
+    assert evidence["status"] == "PARTIAL"
+    assert repair_plan["matched_source"]["source_id"] == "tushare.daily_basic"
+    assert fetch_plan["fetch_shape"] == "marketwide_time_slice"
+    assert fetch_plan["expansion"] == "trade_calendar"
+    assert fetch_plan["estimated_requests"] == 8
+    assert fetch_plan["missing_time_points"] == [
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05",
+        "2024-01-06",
+        "2024-01-07",
+        "2024-01-08",
+        "2024-01-09",
+        "2024-01-10",
+    ]
+    assert readiness["repair_action"]["reason"] == "UNSATISFIED_OBSERVATION_COVERAGE"
+    assert (
+        readiness["repair_action"]["contract_repair_plans"][0]["fetch_plan"]["fetch_shape"]
+        == "marketwide_time_slice"
+    )
+
+
 def test_walk_forward_factor_validation_slices_history(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     start = date(2024, 1, 1)
