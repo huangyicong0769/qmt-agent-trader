@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
 import pandas as pd
 
-from qmt_agent_trader.data.bars import load_daily_bars
+from qmt_agent_trader.data.field_sources import (
+    FieldSourceIndex,
+    FieldSourceSpec,
+    FillPolicy,
+    fetch_columns_for_source,
+)
+from qmt_agent_trader.data.frequency import Frequency
+from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.factors.context import load_factor_context
+from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry
 
 
@@ -197,31 +204,18 @@ def _load_factor_input(
     saved = registry.get_factor(name)
     if saved is None:
         return pd.DataFrame()
-    bar_columns = {
-        "symbol",
-        "trade_date",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "amount",
-        "turnover",
-        "suspended",
-        "limit_up",
-        "limit_down",
-        "st",
-    }
-    if set(saved.required_columns).issubset(bar_columns):
-        return load_daily_bars(lake, end=date)
-    frame = load_factor_context(lake, as_of_date=date)
-    missing = [column for column in saved.required_columns if column not in frame.columns]
-    if missing:
-        raise ValueError(
-            f"factor '{name}' missing fundamentals data columns: {missing}; "
-            "run data fetch for the required Tushare endpoints and build_data_table first"
-        )
-    return frame
+    target_date = _ensure_date(date)
+    lookback = int(saved.lookback)
+    load_start = target_date - timedelta(days=max(lookback, 0))
+    panel, metadata = build_target_frequency_panel(
+        lake,
+        target_frequency=Frequency.DAILY,
+        target_start=load_start,
+        target_end=target_date,
+        required_fields=list(saved.required_columns),
+    )
+    _raise_for_unresolved_factor_inputs(name, metadata)
+    return panel
 
 
 def validate_factor(
@@ -357,19 +351,22 @@ def _factor_validation_frame(
     lookback = int(saved.lookback) if saved is not None else 0
     load_start = start_date - timedelta(days=max(lookback, 0))
     load_end = end_date + timedelta(days=1)
-    bars = load_daily_bars(
+    panel, metadata = build_target_frequency_panel(
         lake,
-        start=f"{load_start:%Y%m%d}",
-        end=f"{load_end:%Y%m%d}",
+        target_frequency=Frequency.DAILY,
+        target_start=f"{load_start:%Y%m%d}",
+        target_end=f"{load_end:%Y%m%d}",
+        required_fields=list(saved.required_columns) if saved is not None else [],
         symbols=symbols,
     )
-    if bars.empty:
+    if panel.empty:
         raise ValueError(
             "no daily bars found in data lake; run data fetch and build_data_table first"
         )
-    factor_frame = compute_factor_frame(bars, name, registry=factor_registry)
+    _raise_for_unresolved_factor_inputs(name, metadata)
+    factor_frame = compute_factor_frame(panel, name, registry=factor_registry)
     validation = factor_frame.merge(
-        _forward_returns(bars),
+        _forward_returns(panel),
         on=["symbol", "trade_date"],
         how="inner",
     )
@@ -379,6 +376,229 @@ def _factor_validation_frame(
     if validation.empty:
         raise ValueError(f"no validation rows between {start_date} and {end_date}")
     return validation
+
+
+def check_factor_input_readiness(
+    lake: DataLake,
+    *,
+    factor_name: str,
+    start: str,
+    end: str,
+    symbols: list[str] | None = None,
+) -> dict[str, Any]:
+    factor_registry = FactorRegistry()
+    saved = factor_registry.get_factor(factor_name)
+    if saved is None:
+        return {
+            "status": "INVALID_REQUEST",
+            "target_frequency": Frequency.DAILY.value,
+            "factor_name": factor_name,
+            "required_columns": [],
+            "field_sources": {},
+            "fill_policy_by_field": {},
+            "coverage_by_field": {},
+            "missing_fields": {},
+            "unresolved_fields": [
+                {
+                    "field": factor_name,
+                    "reason": "factor_not_found",
+                }
+            ],
+            "repair_action": {
+                "type": "fix_request_argument",
+                "reason": "factor_not_found",
+            },
+            "verification_action": {},
+        }
+    panel, metadata = build_target_frequency_panel(
+        lake,
+        target_frequency=Frequency.DAILY,
+        target_start=start,
+        target_end=end,
+        required_fields=list(saved.required_columns),
+        symbols=symbols,
+    )
+    repair_action = _factor_input_repair_action(
+        metadata,
+        symbols=symbols or [],
+        start=start,
+        end=end,
+    )
+    status = _readiness_status(panel, metadata, saved.required_columns)
+    return {
+        "status": status,
+        "target_frequency": Frequency.DAILY.value,
+        "factor_name": factor_name,
+        "required_columns": list(saved.required_columns),
+        "field_sources": metadata["field_sources"],
+        "fill_policy_by_field": {
+            field: source["fill_policy"]
+            for field, source in metadata["field_sources"].items()
+        },
+        "coverage_by_field": metadata["coverage_by_field"],
+        "missing_fields": metadata["missing_fields"],
+        "unresolved_fields": metadata["unresolved_fields"],
+        "repair_action": repair_action,
+        "verification_action": {
+            "function": "check_factor_input_readiness",
+            "input": {
+                "factor_name": factor_name,
+                "start": start,
+                "end": end,
+                "symbols": symbols or [],
+            },
+        },
+    }
+
+
+def _raise_for_unresolved_factor_inputs(name: str, metadata: dict[str, Any]) -> None:
+    unresolved = metadata.get("unresolved_fields") or []
+    if not unresolved:
+        return
+    raise ValueError(
+        f"factor '{name}' has unresolved input fields: {unresolved}; "
+        f"repair_action={_factor_input_repair_action(metadata, symbols=[], start=None, end=None)}"
+    )
+
+
+def _readiness_status(
+    panel: pd.DataFrame,
+    metadata: dict[str, Any],
+    required_columns: tuple[str, ...],
+) -> str:
+    if metadata.get("status") == "NO_DATA" or panel.empty:
+        return "NO_DATA"
+    if metadata.get("unresolved_fields"):
+        return "INVALID_REQUEST"
+    coverage = metadata.get("coverage_by_field", {})
+    data_fields = [
+        field for field in required_columns if field not in {"symbol", "trade_date"}
+    ]
+    if metadata.get("missing_fields"):
+        return "PARTIAL_COVERAGE"
+    if any((coverage.get(field, {}).get("non_null") or 0) == 0 for field in data_fields):
+        return "PARTIAL_COVERAGE"
+    return "OK"
+
+
+def _factor_input_repair_action(
+    metadata: dict[str, Any],
+    *,
+    symbols: list[str],
+    start: str | None,
+    end: str | None,
+) -> dict[str, Any]:
+    unresolved = metadata.get("unresolved_fields") or []
+    if unresolved:
+        event_fields = [
+            item
+            for item in unresolved
+            if item.get("reason") == "event_field_requires_explicit_transform"
+        ]
+        if event_fields:
+            return {
+                "type": "event_transform_required",
+                "tool": None,
+                "reason": "event_field_requires_explicit_transform",
+                "fields": [str(item["field"]) for item in event_fields],
+                "candidates": [
+                    {"field": str(item["field"]), "api_name": item.get("api_name")}
+                    for item in event_fields
+                ],
+            }
+        ambiguous = [item for item in unresolved if item.get("status") == "AMBIGUOUS_FIELD_SOURCE"]
+        if ambiguous:
+            first = ambiguous[0]
+            return {
+                "type": "AMBIGUOUS_FIELD_SOURCE",
+                "tool": "list_tushare_capabilities",
+                "field": first.get("field"),
+                "candidates": first.get("candidates", []),
+            }
+        return {
+            "type": "capability_discovery_required",
+            "tool": "list_tushare_capabilities",
+            "reason": "unknown_field_source",
+            "fields": [str(item.get("field")) for item in unresolved],
+        }
+
+    missing_fields = metadata.get("missing_fields") or {}
+    if not missing_fields:
+        return {}
+    source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
+    grouped: dict[str, tuple[FieldSourceSpec, list[str]]] = {}
+    for field in sorted(missing_fields):
+        source = source_index.best_source_for_field(field, target_frequency=Frequency.DAILY)
+        if source is None:
+            continue
+        _source, fields = grouped.setdefault(source.api_name, (source, []))
+        fields.append(field)
+    fetch_items = [
+        _fetch_item_for_source(
+            source,
+            fields=fields,
+            symbols=symbols,
+            start=start,
+            end=end,
+        )
+        for source, fields in grouped.values()
+    ]
+    return {
+        "type": "fetch_missing_data",
+        "tool": "run_tushare_fetch",
+        "reason": _repair_reason([source for source, _fields in grouped.values()]),
+        "fetch_items": fetch_items,
+        "execute_plan": True,
+    }
+
+
+def _fetch_item_for_source(
+    source: FieldSourceSpec,
+    *,
+    fields: list[str],
+    symbols: list[str],
+    start: str | None,
+    end: str | None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "api_name": source.api_name,
+        "symbols": symbols,
+        "fields": fetch_columns_for_source(source, sorted(fields)),
+    }
+    if start is not None:
+        item["start_date"] = _fetch_start_for_source(source, start)
+    if end is not None:
+        item["end_date"] = end
+    return item
+
+
+def _fetch_start_for_source(source: FieldSourceSpec, start: str) -> str:
+    if source.fill_policy is FillPolicy.EXACT:
+        return start
+    parsed = pd.to_datetime(start).date()
+    return f"{parsed - pd.DateOffset(years=1):%Y%m%d}"
+
+
+def _repair_reason(sources: list[FieldSourceSpec]) -> str:
+    if sources and all(source.fill_policy is FillPolicy.EXACT for source in sources):
+        return "missing_exact_daily_coverage"
+    if sources and all(source.fill_policy is FillPolicy.ASOF_SNAPSHOT for source in sources):
+        return "missing_pit_snapshot_coverage"
+    return "missing_factor_input_coverage"
+
+
+def _ensure_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value)
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return datetime.fromisoformat(text).date()
 
 
 def _validation_result_from_frame(

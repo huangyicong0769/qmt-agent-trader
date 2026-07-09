@@ -2,8 +2,10 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.service import (
+    check_factor_input_readiness,
     compute_factor_to_lake,
     evaluate_factor,
     validate_factor,
@@ -81,6 +83,52 @@ def test_compute_fundamental_factor_to_lake_uses_pit_context(tmp_path) -> None:
     assert output["factor_value"].tolist() == [0.5, 1.0]
 
 
+def test_compute_low_frequency_factor_to_lake_uses_daily_asof_panel(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    rows = []
+    for offset in range(3):
+        trade_date = date(2024, 1, 1) + timedelta(days=offset)
+        for symbol, base in [("000001.SZ", 10.0), ("000002.SZ", 20.0)]:
+            rows.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": f"{trade_date:%Y%m%d}",
+                    "open": base + offset,
+                    "high": base + offset + 1,
+                    "low": base + offset - 1,
+                    "close": base + offset,
+                }
+            )
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": "20231231",
+                    "ann_date": "20240101",
+                    "debt_to_assets": 0.40,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "end_date": "20231231",
+                    "ann_date": "20240101",
+                    "debt_to_assets": 0.70,
+                },
+            ]
+        ),
+        "raw",
+        "tushare/fina_indicator",
+    )
+
+    result = compute_factor_to_lake(lake, name="debt_to_assets_rank", date="20240102")
+
+    assert result.rows == 2
+    assert result.non_null == 2
+    output = lake.read_parquet("gold", "factor_debt_to_assets_rank_20240102")
+    assert output["factor_value"].tolist() == [0.5, 1.0]
+
+
 def test_validate_factor_computes_ic(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     start = date(2024, 1, 1)
@@ -113,6 +161,145 @@ def test_validate_factor_computes_ic(tmp_path) -> None:
 
     assert result.observations == 2
     assert result.non_null == 2
+
+
+def test_validate_low_frequency_factor_uses_daily_asof_panel(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    rows = []
+    for offset in range(4):
+        trade_date = date(2024, 1, 1) + timedelta(days=offset)
+        rows.append(
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": f"{trade_date:%Y%m%d}",
+                "open": 10.0 + offset,
+                "high": 11.0 + offset,
+                "low": 9.0 + offset,
+                "close": 10.0 + offset,
+            }
+        )
+        rows.append(
+            {
+                "ts_code": "000002.SZ",
+                "trade_date": f"{trade_date:%Y%m%d}",
+                "open": 20.0 + offset,
+                "high": 21.0 + offset,
+                "low": 19.0 + offset,
+                "close": 20.0 - offset,
+            }
+        )
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": "20231231",
+                    "ann_date": "20240102",
+                    "debt_to_assets": 0.40,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "end_date": "20231231",
+                    "ann_date": "20240102",
+                    "debt_to_assets": 0.70,
+                },
+            ]
+        ),
+        "raw",
+        "tushare/fina_indicator",
+    )
+
+    result = validate_factor(
+        lake,
+        name="debt_to_assets_rank",
+        start="20240102",
+        end="20240103",
+    )
+
+    assert result.observations == 4
+    assert result.non_null == 4
+
+
+def test_financial_current_wide_alone_does_not_satisfy_pit_factor_input(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    rows = []
+    for offset in range(3):
+        trade_date = date(2024, 1, 1) + timedelta(days=offset)
+        for symbol in ["000001.SZ", "000002.SZ"]:
+            rows.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": f"{trade_date:%Y%m%d}",
+                    "open": 10.0 + offset,
+                    "high": 11.0 + offset,
+                    "low": 9.0 + offset,
+                    "close": 10.0 + offset,
+                }
+            )
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "000001.SZ",
+                    "snapshot_as_of_date": "20240102",
+                    "debt_to_assets": 0.40,
+                }
+            ]
+        ),
+        "silver",
+        "financial_current_wide",
+    )
+
+    readiness = check_factor_input_readiness(
+        lake,
+        factor_name="debt_to_assets_rank",
+        start="20240101",
+        end="20240102",
+    )
+
+    assert readiness["status"] == "PARTIAL_COVERAGE"
+    assert readiness["missing_fields"]["debt_to_assets"]["reason"] == "raw_dataset_missing"
+    assert readiness["repair_action"]["fetch_items"][0]["api_name"] == "fina_indicator"
+
+
+def test_readiness_reports_repair_action_for_missing_exact_source(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    rows = []
+    for offset in range(3):
+        trade_date = date(2024, 1, 1) + timedelta(days=offset)
+        rows.append(
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": f"{trade_date:%Y%m%d}",
+                "open": 10.0 + offset,
+                "high": 11.0 + offset,
+                "low": 9.0 + offset,
+                "close": 10.0 + offset,
+            }
+        )
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+
+    readiness = check_factor_input_readiness(
+        lake,
+        factor_name="dividend_yield",
+        start="20240101",
+        end="20240102",
+        symbols=["000001.SZ"],
+    )
+
+    assert readiness["status"] == "PARTIAL_COVERAGE"
+    assert readiness["fill_policy_by_field"]["dv_ttm"] == "exact"
+    assert readiness["repair_action"]["fetch_items"] == [
+        {
+            "api_name": "daily_basic",
+            "symbols": ["000001.SZ"],
+            "fields": ["ts_code", "trade_date", "dv_ttm"],
+            "start_date": "20240101",
+            "end_date": "20240102",
+        }
+    ]
 
 
 def test_walk_forward_factor_validation_slices_history(tmp_path) -> None:
@@ -191,11 +378,19 @@ def test_validate_factor_loads_only_requested_window_with_lookback(
                 }
             )
 
-    def fake_loader(lake_arg, **kwargs):
+    def fake_panel_builder(lake_arg, **kwargs):
         calls.append(kwargs)
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows), {
+            "unresolved_fields": [],
+            "missing_fields": {},
+            "field_sources": {},
+            "coverage_by_field": {},
+        }
 
-    monkeypatch.setattr("qmt_agent_trader.factors.service.load_daily_bars", fake_loader)
+    monkeypatch.setattr(
+        "qmt_agent_trader.factors.service.build_target_frequency_panel",
+        fake_panel_builder,
+    )
 
     result = validate_factor(
         lake,
@@ -208,8 +403,10 @@ def test_validate_factor_loads_only_requested_window_with_lookback(
     assert result.start == "20240121"
     assert calls == [
         {
-            "start": "20240101",
-            "end": "20240123",
+            "target_frequency": Frequency.DAILY,
+            "target_start": "20240101",
+            "target_end": "20240123",
+            "required_fields": ["symbol", "trade_date", "close"],
             "symbols": ["000001.SZ"],
         }
     ]
@@ -244,12 +441,20 @@ def test_evaluate_factor_loads_bars_once_and_reuses_validation_frame(
                 }
             )
 
-    def fake_loader(lake_arg, **kwargs):
+    def fake_panel_builder(lake_arg, **kwargs):
         nonlocal calls
         calls += 1
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows), {
+            "unresolved_fields": [],
+            "missing_fields": {},
+            "field_sources": {},
+            "coverage_by_field": {},
+        }
 
-    monkeypatch.setattr("qmt_agent_trader.factors.service.load_daily_bars", fake_loader)
+    monkeypatch.setattr(
+        "qmt_agent_trader.factors.service.build_target_frequency_panel",
+        fake_panel_builder,
+    )
 
     bundle = evaluate_factor(
         lake,
