@@ -846,22 +846,29 @@ def _repair_tool_for_missing_columns(columns: list[str]) -> str:
 
 
 def _datasets_for_missing_columns(columns: list[str]) -> list[str]:
-    fundamentals = {
+    daily_basic = {
         "pb",
         "pe",
         "pe_ttm",
+        "dv_ttm",
+        "total_mv",
+        "circ_mv",
+    }
+    fina_indicator = {
         "roe",
         "gross_margin",
         "debt_to_assets",
-        "dv_ttm",
-        "total_mv",
+        "current_ratio",
+        "roic",
     }
     daily = {"open", "high", "low", "close", "vol", "volume", "amount", "turnover"}
     macro = {"pmi", "ppi", "cpi", "macro_cycle_score", "industry_value_added"}
     datasets: list[str] = []
     normalized = {column.lower() for column in columns}
-    if normalized & fundamentals:
-        datasets.append("tushare_fundamentals")
+    if normalized & daily_basic:
+        datasets.append("tushare/daily_basic")
+    if normalized & fina_indicator:
+        datasets.append("tushare/fina_indicator")
     if normalized & daily:
         datasets.append("tushare/daily")
     if normalized & macro:
@@ -924,7 +931,10 @@ run_backtest_tool: AgentTool = tool(
             "和 universe evidence。传入多因子 strategy_spec 时会按 factor weight 生成 "
             "composite score 并在 factor_ids/requested_factor_ids 中披露实际执行因子。"
             " 内置因子: momentum_20d, momentum_60d, reversal_5d, volatility_20d,"
-            " turnover_20d, amount_zscore_20d"
+            " turnover_20d, amount_zscore_20d, size_log_mktcap, pe_ttm_rank,"
+            " pb_rank, dividend_yield, roe_rank, gross_margin_rank,"
+            " debt_to_assets_rank。基本面因子会通过 PIT-safe factor input panel"
+            " 拼接 daily_basic/fina_indicator 等字段；缺数据时返回具体 fetch guidance。"
         ),
         input_schema={
             "type": "object",

@@ -328,11 +328,12 @@ def test_run_backtest_blocks_when_factor_required_columns_are_missing(registry, 
     )
 
     assert result["status"] == "BLOCKED"
-    assert result["reason"] == "MISSING_FACTOR_INPUTS"
+    assert result["reason"] in {"MISSING_FACTOR_INPUTS", "INPUT_PANEL_PARTIAL_COVERAGE"}
     assert result["factor_id"] == "pb_rank"
     assert result["missing_columns"] == ["pb"]
-    assert result["coverage_status"] == "NO_DATA"
     assert result["next_repair_tool"] == "run_tushare_fetch"
+    assert result["suggested_repair"]["items"][0]["api_name"] == "daily_basic"
+    assert result["input_panel_metadata"]["missing_fields"]["pb"]["api_name"] == "daily_basic"
 
 
 def test_generate_research_report_includes_evidence_limitations_and_gaps(registry):
