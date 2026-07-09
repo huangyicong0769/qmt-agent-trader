@@ -71,12 +71,58 @@ def test_backtest_returns_effective_universe_and_symbol_source(registry, lake: D
     assert result["cost_estimate"]["estimated_symbols"] == 2
 
 
-def _write_bars(lake: DataLake) -> None:
+def test_backtest_blocks_broad_universe_with_three_symbols(registry, lake: DataLake) -> None:
+    _write_bars(lake, symbols=["000001.SZ", "000002.SZ", "000003.SZ"])
+
+    result = registry.run_tool(
+        "run_backtest",
+        {
+            "factor_name": "momentum_20d",
+            "start_date": "20240101",
+            "end_date": "20240215",
+            "universe_type": "stock",
+            "top_n": 1,
+        },
+        ToolContext(run_id="backtest-broad-universe-too-small"),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "BROAD_UNIVERSE_TOO_SMALL"
+    assert result["universe_diagnostics"]["selected_count"] == 3
+    assert result["universe_diagnostics"]["evidence_threshold"] == 500
+    assert result["next_repair_action"] == "repair_universe_resolution_or_market_data_coverage"
+
+
+def test_backtest_allows_explicit_small_symbol_list_when_user_requested_it(
+    registry,
+    lake: DataLake,
+) -> None:
+    _write_bars(lake, symbols=["000001.SZ", "000002.SZ", "000003.SZ"])
+
+    result = registry.run_tool(
+        "run_backtest",
+        {
+            "factor_name": "momentum_20d",
+            "start_date": "20240101",
+            "end_date": "20240215",
+            "symbols": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "top_n": 1,
+        },
+        ToolContext(run_id="backtest-explicit-small-list"),
+    )
+
+    assert result["status"] == "completed"
+    assert result["symbols_source"] == "explicit_symbols"
+    assert result["symbols_count"] == 3
+
+
+def _write_bars(lake: DataLake, *, symbols: list[str] | None = None) -> None:
+    symbols = symbols or ["000001.SZ", "000002.SZ"]
     rows = []
     start = date(2024, 1, 1)
     for offset in range(46):
         trade_date = f"{start + timedelta(days=offset):%Y%m%d}"
-        for symbol_index, symbol in enumerate(["000001.SZ", "000002.SZ"]):
+        for symbol_index, symbol in enumerate(symbols):
             rows.append(
                 {
                     "ts_code": symbol,

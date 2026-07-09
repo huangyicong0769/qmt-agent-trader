@@ -54,6 +54,7 @@ _lake: DataLake | None = None
 _sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("strategy_tool_sandbox", default=None)
 _store_var: ContextVar[ExperimentStore | None] = ContextVar("strategy_tool_store", default=None)
 _lake_var: ContextVar[DataLake | None] = ContextVar("strategy_tool_lake", default=None)
+BROAD_UNIVERSE_MIN_SYMBOLS = 500
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
@@ -1725,6 +1726,41 @@ def _resolve_backtest_universe(
             },
         }
     metadata = resolved.get("metadata", {})
+    too_small = _broad_universe_too_small(
+        source=source,
+        spec=spec,
+        symbols_count=len(snapshot_symbols),
+    )
+    if too_small is not None:
+        diagnostics = dict(metadata.get("diagnostics") or {})
+        diagnostics.update(
+            {
+                "requested_universe": spec.universe_id,
+                "selected_count": len(snapshot_symbols),
+                "evidence_threshold": too_small,
+                "root_cause_hint": (
+                    "Check UniverseResolver as-of snapshot semantics and raw daily coverage."
+                ),
+            }
+        )
+        return {
+            "status": "BLOCKED",
+            "payload": {
+                "status": "BLOCKED",
+                "reason": "BROAD_UNIVERSE_TOO_SMALL",
+                "message": (
+                    f"Resolved broad stock universe has {len(snapshot_symbols)} symbols, "
+                    f"below minimum evidence threshold {too_small}."
+                ),
+                "universe_diagnostics": diagnostics,
+                "next_repair_action": "repair_universe_resolution_or_market_data_coverage",
+                "suggested_next_tools": ["inspect_universe", "query_bars", "plan_tushare_fetch"],
+                "universe_resolution": resolved,
+                "universe_mode": "snapshot",
+                "research_only": True,
+                "live_trading_allowed": False,
+            },
+        }
     universe_info = {
         "universe_requested": requested_value,
         "universe_effective": spec.universe_id,
@@ -1859,6 +1895,22 @@ def _rolling_universe_stats(metadata: dict[str, Any]) -> dict[str, Any]:
         "empty_dates": [str(item) for item in metadata.get("empty_dates", [])],
         "changed_dates": int(metadata.get("changed_dates") or 0),
     }
+
+
+def _broad_universe_too_small(
+    *,
+    source: str,
+    spec: UniverseSpec,
+    symbols_count: int,
+) -> int | None:
+    if source != "broad_universe":
+        return None
+    broad_assets = set(spec.asset_types)
+    if not ({"stock"} & broad_assets):
+        return None
+    if symbols_count >= BROAD_UNIVERSE_MIN_SYMBOLS:
+        return None
+    return BROAD_UNIVERSE_MIN_SYMBOLS
 
 
 def _universe_evidence_payload(
