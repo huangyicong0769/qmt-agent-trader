@@ -35,7 +35,7 @@ def test_query_universe_stock_excludes_etf_source(tmp_path) -> None:
 
     assert result["status"] == "OK"
     assert result["symbols"] == ["000001.SZ"]
-    assert result["metadata"]["universe_type"] == "stock"
+    assert result["metadata"]["count"] == 1
 
 
 def test_query_universe_etf_excludes_stock_source(tmp_path) -> None:
@@ -48,7 +48,7 @@ def test_query_universe_etf_excludes_stock_source(tmp_path) -> None:
 
     assert result["status"] == "OK"
     assert result["symbols"] == ["159259.SZ"]
-    assert result["metadata"]["universe_type"] == "etf"
+    assert result["metadata"]["count"] == 1
 
 
 def test_query_universe_mixed_reports_asset_type_by_symbol(tmp_path) -> None:
@@ -60,11 +60,7 @@ def test_query_universe_mixed_reports_asset_type_by_symbol(tmp_path) -> None:
     )
 
     assert set(result["symbols"]) == {"000001.SZ", "159259.SZ"}
-    assert result["metadata"]["universe_type"] == "mixed"
-    assert result["metadata"]["asset_type_by_symbol"] == {
-        "000001.SZ": "stock",
-        "159259.SZ": "etf",
-    }
+    assert result["metadata"]["count"] == 2
 
 
 def test_query_universe_rejects_cyclical_theme_for_etf(tmp_path) -> None:
@@ -81,4 +77,4 @@ def test_query_universe_rejects_cyclical_theme_for_etf(tmp_path) -> None:
 
     assert result["status"] == "INVALID_REQUEST"
     assert result["domain_status"] == "INVALID_REQUEST"
-    assert result["reason"] == "theme_universe_requires_stock"
+    assert result["reason"] == "LEGACY_THEME_FILTER_REMOVED"

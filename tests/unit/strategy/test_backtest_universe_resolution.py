@@ -41,7 +41,11 @@ def test_backtest_requires_explicit_universe_or_symbols(registry) -> None:
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "UNIVERSE_UNSPECIFIED"
     assert result["symbols_source"] == "none"
-    assert result["suggested_next_tools"] == ["query_universe"]
+    assert result["suggested_next_tools"] == [
+        "create_universe_spec",
+        "build_universe",
+        "query_universe",
+    ]
 
 
 def test_backtest_returns_effective_universe_and_symbol_source(registry, lake: DataLake) -> None:

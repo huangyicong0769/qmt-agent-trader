@@ -23,6 +23,7 @@ from qmt_agent_trader.agent.tools.query_tools import build_query_tools
 from qmt_agent_trader.agent.tools.remote_data_tools import build_remote_data_tools
 from qmt_agent_trader.agent.tools.strategy_tools import build_strategy_tools
 from qmt_agent_trader.agent.tools.todo_tools import build_todo_tools
+from qmt_agent_trader.agent.tools.universe_tools import build_universe_tools
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
 
@@ -112,6 +113,7 @@ def build_agent_registry(
     registry.register_all(
         *build_experiment_tools(deps),
         *build_query_tools(deps),
+        *build_universe_tools(deps),
         *build_remote_data_tools(deps),
         *build_basic_tools(deps),
         *build_factor_tools(deps),

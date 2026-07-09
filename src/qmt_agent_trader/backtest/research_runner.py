@@ -24,6 +24,7 @@ class FactorRankResearchConfig:
     max_single_position_pct: float = 0.10
     initial_cash: float = 1_000_000.0
     rebalance_every_n_days: int = 1
+    symbols_by_date: dict[str, list[str]] | None = None
     base_cost_config: CostConfig = field(default_factory=CostConfig)
 
 
@@ -104,6 +105,7 @@ class FactorRankResearchRunner:
                 continue
             execution_date = dates[execution_index]
             factors = factor_by_date.get(signal_date)
+            factors = self._filter_factors_for_universe(factors, signal_date)
             if factors is None or factors.empty:
                 continue
             day_bars = self._bars_on(execution_date)
@@ -200,6 +202,19 @@ class FactorRankResearchRunner:
 
     def _bars_on(self, trade_date: object) -> pd.DataFrame:
         return self._bars_by_date_symbol.get(trade_date, pd.DataFrame(columns=self.bars.columns))
+
+    def _filter_factors_for_universe(
+        self,
+        factors: pd.DataFrame | None,
+        signal_date: object,
+    ) -> pd.DataFrame | None:
+        if factors is None or factors.empty or not self.config.symbols_by_date:
+            return factors
+        key = f"{signal_date:%Y%m%d}" if hasattr(signal_date, "strftime") else str(signal_date)
+        symbols = self.config.symbols_by_date.get(key)
+        if symbols is None:
+            return factors.iloc[0:0].copy()
+        return factors[factors["symbol"].astype(str).isin(symbols)].copy()
 
     @staticmethod
     def _bar_for_symbol(day_bars: pd.DataFrame, symbol: str) -> pd.Series | None:

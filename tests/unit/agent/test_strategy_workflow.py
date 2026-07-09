@@ -258,7 +258,7 @@ def test_ad_hoc_multi_factor_strategy_spec_without_id_is_backtestable(registry, 
     assert result["execution_backend"] == "factor_rank_composite_adapter"
 
 
-def test_run_backtest_resolves_cyclical_universe_when_symbols_are_omitted(registry, lake):
+def test_run_backtest_rejects_removed_cyclical_universe_when_symbols_are_omitted(registry, lake):
     _write_multi_factor_bars(lake)
     lake.write_parquet(
         pd.DataFrame(
@@ -294,10 +294,11 @@ def test_run_backtest_resolves_cyclical_universe_when_symbols_are_omitted(regist
         context,
     )
 
-    assert result["status"] == "completed"
-    assert result["symbols"] == ["000001.SZ", "000002.SZ"]
-    assert result["universe_resolution"]["metadata"]["theme"] == "cyclical"
-    assert result["execution_backend"] == "factor_rank_composite_adapter"
+    assert result["status"] == "INVALID_REQUEST"
+    assert result["reason"] == "LEGACY_UNIVERSE_NAME_REMOVED"
+    assert result["message"] == (
+        "Legacy thematic universe names have been removed. Use universe_id or universe_spec."
+    )
 
 
 def test_empty_strategy_spec_returns_invalid_request(registry):

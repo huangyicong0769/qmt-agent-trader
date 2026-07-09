@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -34,6 +34,8 @@ class StrategyBacktestConfig(BaseModel):
     top_n: int = 20
     max_single_position_pct: float = 0.10
     symbols: list[str] = Field(default_factory=list)
+    symbols_by_date: dict[str, list[str]] | None = None
+    universe_mode: Literal["snapshot", "rolling"] = "snapshot"
     strategy_spec: StrategySpec | None = None
     factor_name: str | None = None
 
@@ -93,11 +95,12 @@ def run_strategy_backtest(
             "strategy has no factor to backtest",
         )
 
+    load_symbols = config.symbols or _symbols_from_date_map(config.symbols_by_date)
     bars = load_daily_bars(
         lake,
         start=config.start_date,
         end=config.end_date,
-        symbols=config.symbols or None,
+        symbols=load_symbols or None,
     )
     if bars.empty:
         return _error(
@@ -129,6 +132,7 @@ def run_strategy_backtest(
             top_n=config.top_n,
             max_single_position_pct=config.max_single_position_pct,
             initial_cash=config.initial_cash,
+            symbols_by_date=config.symbols_by_date,
         ),
     )
     scenario = SensitivityScenario(
@@ -225,6 +229,17 @@ def _first_factor_id(spec: StrategySpec | None) -> str | None:
     if spec is None or not spec.factors:
         return None
     return spec.factors[0].factor_id
+
+
+def _symbols_from_date_map(symbols_by_date: dict[str, list[str]] | None) -> list[str]:
+    if not symbols_by_date:
+        return []
+    symbols: list[str] = []
+    for date_symbols in symbols_by_date.values():
+        for symbol in date_symbols:
+            if symbol not in symbols:
+                symbols.append(symbol)
+    return symbols
 
 
 def _factor_ids(spec: StrategySpec | None) -> list[str]:

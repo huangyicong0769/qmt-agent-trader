@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from datetime import date, datetime
 from pathlib import Path
 from pprint import pformat
-from typing import Any
+from typing import Any, Literal, cast
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
@@ -43,6 +43,10 @@ from qmt_agent_trader.strategy.models import (
     strategy_spec_from_agent_spec,
 )
 from qmt_agent_trader.strategy.registry import StrategyRegistry
+from qmt_agent_trader.universe.builtins import broad_universe_spec
+from qmt_agent_trader.universe.models import UniverseSpec
+from qmt_agent_trader.universe.registry import UniverseRegistry, registry_root_from_payload
+from qmt_agent_trader.universe.resolver import UniverseResolver
 
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
@@ -522,48 +526,35 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     initial_cash = float(input_data.get("initial_cash", 1_000_000))
     top_n = int(input_data.get("top_n", strategy_spec.portfolio.top_n if strategy_spec else 20))
     symbols = _requested_symbols(input_data)
-    resolved_universe: dict[str, Any] | None = None
-    universe_info = _resolve_backtest_universe_inputs(
+    universe_state = _resolve_backtest_universe(
+        lake,
         input_data,
         strategy_spec=strategy_spec,
         saved_strategy=saved_strategy,
         symbols=symbols,
+        start_date=str(start_date),
+        end_date=str(end_date),
     )
-    if universe_info["blocked"]:
-        return {
-            "status": "BLOCKED",
-            "reason": "UNIVERSE_UNSPECIFIED",
-            "message": (
-                "Backtest would use a default broad universe. Pass symbols, universe, "
-                "or allow_default_universe=true explicitly."
-            ),
-            "suggested_next_tools": ["query_universe"],
-            **_universe_evidence_payload(universe_info, symbols, resolved_universe),
-        }
-    if not symbols and universe_info["universe_effective"] and _is_cyclical_universe(
-        str(universe_info["universe_effective"])
-    ):
-        universe_as_of = str(
-            input_data.get("as_of_date")
-            or input_data.get("end_date")
-            or _today_yyyymmdd()
-        )
-        resolved_universe = _resolve_cyclical_symbols_for_backtest(
-            lake,
-            as_of=universe_as_of,
-        )
-        if resolved_universe.get("status") != "OK":
-            return {
-                "status": "BLOCKED",
-                "reason": "UNIVERSE_NOT_READY",
-                "message": "cyclical universe could not be resolved for backtest",
-                "universe_resolution": resolved_universe,
-                "next_repair_tool": resolved_universe.get("metadata", {}).get("next_repair_tool"),
-                **_universe_evidence_payload(universe_info, symbols, resolved_universe),
-            }
-        symbols = [str(item) for item in resolved_universe.get("symbols", [])]
-        universe_info["symbols_source"] = "resolved_universe"
-        universe_info["symbols_count"] = len(symbols)
+    if universe_state["status"] != "OK":
+        payload = dict(universe_state["payload"])
+        if strategy_spec is not None:
+            payload.setdefault("strategy_id", strategy_spec.strategy_id)
+        elif strategy_id:
+            payload.setdefault("strategy_id", str(strategy_id))
+        if saved_strategy is not None and not saved_strategy.code_path:
+            warnings = list(payload.get("warnings") or [])
+            warning = "strategy has no generated code; backtest used canonical adapter"
+            if warning not in warnings:
+                warnings.append(warning)
+            payload["warnings"] = warnings
+            payload["saved_in_registry"] = True
+            payload["generated_code"] = False
+            payload["static_checks"] = "NOT_RUN"
+        return payload
+    symbols = universe_state["symbols"]
+    symbols_by_date = universe_state["symbols_by_date"]
+    universe_info = universe_state["universe_info"]
+    resolved_universe = universe_state["resolved_universe"]
     code_path = str(input_data.get("code_path") or "")
     if code_path:
         issues = static_check_strategy_file(Path(code_path))
@@ -632,6 +623,11 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         slippage_bps=strategy_spec.execution.slippage_bps,
         execution_delay_days=strategy_spec.execution.execution_delay_days,
         symbols=symbols,
+        symbols_by_date=symbols_by_date,
+        universe_mode=cast(
+            Literal["snapshot", "rolling"],
+            str(universe_info.get("universe_mode") or "snapshot"),
+        ),
     )
     cost_estimate = _backtest_cost_estimate(config)
     timeout_seconds_used = _backtest_timeout_seconds_for_call(input_data, context)
@@ -921,10 +917,11 @@ run_backtest_tool: AgentTool = tool(
         name="run_backtest",
         description=(
             "运行因子排名策略的 research-only 回测。必须提供 factor_name、strategy_spec "
-            "或已保存的 strategy_id，并传入 symbols/universe；如确需默认大 universe，"
-            "必须显式 allow_default_universe=true。返回 total_return, sharpe, "
+            "或已保存的 strategy_id，并传入 symbols、universe_id、universe_spec "
+            "或 broad universe_type；如确需默认大 universe，必须显式 "
+            "allow_default_universe=true。返回 total_return, sharpe, "
             "max_drawdown, turnover, trade_count，并披露 symbols_source、symbols_count "
-            "和 universe_effective。传入多因子 strategy_spec 时会按 factor weight 生成 "
+            "和 universe evidence。传入多因子 strategy_spec 时会按 factor weight 生成 "
             "composite score 并在 factor_ids/requested_factor_ids 中披露实际执行因子。"
             " 内置因子: momentum_20d, momentum_60d, reversal_5d, volatility_20d,"
             " turnover_20d, amount_zscore_20d"
@@ -944,9 +941,15 @@ run_backtest_tool: AgentTool = tool(
                 "initial_cash": {"type": "number"},
                 "top_n": {"type": "integer"},
                 "universe": {"type": "string"},
+                "universe_id": {"type": "string"},
+                "universe_spec": {"type": "object"},
+                "universe_mode": {"type": "string"},
+                "universe_type": {"type": "string"},
                 "as_of_date": {"type": "string"},
                 "allow_default_universe": {"type": "boolean"},
                 "universe_filters": {"type": "object"},
+                "include_exclusions": {"type": "boolean"},
+                "limit": {"type": "integer"},
                 "rebalance_frequency": {"type": "string"},
             },
             "anyOf": [
@@ -1557,64 +1560,294 @@ def _factor_registry_root(lake: DataLake) -> Path:
     return lake.root.parent / "factors"
 
 
-def _is_cyclical_universe(universe: str) -> bool:
-    text = universe.lower()
-    return "cyclical" in text or "顺周期" in universe
-
-
-def _resolve_cyclical_symbols_for_backtest(lake: DataLake, *, as_of: str) -> dict[str, Any]:
-    from qmt_agent_trader.agent.tools.query_tools import build_theme_universe
-
-    return build_theme_universe(
-        lake,
-        as_of=as_of,
-        theme="cyclical",
-        exclude_st=True,
-        exclude_suspended=True,
-        min_listed_days=60,
-    )
-
-
 def _strategy_registry() -> StrategyRegistry:
     lake = _get_lake()
     root = lake.root.parent / "strategies" if lake is not None else Path("data/strategies")
     return StrategyRegistry(root)
 
 
-def _resolve_backtest_universe_inputs(
+def _resolve_backtest_universe(
+    lake: DataLake,
     input_data: dict[str, Any],
     *,
     strategy_spec: StrategySpec | None,
     saved_strategy: SavedStrategy | None,
     symbols: list[str],
+    start_date: str,
+    end_date: str,
 ) -> dict[str, Any]:
-    requested = input_data.get("universe")
-    effective: str | None = None
-    source = "none"
     if symbols:
-        source = "explicit_symbols"
-        effective = str(
-            requested
-            or (strategy_spec.universe if strategy_spec is not None else "explicit_symbols")
+        universe_info: dict[str, Any] = {
+            "universe_requested": input_data.get("universe"),
+            "universe_effective": input_data.get("universe") or "explicit_symbols",
+            "symbols_source": "explicit_symbols",
+            "symbols_count": len(symbols),
+            "universe_mode": "snapshot",
+            "universe_resolve_dates": [],
+        }
+        return {
+            "status": "OK",
+            "symbols": symbols,
+            "symbols_by_date": None,
+            "universe_info": universe_info,
+            "resolved_universe": None,
+        }
+
+    requested_value = _first_requested_universe_value(
+        input_data,
+        strategy_spec=strategy_spec,
+        saved_strategy=saved_strategy,
+    )
+    if requested_value is not None and _is_removed_legacy_universe_name(str(requested_value)):
+        return {
+            "status": "INVALID_REQUEST",
+            "payload": {
+                "status": "INVALID_REQUEST",
+                "reason": "LEGACY_UNIVERSE_NAME_REMOVED",
+                "message": (
+                    "Legacy thematic universe names have been removed. "
+                    "Use universe_id or universe_spec."
+                ),
+                "universe_requested": str(requested_value),
+                "research_only": True,
+                "live_trading_allowed": False,
+            },
+        }
+
+    spec_result = _backtest_universe_spec(
+        input_data,
+        lake,
+        requested_value=requested_value,
+        strategy_spec=strategy_spec,
+        saved_strategy=saved_strategy,
+    )
+    if spec_result.get("status") != "OK":
+        return {"status": spec_result.get("status", "BLOCKED"), "payload": spec_result}
+
+    spec = spec_result["spec"]
+    source = str(spec_result["source"])
+    universe_mode = str(input_data.get("universe_mode") or input_data.get("mode") or spec.mode)
+    if universe_mode not in {"snapshot", "rolling"}:
+        return {
+            "status": "INVALID_REQUEST",
+            "payload": {
+                "status": "INVALID_REQUEST",
+                "reason": "UNSUPPORTED_UNIVERSE_MODE",
+                "allowed_modes": ["snapshot", "rolling"],
+            },
+        }
+    resolver = UniverseResolver(lake)
+    if universe_mode == "rolling":
+        resolved = resolver.build(
+            spec,
+            mode="rolling",
+            start_date=start_date,
+            end_date=end_date,
+            rebalance_frequency=str(
+                input_data.get("rebalance_frequency") or spec.rebalance_frequency
+            ),
+            limit=int(input_data.get("limit", 2000)),
+            include_exclusions=bool(input_data.get("include_exclusions", False)),
         )
-    elif requested:
-        source = "input_universe"
-        effective = str(requested)
-    elif saved_strategy is not None and saved_strategy.spec.universe:
-        source = "saved_strategy_spec"
-        effective = saved_strategy.spec.universe
-    elif strategy_spec is not None and strategy_spec.universe:
-        source = "strategy_spec"
-        effective = strategy_spec.universe
-    elif bool(input_data.get("allow_default_universe")):
-        source = "default_universe"
-        effective = "stock_etf"
+        if resolved.get("status") != "OK":
+            return {"status": str(resolved.get("status")), "payload": resolved}
+        metadata = resolved.get("metadata", {})
+        empty_dates = [str(item) for item in metadata.get("empty_dates", [])]
+        if empty_dates:
+            return {
+                "status": "BLOCKED",
+                "payload": {
+                    "status": "BLOCKED",
+                    "reason": "ROLLING_UNIVERSE_EMPTY",
+                    "empty_dates": empty_dates,
+                    "suggested_next_tools": ["inspect_universe", "build_universe", "query_bars"],
+                    "universe_resolution": resolved,
+                    "universe_mode": "rolling",
+                    "rolling_universe_stats": _rolling_universe_stats(metadata),
+                },
+            }
+        rolling_symbols = {
+            str(date_key): [str(symbol) for symbol in date_symbols]
+            for date_key, date_symbols in resolved.get("rolling_symbols", {}).items()
+        }
+        symbol_union = _symbols_union(rolling_symbols)
+        universe_info = {
+            "universe_requested": requested_value,
+            "universe_effective": spec.universe_id,
+            "universe_id": spec.universe_id,
+            "universe_spec_fingerprint": metadata.get("spec_fingerprint"),
+            "symbols_source": "universe_rolling",
+            "symbols_count": len(symbol_union),
+            "universe_mode": "rolling",
+            "universe_resolve_dates": metadata.get("resolve_dates", []),
+            "rolling_universe_stats": _rolling_universe_stats(metadata),
+            "source": source,
+        }
+        return {
+            "status": "OK",
+            "symbols": symbol_union,
+            "symbols_by_date": rolling_symbols,
+            "universe_info": universe_info,
+            "resolved_universe": resolved,
+        }
+
+    as_of_date = str(input_data.get("as_of_date") or end_date)
+    resolved = resolver.build(
+        spec,
+        mode="snapshot",
+        as_of_date=as_of_date,
+        limit=int(input_data.get("limit", 2000)),
+        include_exclusions=bool(input_data.get("include_exclusions", False)),
+    )
+    if resolved.get("status") != "OK":
+        return {"status": str(resolved.get("status")), "payload": resolved}
+    snapshot_symbols = [str(symbol) for symbol in resolved.get("symbols", [])]
+    if not snapshot_symbols:
+        return {
+            "status": "BLOCKED",
+            "payload": {
+                "status": "BLOCKED",
+                "reason": "UNIVERSE_EMPTY",
+                "message": "Resolved snapshot universe contains zero symbols.",
+                "suggested_next_tools": ["inspect_universe", "build_universe", "query_bars"],
+                "universe_resolution": resolved,
+                "universe_mode": "snapshot",
+            },
+        }
+    metadata = resolved.get("metadata", {})
+    universe_info = {
+        "universe_requested": requested_value,
+        "universe_effective": spec.universe_id,
+        "universe_id": spec.universe_id,
+        "universe_spec_fingerprint": metadata.get("spec_fingerprint"),
+        "symbols_source": "universe_snapshot",
+        "symbols_count": len(snapshot_symbols),
+        "universe_mode": "snapshot",
+        "universe_resolve_dates": [metadata.get("as_of_date")],
+        "rolling_universe_stats": None,
+        "source": source,
+    }
     return {
-        "blocked": not symbols and effective is None,
-        "universe_requested": requested,
-        "universe_effective": effective,
-        "symbols_source": source,
-        "symbols_count": len(symbols) if symbols else 0,
+        "status": "OK",
+        "symbols": snapshot_symbols,
+        "symbols_by_date": None,
+        "universe_info": universe_info,
+        "resolved_universe": resolved,
+    }
+
+
+def _first_requested_universe_value(
+    input_data: dict[str, Any],
+    *,
+    strategy_spec: StrategySpec | None,
+    saved_strategy: SavedStrategy | None,
+) -> Any:
+    if input_data.get("universe") is not None:
+        return input_data.get("universe")
+    if input_data.get("universe_type") is not None:
+        return input_data.get("universe_type")
+    if strategy_spec is not None and strategy_spec.universe:
+        return strategy_spec.universe
+    if saved_strategy is not None and saved_strategy.spec.universe:
+        return saved_strategy.spec.universe
+    return None
+
+
+def _backtest_universe_spec(
+    input_data: dict[str, Any],
+    lake: DataLake,
+    *,
+    requested_value: Any,
+    strategy_spec: StrategySpec | None,
+    saved_strategy: SavedStrategy | None,
+) -> dict[str, Any]:
+    if input_data.get("universe_id"):
+        registry = UniverseRegistry(registry_root_from_payload(input_data, lake))
+        spec = registry.load(str(input_data["universe_id"]))
+        if spec is None:
+            return {
+                "status": "BLOCKED",
+                "reason": "UNIVERSE_NOT_FOUND",
+                "universe_id": str(input_data["universe_id"]),
+                "suggested_next_tools": ["list_universes", "create_universe_spec"],
+            }
+        return {"status": "OK", "spec": spec, "source": "universe_id"}
+    if input_data.get("universe_spec") is not None:
+        try:
+            return {
+                "status": "OK",
+                "spec": UniverseSpec.model_validate(input_data["universe_spec"]),
+                "source": "universe_spec",
+            }
+        except Exception as exc:
+            return {
+                "status": "INVALID_REQUEST",
+                "reason": "INVALID_UNIVERSE_SPEC",
+                "message": str(exc),
+            }
+    broad_value = requested_value
+    if broad_value is None and saved_strategy is not None and saved_strategy.spec.universe:
+        broad_value = saved_strategy.spec.universe
+    if broad_value is None and strategy_spec is not None and strategy_spec.universe:
+        broad_value = strategy_spec.universe
+    if broad_value is None and bool(input_data.get("allow_default_universe")):
+        broad_value = "stock_etf"
+    if broad_value is None:
+        return {
+            "status": "BLOCKED",
+            "reason": "UNIVERSE_UNSPECIFIED",
+            "message": (
+                "Backtest would use a default broad universe. Pass symbols, universe_id, "
+                "universe_spec, universe_type, or allow_default_universe=true explicitly."
+            ),
+            "suggested_next_tools": ["create_universe_spec", "build_universe", "query_universe"],
+            "universe_requested": None,
+            "universe_effective": None,
+            "symbols_source": "none",
+            "symbols_count": 0,
+            "symbols_sample": [],
+            "universe_resolution": None,
+        }
+    try:
+        return {
+            "status": "OK",
+            "spec": broad_universe_spec(
+                str(broad_value),
+                mode=str(input_data.get("universe_mode") or input_data.get("mode") or "snapshot"),
+                rebalance_frequency=str(input_data.get("rebalance_frequency") or "daily"),
+            ),
+            "source": "broad_universe",
+        }
+    except ValueError:
+        return {
+            "status": "INVALID_REQUEST",
+            "reason": "UNSUPPORTED_UNIVERSE_REFERENCE",
+            "message": "Use universe_id, universe_spec, or broad universe values stock/etf/mixed.",
+            "universe_requested": str(broad_value),
+        }
+
+
+def _is_removed_legacy_universe_name(value: str) -> bool:
+    normalized = value.strip().lower()
+    return "cyclical" in normalized or "顺周期" in value or normalized.startswith("theme:")
+
+
+def _symbols_union(symbols_by_date: dict[str, list[str]]) -> list[str]:
+    symbols: list[str] = []
+    for date_symbols in symbols_by_date.values():
+        for symbol in date_symbols:
+            if symbol not in symbols:
+                symbols.append(symbol)
+    return symbols
+
+
+def _rolling_universe_stats(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "min_count": int(metadata.get("min_count") or 0),
+        "max_count": int(metadata.get("max_count") or 0),
+        "mean_count": float(metadata.get("mean_count") or 0.0),
+        "empty_dates": [str(item) for item in metadata.get("empty_dates", [])],
+        "changed_dates": int(metadata.get("changed_dates") or 0),
     }
 
 
@@ -1626,9 +1859,14 @@ def _universe_evidence_payload(
     return {
         "universe_requested": universe_info.get("universe_requested"),
         "universe_effective": universe_info.get("universe_effective"),
+        "universe_mode": universe_info.get("universe_mode", "snapshot"),
+        "universe_id": universe_info.get("universe_id"),
+        "universe_spec_fingerprint": universe_info.get("universe_spec_fingerprint"),
+        "universe_resolve_dates": universe_info.get("universe_resolve_dates", []),
         "symbols_source": universe_info.get("symbols_source", "none"),
         "symbols_count": len(symbols) if symbols else int(universe_info.get("symbols_count") or 0),
         "symbols_sample": symbols[:10],
+        "rolling_universe_stats": universe_info.get("rolling_universe_stats"),
         "universe_resolution": resolved_universe,
     }
 

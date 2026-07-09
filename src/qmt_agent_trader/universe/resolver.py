@@ -1,0 +1,675 @@
+"""Point-in-time universe resolver for snapshot and rolling modes."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from datetime import date, datetime
+from typing import Any
+
+import pandas as pd
+
+from qmt_agent_trader.data.bars import normalize_tushare_daily
+from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
+from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
+from qmt_agent_trader.universe.validators import normalize_symbol
+
+
+class UniverseResolver:
+    def __init__(self, lake: DataLake) -> None:
+        self.lake = lake
+
+    def build(
+        self,
+        spec: UniverseSpec,
+        *,
+        as_of_date: str | None = None,
+        mode: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        rebalance_frequency: str | None = None,
+        limit: int = 2000,
+        include_exclusions: bool = False,
+    ) -> dict[str, Any]:
+        requested_mode = mode or spec.mode
+        if requested_mode == "snapshot":
+            resolve_date = _date_key(as_of_date or end_date or _latest_available_date(self.lake))
+            return self._build_snapshot(
+                spec,
+                as_of_date=resolve_date,
+                limit=limit,
+                include_exclusions=include_exclusions,
+            )
+        if requested_mode == "rolling":
+            if not start_date or not end_date:
+                return {
+                    "status": "INVALID_REQUEST",
+                    "reason": "ROLLING_REQUIRES_START_AND_END_DATE",
+                    "rolling_symbols": {},
+                    "metadata": {"empty_dates": []},
+                }
+            return self._build_rolling(
+                spec,
+                start_date=_date_key(start_date),
+                end_date=_date_key(end_date),
+                rebalance_frequency=rebalance_frequency or spec.rebalance_frequency,
+                limit=limit,
+                include_exclusions=include_exclusions,
+            )
+        return {
+            "status": "INVALID_REQUEST",
+            "reason": "UNSUPPORTED_UNIVERSE_MODE",
+            "allowed_modes": ["snapshot", "rolling"],
+        }
+
+    def _build_snapshot(
+        self,
+        spec: UniverseSpec,
+        *,
+        as_of_date: str,
+        limit: int,
+        include_exclusions: bool,
+    ) -> dict[str, Any]:
+        symbols, excluded = self._resolve_for_date(spec, as_of_date=as_of_date)
+        symbols = _apply_limit(symbols, spec=spec, limit=limit)
+        metadata: dict[str, Any] = {
+            "count": len(symbols),
+            "as_of_date": as_of_date,
+            "fingerprint": fingerprint_symbols(spec, mode="snapshot", symbols=symbols),
+            "spec_fingerprint": fingerprint_spec(spec),
+            "excluded_symbols": excluded if include_exclusions else [],
+        }
+        return {
+            "status": "OK",
+            "mode": "snapshot",
+            "symbols": symbols,
+            "metadata": metadata,
+        }
+
+    def _build_rolling(
+        self,
+        spec: UniverseSpec,
+        *,
+        start_date: str,
+        end_date: str,
+        rebalance_frequency: str,
+        limit: int,
+        include_exclusions: bool,
+    ) -> dict[str, Any]:
+        resolve_dates = self._rebalance_dates(
+            spec,
+            start_date=start_date,
+            end_date=end_date,
+            frequency=rebalance_frequency,
+        )
+        rolling_symbols: dict[str, list[str]] = {}
+        excluded_by_date: dict[str, list[dict[str, str]]] = {}
+        for resolve_date in resolve_dates:
+            symbols, excluded = self._resolve_for_date(spec, as_of_date=resolve_date)
+            rolling_symbols[resolve_date] = _apply_limit(symbols, spec=spec, limit=limit)
+            if include_exclusions:
+                excluded_by_date[resolve_date] = excluded
+
+        counts = [len(symbols) for symbols in rolling_symbols.values()]
+        empty_dates = [item for item, symbols in rolling_symbols.items() if not symbols]
+        changed_dates = 0
+        previous: list[str] | None = None
+        for symbols in rolling_symbols.values():
+            if previous is not None and symbols != previous:
+                changed_dates += 1
+            previous = symbols
+        metadata: dict[str, Any] = {
+            "resolve_dates": list(rolling_symbols),
+            "min_count": min(counts) if counts else 0,
+            "max_count": max(counts) if counts else 0,
+            "mean_count": sum(counts) / len(counts) if counts else 0.0,
+            "fingerprint": fingerprint_symbols(
+                spec,
+                mode="rolling",
+                rolling_symbols=rolling_symbols,
+            ),
+            "spec_fingerprint": fingerprint_spec(spec),
+            "empty_dates": empty_dates,
+            "changed_dates": changed_dates,
+        }
+        if include_exclusions:
+            metadata["excluded_symbols_by_date"] = excluded_by_date
+        return {
+            "status": "OK",
+            "mode": "rolling",
+            "rolling_symbols": rolling_symbols,
+            "metadata": metadata,
+        }
+
+    def _resolve_for_date(
+        self,
+        spec: UniverseSpec,
+        *,
+        as_of_date: str,
+    ) -> tuple[list[str], list[dict[str, str]]]:
+        recent = self._load_recent_bars(as_of_date, spec.asset_types)
+        stock_basic = self._stock_basic()
+        candidates = self._select_candidates(spec, recent, stock_basic, as_of_date=as_of_date)
+        candidates = self._attach_metrics(candidates, spec, as_of_date=as_of_date)
+        selected: list[dict[str, Any]] = []
+        excluded: list[dict[str, str]] = []
+        for row in candidates.to_dict(orient="records"):
+            symbol = str(row.get("symbol", ""))
+            reason = self._exclusion_reason(spec, row, as_of_date=as_of_date)
+            if reason is not None:
+                excluded.append({"symbol": symbol, "reason": reason})
+                continue
+            selected.append(row)
+        selected_frame = pd.DataFrame(selected)
+        selected_frame = self._apply_rules(selected_frame, spec.selection.rules)
+        selected_frame = self._apply_ranking(selected_frame, spec)
+        if selected_frame.empty:
+            return [], excluded
+        symbols = [str(item) for item in selected_frame["symbol"].astype(str).tolist()]
+        return sorted(dict.fromkeys(symbols)), excluded
+
+    def _select_candidates(
+        self,
+        spec: UniverseSpec,
+        recent: pd.DataFrame,
+        stock_basic: pd.DataFrame,
+        *,
+        as_of_date: str,
+    ) -> pd.DataFrame:
+        selection = spec.selection
+        if selection.mode == "explicit_symbols":
+            return _candidate_frame_for_symbols(selection.symbols, recent, stock_basic)
+        if selection.mode == "industry":
+            stock_matches = stock_basic[
+                stock_basic.get("industry", pd.Series(dtype=object)).astype(str).isin(
+                    selection.industries
+                )
+            ]
+            return _candidate_frame_for_symbols(
+                stock_matches.get("ts_code", pd.Series(dtype=object)).astype(str).tolist(),
+                recent,
+                stock_basic,
+            )
+        if selection.mode == "theme":
+            return self._theme_candidates(selection.theme_concepts, recent, stock_basic)
+        if selection.mode == "index_constituents":
+            return _candidate_frame_for_symbols(
+                self._index_constituents(selection.index_codes, as_of_date),
+                recent,
+                stock_basic,
+            )
+        if selection.mode == "etf_category":
+            return self._etf_category_candidates(selection.theme_concepts, recent)
+        return _merge_recent_and_stock_basic(recent, stock_basic)
+
+    def _theme_candidates(
+        self,
+        concepts: list[str],
+        recent: pd.DataFrame,
+        stock_basic: pd.DataFrame,
+    ) -> pd.DataFrame:
+        if stock_basic.empty or not concepts:
+            return _merge_recent_and_stock_basic(recent, stock_basic).iloc[0:0].copy()
+        haystack = (
+            stock_basic.get("name", pd.Series(dtype=object)).astype(str)
+            + " "
+            + stock_basic.get("industry", pd.Series(dtype=object)).astype(str)
+        )
+        mask = pd.Series(False, index=stock_basic.index)
+        for concept in concepts:
+            mask = mask | haystack.str.contains(concept, case=False, regex=False, na=False)
+        symbols = stock_basic.loc[mask, "ts_code"].astype(str).tolist()
+        return _candidate_frame_for_symbols(symbols, recent, stock_basic)
+
+    def _etf_category_candidates(self, categories: list[str], recent: pd.DataFrame) -> pd.DataFrame:
+        path = self.lake.dataset_path("raw", "tushare/fund_basic")
+        if not path.exists() or not categories:
+            return recent[recent.get("asset_type", "") == "etf"].copy()
+        fund_basic = self.lake.read_parquet("raw", "tushare/fund_basic")
+        if fund_basic.empty or "ts_code" not in fund_basic.columns:
+            return recent.iloc[0:0].copy()
+        fields = [
+            field
+            for field in ("fund_type", "category", "investment_type")
+            if field in fund_basic.columns
+        ]
+        if not fields:
+            return recent.iloc[0:0].copy()
+        haystack = pd.Series("", index=fund_basic.index)
+        for field in fields:
+            haystack = haystack + " " + fund_basic[field].astype(str)
+        mask = pd.Series(False, index=fund_basic.index)
+        for category in categories:
+            mask = mask | haystack.str.contains(category, case=False, regex=False, na=False)
+        return _candidate_frame_for_symbols(
+            fund_basic.loc[mask, "ts_code"].astype(str).tolist(),
+            recent,
+            pd.DataFrame(),
+        )
+
+    def _exclusion_reason(
+        self,
+        spec: UniverseSpec,
+        row: dict[str, Any],
+        *,
+        as_of_date: str,
+    ) -> str | None:
+        symbol = str(row.get("symbol", ""))
+        if not symbol:
+            return "missing_symbol"
+        filters = spec.filters
+        if filters.require_bar_coverage and not bool(row.get("has_bar_coverage", False)):
+            return "no_bar_coverage"
+        list_status = str(row.get("list_status", "L"))
+        if list_status and list_status not in {"L", "上市", "None", "nan"}:
+            return "not_listed"
+        list_date_raw = row.get("list_date")
+        if list_date_raw not in {None, "", "nan"}:
+            listed_days = (_parse_date(as_of_date) - _parse_date(str(list_date_raw))).days
+            if listed_days < 0:
+                return "not_yet_listed"
+            if listed_days < filters.min_listed_days:
+                return "listed_days_below_minimum"
+        if filters.exclude_st and (
+            bool(row.get("st", False)) or "ST" in str(row.get("name", "")).upper()
+        ):
+            return "st"
+        if filters.exclude_suspended and bool(row.get("suspended", False)):
+            return "suspended"
+        if filters.min_avg_amount_20d is not None and _float_or_none(
+            row.get("avg_amount_20d")
+        ) is None:
+            return "amount_coverage_missing"
+        if filters.min_avg_amount_20d is not None and float(row.get("avg_amount_20d") or 0) < float(
+            filters.min_avg_amount_20d
+        ):
+            return "avg_amount_20d_below_minimum"
+        if filters.min_avg_volume_20d is not None and _float_or_none(
+            row.get("avg_volume_20d")
+        ) is None:
+            return "volume_coverage_missing"
+        if filters.min_avg_volume_20d is not None and float(row.get("avg_volume_20d") or 0) < float(
+            filters.min_avg_volume_20d
+        ):
+            return "avg_volume_20d_below_minimum"
+        if filters.require_fundamental_coverage and _float_or_none(row.get("market_cap")) is None:
+            return "fundamental_coverage_missing"
+        market_cap = _float_or_none(row.get("market_cap"))
+        if filters.min_market_cap is not None:
+            if market_cap is None:
+                return "market_cap_missing"
+            if market_cap < filters.min_market_cap:
+                return "market_cap_below_minimum"
+        if filters.max_market_cap is not None:
+            if market_cap is None:
+                return "market_cap_missing"
+            if market_cap > filters.max_market_cap:
+                return "market_cap_above_maximum"
+        return None
+
+    def _apply_rules(self, frame: pd.DataFrame, rules: list[UniverseRule]) -> pd.DataFrame:
+        if frame.empty or not rules:
+            return frame
+        filtered = frame
+        for rule in rules:
+            if rule.field not in filtered.columns:
+                return filtered.iloc[0:0].copy()
+            series = filtered[rule.field]
+            mask = _rule_mask(series, rule)
+            filtered = filtered[mask].copy()
+        return filtered
+
+    def _apply_ranking(self, frame: pd.DataFrame, spec: UniverseSpec) -> pd.DataFrame:
+        ranking = spec.ranking
+        if frame.empty or ranking is None:
+            return frame
+        if ranking.field not in frame.columns:
+            return frame.iloc[0:0].copy()
+        ranked = frame.sort_values(
+            ranking.field,
+            ascending=ranking.ascending,
+            na_position="last",
+        )
+        if ranking.top_n is not None:
+            ranked = ranked.head(ranking.top_n)
+        return ranked
+
+    def _attach_metrics(
+        self,
+        candidates: pd.DataFrame,
+        spec: UniverseSpec,
+        *,
+        as_of_date: str,
+    ) -> pd.DataFrame:
+        if candidates.empty:
+            return candidates
+        data = candidates.copy()
+        needs_20d = (
+            spec.filters.min_avg_amount_20d is not None
+            or spec.filters.min_avg_volume_20d is not None
+            or (
+                spec.ranking is not None
+                and spec.ranking.field in {"avg_amount_20d", "avg_volume_20d"}
+            )
+            or any(
+                rule.field in {"avg_amount_20d", "avg_volume_20d"}
+                for rule in spec.selection.rules
+            )
+        )
+        if needs_20d:
+            metrics = self._avg_20d_metrics(as_of_date, spec.asset_types)
+            data = data.merge(metrics, on="symbol", how="left")
+        needs_market_cap = (
+            spec.filters.require_fundamental_coverage
+            or spec.filters.min_market_cap is not None
+            or spec.filters.max_market_cap is not None
+            or (spec.ranking is not None and spec.ranking.field == "market_cap")
+            or any(rule.field == "market_cap" for rule in spec.selection.rules)
+        )
+        if needs_market_cap:
+            data = data.merge(self._market_cap_asof(as_of_date), on="symbol", how="left")
+        return data
+
+    def _avg_20d_metrics(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
+        frames: list[pd.DataFrame] = []
+        for dataset, asset_type in _datasets_for_asset_types(asset_types):
+            path = self.lake.dataset_path("raw", dataset)
+            if not path.exists():
+                continue
+            raw = self.lake.read_parquet_filtered(
+                "raw",
+                dataset,
+                end=as_of_date,
+                columns=["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
+            )
+            if raw.empty:
+                continue
+            normalized = normalize_tushare_daily(raw)
+            normalized["asset_type"] = asset_type
+            frames.append(normalized)
+        if not frames:
+            return pd.DataFrame(columns=["symbol", "avg_amount_20d", "avg_volume_20d"])
+        bars = pd.concat(frames, ignore_index=True).sort_values(["symbol", "trade_date"])
+        latest = bars.groupby("symbol", group_keys=False).tail(20)
+        metrics = latest.groupby("symbol", as_index=False).agg(
+            avg_amount_20d=("amount", "mean"),
+            avg_volume_20d=("volume", "mean"),
+        )
+        return metrics
+
+    def _market_cap_asof(self, as_of_date: str) -> pd.DataFrame:
+        path = self.lake.dataset_path("raw", "tushare/daily_basic")
+        if not path.exists():
+            return pd.DataFrame(columns=["symbol", "market_cap"])
+        raw = self.lake.read_parquet_filtered(
+            "raw",
+            "tushare/daily_basic",
+            end=as_of_date,
+            columns=["ts_code", "trade_date", "total_mv"],
+        )
+        if raw.empty or "total_mv" not in raw.columns:
+            return pd.DataFrame(columns=["symbol", "market_cap"])
+        raw = raw.rename(columns={"ts_code": "symbol", "total_mv": "market_cap"})
+        raw["trade_date"] = pd.to_datetime(raw["trade_date"].astype(str), format="%Y%m%d").dt.date
+        return raw.sort_values(["symbol", "trade_date"]).groupby("symbol", as_index=False).tail(1)[
+            ["symbol", "market_cap"]
+        ]
+
+    def _load_recent_bars(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
+        frames: list[pd.DataFrame] = []
+        for dataset, asset_type in _datasets_for_asset_types(asset_types):
+            path = self.lake.dataset_path("raw", dataset)
+            if not path.exists():
+                continue
+            escaped_path = str(path).replace("'", "''")
+            frame = self.lake.query_parquet(
+                f"""
+                WITH source AS (
+                    SELECT *
+                    FROM read_parquet('{escaped_path}')
+                    WHERE CAST(trade_date AS VARCHAR) <= $end_date
+                ),
+                latest AS (
+                    SELECT max(CAST(trade_date AS VARCHAR)) AS trade_date
+                    FROM source
+                )
+                SELECT source.*
+                FROM source, latest
+                WHERE CAST(source.trade_date AS VARCHAR) = latest.trade_date
+                """,
+                {"end_date": as_of_date},
+            )
+            if frame.empty:
+                continue
+            normalized = normalize_tushare_daily(frame)
+            if not normalized.empty:
+                normalized["asset_type"] = asset_type
+                frames.append(normalized)
+        if not frames:
+            return pd.DataFrame(
+                columns=["symbol", "trade_date", "st", "suspended", "asset_type"]
+            )
+        recent = pd.concat(frames, ignore_index=True)
+        return self._apply_fast_st_state(recent)
+
+    def _apply_fast_st_state(self, recent: pd.DataFrame) -> pd.DataFrame:
+        stock_basic = self._stock_basic()
+        if (
+            stock_basic.empty
+            or "ts_code" not in stock_basic.columns
+            or "name" not in stock_basic.columns
+        ):
+            return recent
+        st_symbols = set(
+            stock_basic.loc[
+                stock_basic["name"].astype(str).str.contains("ST", case=False, na=False),
+                "ts_code",
+            ].astype(str)
+        )
+        if not st_symbols:
+            return recent
+        data = recent.copy()
+        data["st"] = data["st"] | data["symbol"].astype(str).isin(st_symbols)
+        return data
+
+    def _stock_basic(self) -> pd.DataFrame:
+        path = self.lake.dataset_path("raw", "tushare/stock_basic")
+        if not path.exists():
+            return pd.DataFrame()
+        return self.lake.read_parquet("raw", "tushare/stock_basic")
+
+    def _index_constituents(self, index_codes: list[str], as_of_date: str) -> list[str]:
+        for dataset in ("tushare/index_weight", "tushare/index_member"):
+            path = self.lake.dataset_path("raw", dataset)
+            if not path.exists():
+                continue
+            raw = self.lake.read_parquet_filtered(
+                "raw",
+                dataset,
+                end=as_of_date,
+                columns=["index_code", "con_code", "ts_code", "trade_date"],
+            )
+            if raw.empty or "index_code" not in raw.columns:
+                continue
+            code_column = "con_code" if "con_code" in raw.columns else "ts_code"
+            matches = raw[raw["index_code"].astype(str).isin(index_codes)]
+            if not matches.empty:
+                return [
+                    symbol
+                    for symbol in (
+                        normalize_symbol(item) for item in matches[code_column].astype(str)
+                    )
+                    if symbol is not None
+                ]
+        return []
+
+    def _rebalance_dates(
+        self,
+        spec: UniverseSpec,
+        *,
+        start_date: str,
+        end_date: str,
+        frequency: str,
+    ) -> list[str]:
+        dates = _trade_dates(self.lake, spec.asset_types, start=start_date, end=end_date)
+        if frequency == "daily":
+            return dates
+        parsed = [(_parse_date(item), item) for item in dates]
+        selected: list[str] = []
+        seen: set[tuple[int, int] | tuple[int, int, int]] = set()
+        for parsed_date, key in parsed:
+            if frequency == "weekly":
+                bucket: tuple[int, int] | tuple[int, int, int] = parsed_date.isocalendar()[:2]
+            elif frequency == "monthly":
+                bucket = (parsed_date.year, parsed_date.month, 1)
+            else:
+                raise ValueError(f"unsupported rebalance frequency: {frequency}")
+            if bucket in seen:
+                continue
+            seen.add(bucket)
+            selected.append(key)
+        return selected
+
+
+def _candidate_frame_for_symbols(
+    symbols: Iterable[str],
+    recent: pd.DataFrame,
+    stock_basic: pd.DataFrame,
+) -> pd.DataFrame:
+    normalized = [symbol for symbol in (normalize_symbol(item) for item in symbols) if symbol]
+    base = pd.DataFrame({"symbol": list(dict.fromkeys(normalized))})
+    if base.empty:
+        return pd.DataFrame(columns=["symbol"])
+    recent_columns = [
+        column
+        for column in ("symbol", "trade_date", "asset_type", "st", "suspended", "volume", "amount")
+        if column in recent.columns
+    ]
+    data = base.merge(recent[recent_columns], on="symbol", how="left")
+    data["has_bar_coverage"] = data["trade_date"].notna() if "trade_date" in data.columns else False
+    return _merge_stock_basic_columns(data, stock_basic)
+
+
+def _merge_recent_and_stock_basic(recent: pd.DataFrame, stock_basic: pd.DataFrame) -> pd.DataFrame:
+    if recent.empty:
+        return pd.DataFrame(columns=["symbol", "has_bar_coverage"])
+    data = recent.copy()
+    data["has_bar_coverage"] = True
+    return _merge_stock_basic_columns(data, stock_basic)
+
+
+def _merge_stock_basic_columns(frame: pd.DataFrame, stock_basic: pd.DataFrame) -> pd.DataFrame:
+    if stock_basic.empty or "ts_code" not in stock_basic.columns:
+        return frame
+    columns = [
+        column
+        for column in ("ts_code", "name", "industry", "list_status", "list_date")
+        if column in stock_basic.columns
+    ]
+    basics = stock_basic[columns].rename(columns={"ts_code": "symbol"})
+    return frame.merge(basics, on="symbol", how="left")
+
+
+def _rule_mask(series: pd.Series, rule: UniverseRule) -> pd.Series:
+    operator = rule.operator
+    value = rule.value
+    if operator == "eq":
+        return series == value
+    if operator == "ne":
+        return series != value
+    if operator == "in":
+        values = value if isinstance(value, list) else [value]
+        return series.isin(values)
+    if operator == "not_in":
+        values = value if isinstance(value, list) else [value]
+        return ~series.isin(values)
+    if operator in {"gt", "gte", "lt", "lte", "between"}:
+        numeric = pd.to_numeric(series, errors="coerce")
+        if operator == "gt":
+            return numeric > float(value)
+        if operator == "gte":
+            return numeric >= float(value)
+        if operator == "lt":
+            return numeric < float(value)
+        if operator == "lte":
+            return numeric <= float(value)
+        bounds = value if isinstance(value, list) else []
+        if len(bounds) != 2:
+            return pd.Series(False, index=series.index)
+        return (numeric >= float(bounds[0])) & (numeric <= float(bounds[1]))
+    text = series.astype(str)
+    needle = str(value)
+    if operator == "contains":
+        return text.str.contains(needle, case=False, regex=False, na=False)
+    if operator == "starts_with":
+        return text.str.startswith(needle, na=False)
+    if operator == "ends_with":
+        return text.str.endswith(needle, na=False)
+    return pd.Series(False, index=series.index)
+
+
+def _apply_limit(symbols: list[str], *, spec: UniverseSpec, limit: int) -> list[str]:
+    effective_limit = min(limit, spec.max_symbols or limit)
+    return symbols[:effective_limit]
+
+
+def _datasets_for_asset_types(asset_types: Sequence[str]) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    if "stock" in asset_types:
+        result.append(("tushare/daily", "stock"))
+    if "etf" in asset_types:
+        result.append(("tushare/fund_daily", "etf"))
+    return result
+
+
+def _trade_dates(lake: DataLake, asset_types: Sequence[str], *, start: str, end: str) -> list[str]:
+    frames: list[pd.DataFrame] = []
+    for dataset, _asset_type in _datasets_for_asset_types(asset_types):
+        path = lake.dataset_path("raw", dataset)
+        if not path.exists():
+            continue
+        raw = lake.read_parquet_filtered(
+            "raw",
+            dataset,
+            columns=["trade_date"],
+            start=start,
+            end=end,
+        )
+        if not raw.empty and "trade_date" in raw.columns:
+            frames.append(raw)
+    if not frames:
+        return []
+    values = pd.concat(frames, ignore_index=True)["trade_date"].astype(str).tolist()
+    return sorted({_date_key(value) for value in values})
+
+
+def _latest_available_date(lake: DataLake) -> str:
+    dates = _trade_dates(lake, ["stock", "etf"], start="19000101", end="29991231")
+    if not dates:
+        return datetime.now().strftime("%Y%m%d")
+    return dates[-1]
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _date_key(value: str) -> str:
+    return _parse_date(value).strftime("%Y%m%d")
+
+
+def _parse_date(value: str) -> date:
+    text = str(value)
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return datetime.fromisoformat(text).date()

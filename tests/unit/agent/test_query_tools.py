@@ -402,7 +402,7 @@ def test_query_bars_rejects_limit_above_maximum(tmp_path) -> None:
     assert result["metadata"]["status"] == "INVALID_REQUEST"
 
 
-def test_query_universe_builds_reproducible_cyclical_basket_from_stock_basic(
+def test_query_universe_rejects_removed_theme_filter_from_stock_basic(
     tmp_path,
 ) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
@@ -499,18 +499,16 @@ def test_query_universe_builds_reproducible_cyclical_basket_from_stock_basic(
         ToolContext(run_id="cyclical-universe"),
     )
 
-    assert result["status"] == "OK"
-    assert result["symbols"] == ["600019.SH", "600036.SH"]
-    assert result["metadata"]["theme"] == "cyclical"
-    assert result["metadata"]["selection_rules"]["industry_source"] == "tushare/stock_basic"
-    assert result["metadata"]["industry_distribution"] == {"钢铁": 1, "银行": 1}
-    excluded = {item["symbol"]: item["reason"] for item in result["metadata"]["excluded_symbols"]}
-    assert excluded["600519.SH"] == "industry_not_in_theme"
-    assert excluded["000001.SZ"] == "st"
-    assert excluded["600999.SH"] == "no_bar_coverage"
+    assert result["status"] == "INVALID_REQUEST"
+    assert result["reason"] == "LEGACY_THEME_FILTER_REMOVED"
+    assert result["suggested_next_tools"] == [
+        "create_universe_spec",
+        "validate_universe_spec",
+        "build_universe",
+    ]
 
 
-def test_query_universe_defaults_to_current_date_for_cyclical_theme(tmp_path) -> None:
+def test_query_universe_rejects_removed_theme_filter_without_date(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
         pd.DataFrame(
@@ -550,12 +548,11 @@ def test_query_universe_defaults_to_current_date_for_cyclical_theme(tmp_path) ->
         ToolContext(run_id="cyclical-universe-default-date"),
     )
 
-    assert result["status"] == "OK"
-    assert result["symbols"] == ["600036.SH"]
-    assert result["metadata"]["as_of_date"] == "2024-06-28"
+    assert result["status"] == "INVALID_REQUEST"
+    assert result["reason"] == "LEGACY_THEME_FILTER_REMOVED"
 
 
-def test_cyclical_theme_ontology_includes_provider_specific_industries(tmp_path) -> None:
+def test_query_universe_rejects_removed_theme_ontology_request(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
         pd.DataFrame(
@@ -618,18 +615,5 @@ def test_cyclical_theme_ontology_includes_provider_specific_industries(tmp_path)
         ToolContext(run_id="cyclical-ontology"),
     )
 
-    assert result["status"] == "OK"
-    assert set(result["symbols"]) == {"000001.SZ", "000002.SZ", "000003.SZ"}
-    metadata = result["metadata"]
-    assert metadata["ontology_version"]
-    assert metadata["theme_to_provider_mapping"]["房地产"] == [
-        "全国地产",
-        "区域地产",
-        "园区开发",
-        "房地产",
-    ]
-    assert metadata["industry_distribution"] == {
-        "全国地产": 1,
-        "煤炭开采": 1,
-        "银行": 1,
-    }
+    assert result["status"] == "INVALID_REQUEST"
+    assert result["reason"] == "LEGACY_THEME_FILTER_REMOVED"
