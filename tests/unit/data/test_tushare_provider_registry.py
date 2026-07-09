@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pandas as pd
 
 from qmt_agent_trader.agent.audit import AuditLogger
@@ -18,6 +20,9 @@ from qmt_agent_trader.data.providers.base import FetchItem
 from qmt_agent_trader.data.providers.tushare.client import TushareClient
 from qmt_agent_trader.data.providers.tushare.fetcher import TushareFetcher
 from qmt_agent_trader.data.providers.tushare.planner import TushareFetchPlanner
+from qmt_agent_trader.data.providers.tushare.quota import (
+    TushareUsageLedger,
+)
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
@@ -216,7 +221,7 @@ def test_fina_indicator_with_small_symbol_list_fans_out_by_symbol() -> None:
     assert plan.estimated_request_count == 2
 
 
-def test_fina_indicator_with_large_symbol_list_blocks_on_budget() -> None:
+def test_fina_indicator_with_large_symbol_list_uses_account_quota_not_legacy_budget() -> None:
     planner = TushareFetchPlanner()
 
     plan = planner.plan(
@@ -231,12 +236,114 @@ def test_fina_indicator_with_large_symbol_list_blocks_on_budget() -> None:
         ]
     )
 
-    assert plan.status == "BLOCKED"
-    assert plan.reason == "REQUEST_BUDGET_EXCEEDED"
+    assert plan.status == "planned"
     assert plan.estimated_request_count == 501
-    assert plan.errors[0]["estimated_request_count"] == 501
-    assert plan.errors[0]["budget"] == 500
-    assert plan.errors[0]["symbols_count"] == 501
+    assert plan.as_dict()["budget_decision"]["status"] == "APPROVED_WITH_RATE_PACING"
+    assert plan.as_dict()["quota_profile"]["points"] == 2000
+
+
+def test_tushare_planner_approves_daily_basic_116_under_default_quota() -> None:
+    planner = TushareFetchPlanner()
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="daily_basic",
+                symbols=[f"{index:06d}.SZ" for index in range(1, 117)],
+                fields=["ts_code", "trade_date", "pb", "pe_ttm", "dv_ttm", "total_mv"],
+                start_date="20240101",
+                end_date="20240131",
+                params={
+                    "trade_dates": [f"202401{index:02d}" for index in range(1, 117)]
+                },
+            )
+        ],
+        requested_by_llm=True,
+    )
+
+    payload = plan.as_dict()
+    assert payload["status"] == "planned"
+    assert payload["estimated_request_count"] == 116
+    assert payload["net_new_request_count"] == 116
+    assert payload["quota_profile"]["points"] == 2000
+    assert payload["quota_profile"]["max_requests_per_minute"] == 200
+    assert payload["quota_profile"]["max_requests_per_day_per_api"] == 100000
+    assert payload["budget_decision"]["status"] == "APPROVED_BY_ACCOUNT_QUOTA"
+    assert payload.get("reason") != "REQUEST_BUDGET_EXCEEDED"
+
+
+def test_tushare_planner_approves_fina_indicator_49_under_default_quota() -> None:
+    planner = TushareFetchPlanner()
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="fina_indicator",
+                symbols=[f"{index:06d}.SZ" for index in range(1, 50)],
+                fields=["ts_code", "end_date", "roe"],
+                start_date="20240101",
+                end_date="20241231",
+            )
+        ],
+        requested_by_llm=True,
+    )
+
+    payload = plan.as_dict()
+    assert payload["status"] == "planned"
+    assert payload["estimated_request_count"] == 49
+    assert payload["quota_profile"]["points"] == 2000
+    assert payload["quota_state"]["remaining_requests_this_minute"] == 200
+    assert payload["budget_decision"]["status"] == "APPROVED_BY_ACCOUNT_QUOTA"
+
+
+def test_tushare_planner_blocks_by_actual_daily_quota(tmp_path) -> None:
+    ledger = TushareUsageLedger.from_lake_root(tmp_path / "lake")
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(tz=UTC).replace(tzinfo=None)
+    pd.DataFrame(
+        [
+            {
+                "request_id": f"daily-{index}",
+                "run_id": "quota-test",
+                "api_name": "daily_basic",
+                "params_hash": f"hash-{index}",
+                "params_redacted": "{}",
+                "fields": '["ts_code", "trade_date"]',
+                "planned_at": now,
+                "started_at": now,
+                "finished_at": now,
+                "status": "SUCCESS",
+                "row_count": 1,
+                "error_type": None,
+                "error_message": None,
+                "token_hash": None,
+                "execution_mode": "manual",
+            }
+            for index in range(99990)
+        ]
+    ).to_parquet(ledger.path, index=False)
+    planner = TushareFetchPlanner(usage_ledger=ledger)
+
+    plan = planner.plan(
+        [
+            FetchItem(
+                api_name="daily_basic",
+                symbols=[f"{index:06d}.SZ" for index in range(1, 117)],
+                fields=["ts_code", "trade_date", "pb"],
+                start_date="20240101",
+                end_date="20240131",
+                params={
+                    "trade_dates": [f"202401{index:02d}" for index in range(1, 117)]
+                },
+            )
+        ],
+        requested_by_llm=True,
+    )
+
+    payload = plan.as_dict()
+    assert payload["status"] == "BLOCKED"
+    assert payload["reason"] == "BLOCKED_BY_DAILY_QUOTA"
+    assert payload["budget_decision"]["status"] == "BLOCKED_BY_DAILY_QUOTA"
 
 
 def test_marketwide_endpoint_daily_basic_can_plan_by_trade_date() -> None:

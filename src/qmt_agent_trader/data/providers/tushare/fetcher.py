@@ -6,12 +6,21 @@ import hashlib
 import json
 import time
 from collections.abc import Callable
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
 import pandas as pd
 
 from qmt_agent_trader.data.providers.base import FetchPlan, FetchResult
 from qmt_agent_trader.data.providers.tushare.client import TushareClient
+from qmt_agent_trader.data.providers.tushare.quota import (
+    ExecutionMode,
+    TushareQuotaManager,
+    TushareUsageLedger,
+    UsageStatus,
+    new_usage_record,
+    token_hash,
+)
 from qmt_agent_trader.data.providers.tushare.registry import (
     TushareEndpointRegistry,
     default_tushare_registry,
@@ -29,6 +38,10 @@ class TushareFetcher:
         min_interval_seconds: float = 0.3,
         retry_attempts: int = 3,
         retry_backoff_seconds: float = 2.0,
+        quota_manager: TushareQuotaManager | None = None,
+        usage_ledger: TushareUsageLedger | None = None,
+        run_id: str | None = None,
+        execution_mode: ExecutionMode = "manual",
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.client = client
@@ -37,6 +50,10 @@ class TushareFetcher:
         self.min_interval_seconds = min_interval_seconds
         self.retry_attempts = max(retry_attempts, 1)
         self.retry_backoff_seconds = retry_backoff_seconds
+        self.quota_manager = quota_manager
+        self.usage_ledger = usage_ledger
+        self.run_id = run_id
+        self.execution_mode = execution_mode
         self.sleep = sleep
         self._last_request_at: float | None = None
 
@@ -83,10 +100,11 @@ class TushareFetcher:
             item_errors: list[dict[str, Any]] = []
             for batch in item.get("batches", []):
                 try:
-                    frame, page_errors = self._execute_batch(batch)
+                    frame, page_errors = self._execute_batch(batch, run_id=self.run_id)
                 except Exception as exc:
+                    status = _usage_status_for_error(exc)
                     error = {
-                        "status": "FAILED",
+                        "status": status,
                         "api_name": spec.api_name,
                         "dataset_id": spec.dataset_id,
                         "reason": "remote_query_failed",
@@ -247,7 +265,13 @@ class TushareFetcher:
             verification_action=_verification_action_for_items(plan.items),
         )
 
-    def _execute_batch(self, batch: dict[str, Any]) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    def _execute_batch(
+        self,
+        batch: dict[str, Any],
+        *,
+        run_id: str | None,
+    ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+        del run_id
         pagination = batch.get("pagination") or {}
         if pagination.get("type") != "limit_offset":
             return self._query(batch), []
@@ -295,29 +319,93 @@ class TushareFetcher:
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(), errors
 
     def _query(self, batch: dict[str, Any]) -> pd.DataFrame:
+        planned_at = datetime.now(tz=UTC).replace(tzinfo=None)
+        self._record_usage(batch, status="PLANNED", planned_at=planned_at)
         for attempt in range(1, self.retry_attempts + 1):
-            self._wait()
+            started_at = datetime.now(tz=UTC).replace(tzinfo=None)
             try:
-                return self.client.query(
+                self._wait(str(batch["api_name"]))
+                frame = self.client.query(
                     str(batch["api_name"]),
                     dict(batch["params"]),
                     list(batch["fields"]),
                 )
-            except Exception:
+            except Exception as exc:
+                self._record_usage(
+                    batch,
+                    status=_usage_status_for_error(exc),
+                    row_count=0,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    planned_at=planned_at,
+                    started_at=started_at,
+                    finished_at=datetime.now(tz=UTC).replace(tzinfo=None),
+                )
                 if attempt >= self.retry_attempts:
                     raise
                 if self.retry_backoff_seconds > 0:
                     self.sleep(self.retry_backoff_seconds * attempt)
+                continue
+            self._record_usage(
+                batch,
+                status="NO_DATA" if frame.empty else "SUCCESS",
+                row_count=len(frame),
+                planned_at=planned_at,
+                started_at=started_at,
+                finished_at=datetime.now(tz=UTC).replace(tzinfo=None),
+            )
+            return frame
         return pd.DataFrame()
 
-    def _wait(self) -> None:
+    def _wait(self, api_name: str) -> None:
         now = time.monotonic()
         if self._last_request_at is not None:
             remaining = self.min_interval_seconds - (now - self._last_request_at)
             if remaining > 0:
                 self.sleep(remaining)
                 now = time.monotonic()
+        if self.quota_manager is not None:
+            state = self.quota_manager.current_state()
+            remaining_this_minute = state.remaining_requests_this_minute
+            if remaining_this_minute is not None and remaining_this_minute <= 0:
+                self.sleep(60.0)
+                now = time.monotonic()
+            daily_remaining = state.remaining_requests_today_by_api.get(api_name)
+            if daily_remaining == 0:
+                raise RuntimeError(f"Tushare daily quota exhausted for {api_name}")
         self._last_request_at = now
+
+    def _record_usage(
+        self,
+        batch: dict[str, Any],
+        *,
+        status: str,
+        row_count: int | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+        planned_at: datetime | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> None:
+        if self.usage_ledger is None:
+            return
+        self.usage_ledger.append(
+            new_usage_record(
+                api_name=str(batch["api_name"]),
+                params=dict(batch["params"]),
+                fields=[str(field) for field in batch.get("fields", [])],
+                status=cast(UsageStatus, status),
+                execution_mode=self.execution_mode,
+                run_id=self.run_id,
+                row_count=row_count,
+                error_type=error_type,
+                error_message=error_message,
+                token_hash=token_hash(self.client.token),
+                planned_at=planned_at,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        )
 
     def _record_metadata(
         self,
@@ -353,6 +441,15 @@ def _checksum_frame(frame: pd.DataFrame) -> str:
     normalized = frame.sort_index(axis=1).astype(str)
     payload = normalized.to_csv(index=False).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _usage_status_for_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "rate" in text or "频次" in text or "每分钟" in text:
+        return "RATE_LIMITED"
+    if "quota" in text or "limit exceeded" in text or "超过" in text:
+        return "QUOTA_EXCEEDED"
+    return "FAILED"
 
 
 def _dataset_result(

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     log_dir: Path = Path("logs")
 
     tushare_token: SecretStr | None = None
+    tushare_quota_profile_source: str = "official_table"
+    tushare_points: int | None = 2000
+    tushare_max_requests_per_minute: int | None = 200
+    tushare_max_requests_per_day_per_api: int | None = 100000
 
     deepseek_api_key: SecretStr | None = None
     deepseek_base_url: str = "https://api.deepseek.com"

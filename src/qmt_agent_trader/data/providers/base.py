@@ -43,6 +43,7 @@ class FetchPlan:
     suggested_repair: dict[str, Any] | None = None
     repair_action: dict[str, Any] | None = None
     verification_action: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         status_fields = _structured_fields_for_plan(
@@ -71,6 +72,7 @@ class FetchPlan:
             payload["reason"] = self.reason
         if self.message:
             payload["message"] = self.message
+        payload.update(self.metadata)
         return payload
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -25,6 +25,14 @@ from qmt_agent_trader.data.providers.tushare.client import TushareClient
 from qmt_agent_trader.data.providers.tushare.fetcher import TushareFetcher
 from qmt_agent_trader.data.providers.tushare.planner import TusharePlannerConfig
 from qmt_agent_trader.data.providers.tushare.provider import TushareProvider
+from qmt_agent_trader.data.providers.tushare.quota import (
+    ExecutionMode,
+    QuotaSource,
+    TushareAccountQuotaProfile,
+    TushareQuotaManager,
+    TushareUsageLedger,
+    profile_from_settings,
+)
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import ALLOWED_SILVER_TABLES, DataTableBuilder
 
@@ -40,7 +48,6 @@ _client_factory_var: ContextVar[Callable[[], TushareClient] | None] = ContextVar
     "remote_data_tool_client_factory",
     default=None,
 )
-_AUTONOMOUS_TUSHARE_FETCH_MAX_REQUESTS = 25
 
 
 def wire(
@@ -91,24 +98,60 @@ def _with_deps(
         _lake_var.reset(lake_token)
 
 
-def _tushare_provider(lake: DataLake | None = None) -> TushareProvider:
+def _tushare_provider(
+    lake: DataLake | None = None,
+    *,
+    run_id: str | None = None,
+    execution_mode: ExecutionMode = "manual",
+    with_fetcher: bool = True,
+) -> TushareProvider:
     settings = _get_settings()
+    quota_profile = _quota_profile_from_settings(settings)
+    usage_ledger = TushareUsageLedger.from_lake_root(lake.root) if lake is not None else None
     config = TusharePlannerConfig(
         symbol_fanout_threshold=30,
-        autonomous_request_budget=_AUTONOMOUS_TUSHARE_FETCH_MAX_REQUESTS,
-        manual_request_budget=500,
+        quota_profile=quota_profile,
         max_days_per_batch=settings.remote_data_max_days_per_call,
     )
-    if lake is None:
-        return TushareProvider(planner_config=config)
+    if lake is None or not with_fetcher:
+        return TushareProvider(planner_config=config, usage_ledger=usage_ledger)
+    quota_manager = TushareQuotaManager(profile=quota_profile, ledger=usage_ledger)
     fetcher = TushareFetcher(
         _build_client(settings),
         lake,
         min_interval_seconds=settings.remote_data_min_interval_seconds,
         retry_attempts=settings.remote_data_retry_attempts,
         retry_backoff_seconds=settings.remote_data_retry_backoff_seconds,
+        quota_manager=quota_manager,
+        usage_ledger=usage_ledger,
+        run_id=run_id,
+        execution_mode=execution_mode,
     )
-    return TushareProvider(fetcher=fetcher, planner_config=config)
+    return TushareProvider(
+        fetcher=fetcher,
+        planner_config=config,
+        usage_ledger=usage_ledger,
+    )
+
+
+def _quota_profile_from_settings(settings: Settings) -> TushareAccountQuotaProfile:
+    source = str(settings.tushare_quota_profile_source)
+    allowed_sources = {
+        "official_table",
+        "manual_config",
+        "api",
+        "observed",
+        "unknown",
+        "fallback_static_policy",
+    }
+    if source not in allowed_sources:
+        raise ValueError(f"invalid tushare quota profile source: {source}")
+    return profile_from_settings(
+        source=cast(QuotaSource, source),
+        points=settings.tushare_points,
+        max_requests_per_minute=settings.tushare_max_requests_per_minute,
+        max_requests_per_day_per_api=settings.tushare_max_requests_per_day_per_api,
+    )
 
 
 def _list_tushare_capabilities(
@@ -136,7 +179,7 @@ def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dic
     lake = _get_lake()
     if lake is not None:
         items = _attach_trade_dates_for_marketwide_fetches(items, lake)
-    plan = _tushare_provider().plan_fetch(
+    plan = _tushare_provider(lake, with_fetcher=False).plan_fetch(
         items,
         requested_by_llm=context.requested_by_llm,
         storage_mode=str(input_data.get("storage_mode", "persistent")),
@@ -169,7 +212,11 @@ def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict
         return data_tool_invalid_request(message=str(exc), reason="invalid_fetch_items")
 
     items = _attach_trade_dates_for_marketwide_fetches(items, lake)
-    provider = _tushare_provider(lake)
+    provider = _tushare_provider(
+        lake,
+        run_id=context.run_id,
+        execution_mode="autonomous" if context.requested_by_llm else "manual",
+    )
     plan = provider.plan_fetch(
         items,
         requested_by_llm=context.requested_by_llm,
@@ -381,10 +428,8 @@ def _attach_trade_dates_for_marketwide_fetches(
     items: list[FetchItem],
     lake: DataLake,
 ) -> list[FetchItem]:
-    provider = _tushare_provider()
-    config = TusharePlannerConfig(
-        autonomous_request_budget=_AUTONOMOUS_TUSHARE_FETCH_MAX_REQUESTS
-    )
+    provider = _tushare_provider(with_fetcher=False)
+    config = TusharePlannerConfig()
     enriched: list[FetchItem] = []
     for item in items:
         spec = provider.registry.get(item.api_name)

@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from qmt_agent_trader.data.providers.base import FetchItem, FetchPlan
+from qmt_agent_trader.data.providers.tushare.quota import (
+    DEFAULT_TUSHARE_2000_POINT_PROFILE,
+    TushareAccountQuotaProfile,
+    TushareBudgetDecision,
+    TushareFetchCostEstimate,
+    TushareQuotaManager,
+    TushareQuotaState,
+    TushareUsageLedger,
+)
 from qmt_agent_trader.data.providers.tushare.registry import (
     EndpointSpec,
     TushareEndpointRegistry,
@@ -20,9 +29,10 @@ TS_CODE_PATTERN = re.compile(r"^[0-9A-Z]{5,8}\.(SH|SZ|BJ|HK|SI)$")
 @dataclass(frozen=True)
 class TusharePlannerConfig:
     symbol_fanout_threshold: int = 30
-    autonomous_request_budget: int = 25
-    manual_request_budget: int = 500
     max_days_per_batch: int = 366
+    quota_profile: TushareAccountQuotaProfile = field(
+        default_factory=lambda: DEFAULT_TUSHARE_2000_POINT_PROFILE.model_copy(deep=True)
+    )
 
 
 class TushareFetchPlanner:
@@ -31,9 +41,14 @@ class TushareFetchPlanner:
         registry: TushareEndpointRegistry | None = None,
         *,
         config: TusharePlannerConfig | None = None,
+        usage_ledger: TushareUsageLedger | None = None,
     ) -> None:
         self.registry = registry or default_tushare_registry()
         self.config = config or TusharePlannerConfig()
+        self.quota_manager = TushareQuotaManager(
+            profile=self.config.quota_profile,
+            ledger=usage_ledger,
+        )
 
     def plan(
         self,
@@ -67,28 +82,51 @@ class TushareFetchPlanner:
                 message=str(first.get("message", "")) or None,
                 errors=errors,
             )
-        budget = (
-            self.config.autonomous_request_budget
-            if requested_by_llm
-            else self.config.manual_request_budget
+        quota_state = self.quota_manager.current_state()
+        cost_estimate = self.quota_manager.estimate_cost(planned_items)
+        budget_decision = self.quota_manager.evaluate(
+            cost_estimate,
+            quota_state,
+            execution_mode="autonomous" if requested_by_llm else "manual",
         )
-        if estimated_request_count > budget:
+        metadata = _quota_metadata(
+            quota_state=quota_state,
+            cost_estimate=cost_estimate,
+            budget_decision=budget_decision,
+        )
+        if budget_decision.status in {
+            "APPROVED_BY_ACCOUNT_QUOTA",
+            "APPROVED_WITH_RATE_PACING",
+        }:
             return FetchPlan(
-                status="BLOCKED",
+                status="planned",
                 source="tushare",
                 items=planned_items,
                 estimated_request_count=estimated_request_count,
-                reason="REQUEST_BUDGET_EXCEEDED",
-                message=f"estimated request count {estimated_request_count} exceeds {budget}",
                 errors=errors,
+                message=f"storage_mode={storage_mode}; {budget_decision.user_message}",
+                metadata=metadata,
+            )
+        if budget_decision.status == "UNKNOWN_QUOTA_REQUIRES_APPROVAL":
+            return FetchPlan(
+                status="NEEDS_USER_APPROVAL",
+                source="tushare",
+                items=planned_items,
+                estimated_request_count=estimated_request_count,
+                reason=budget_decision.status,
+                message=budget_decision.user_message,
+                errors=errors,
+                metadata=metadata,
             )
         return FetchPlan(
-            status="planned",
+            status="BLOCKED",
             source="tushare",
             items=planned_items,
             estimated_request_count=estimated_request_count,
+            reason=budget_decision.status,
+            message=budget_decision.user_message,
             errors=errors,
-            message=f"storage_mode={storage_mode}",
+            metadata=metadata,
         )
 
     def _plan_item(self, item: FetchItem) -> dict[str, Any]:
@@ -164,14 +202,15 @@ class TushareFetchPlanner:
                 "next_repair_action": "resolve_universe_symbols_then_replan_symbol_fanout",
             }
         if strategy == "blocked_too_large":
-            budget = self.config.manual_request_budget
             return {
                 "status": "BLOCKED",
                 "api_name": spec.api_name,
-                "reason": "REQUEST_BUDGET_EXCEEDED",
-                "message": f"estimated request count {len(item.symbols)} exceeds {budget}",
+                "reason": "ENDPOINT_SHAPE_REQUIRES_EXPLICIT_BATCHING",
+                "message": (
+                    f"{spec.api_name} requires symbol fanout for {len(item.symbols)} "
+                    "symbols. Replan with explicit approved batches."
+                ),
                 "estimated_request_count": len(item.symbols),
-                "budget": budget,
                 "symbols_count": len(item.symbols),
                 "date_range": {
                     "start_date": item.start_date,
@@ -253,9 +292,7 @@ def _strategy_for(
         return "full_refresh"
     if item.symbols and spec.supports_symbol_range:
         if not spec.supports_marketwide_by_date:
-            if len(item.symbols) <= config.manual_request_budget:
-                return "fanout_by_symbol_range"
-            return "blocked_too_large"
+            return "fanout_by_symbol_range"
         if len(item.symbols) <= config.symbol_fanout_threshold:
             return "fanout_by_symbol_range"
         if spec.supports_marketwide_by_date:
@@ -272,6 +309,28 @@ def _strategy_for(
     if spec.symbol_param:
         return "fanout_by_symbol_range"
     return "symbolless_range"
+
+
+def _quota_metadata(
+    *,
+    quota_state: TushareQuotaState,
+    cost_estimate: TushareFetchCostEstimate,
+    budget_decision: TushareBudgetDecision,
+) -> dict[str, Any]:
+    decision = budget_decision.model_dump(mode="json")
+    return {
+        "quota_profile": quota_state.profile.model_dump(mode="json"),
+        "quota_state": quota_state.model_dump(mode="json"),
+        "cost_estimate": cost_estimate.model_dump(mode="json"),
+        "budget_decision": decision,
+        "rate_pacing": {
+            "status": budget_decision.status,
+            "safe_to_execute_now": budget_decision.safe_to_execute_now,
+            "recommended_batch_size": budget_decision.recommended_batch_size,
+            "recommended_batches": budget_decision.recommended_batches,
+        },
+        "net_new_request_count": cost_estimate.net_new_request_count,
+    }
 
 
 def _batches_for(

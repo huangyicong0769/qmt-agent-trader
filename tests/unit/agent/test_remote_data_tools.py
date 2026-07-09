@@ -191,6 +191,35 @@ def test_plan_tushare_fetch_reports_missing_symbols_without_date_range(tmp_path)
     assert result["local_coverage"][0]["partial_reasons"] == ["missing_symbols"]
 
 
+def test_plan_tushare_fetch_returns_quota_aware_payload_for_large_agent_plan(
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    plan_tool = _tools(tmp_path, lake)["plan_tushare_fetch"]
+
+    result = plan_tool.run(
+        {
+            "items": [
+                {
+                    "api_name": "fina_indicator",
+                    "symbols": [f"{index:06d}.SZ" for index in range(1, 50)],
+                    "fields": ["ts_code", "end_date", "roe"],
+                    "start_date": "20240101",
+                    "end_date": "20241231",
+                }
+            ]
+        },
+        ToolContext(run_id="r-quota-plan", requested_by_llm=True),
+    )
+
+    assert result["status"] == "planned"
+    assert result["estimated_request_count"] == 49
+    assert result["quota_profile"]["points"] == 2000
+    assert result["quota_profile"]["max_requests_per_minute"] == 200
+    assert result["budget_decision"]["status"] == "APPROVED_BY_ACCOUNT_QUOTA"
+    assert "25" not in str(result.get("message", ""))
+
+
 def test_run_tushare_fetch_dry_run_does_not_query_remote(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = ExplodingGenericClient()
@@ -220,6 +249,7 @@ def test_run_tushare_fetch_dry_run_does_not_query_remote(tmp_path) -> None:
     assert result["status"] == "planned"
     assert result["dry_run"] is True
     assert result["execute_plan"] is False
+    assert result["metadata"]["budget_decision"]["status"] == "APPROVED_BY_ACCOUNT_QUOTA"
     assert not lake.dataset_path("raw", "tushare/daily_basic").exists()
 
 
@@ -269,6 +299,7 @@ def test_run_tushare_fetch_live_writes_new_layout_and_metadata(tmp_path) -> None
         "starts_after_requested_start",
         "ends_before_requested_end",
     ]
+    assert result["plan"]["budget_decision"]["status"] == "APPROVED_BY_ACCOUNT_QUOTA"
     assert client.calls == [
         (
             "daily_basic",
@@ -282,6 +313,11 @@ def test_run_tushare_fetch_live_writes_new_layout_and_metadata(tmp_path) -> None
     assert state[0]["dataset_id"] == "tushare.daily_basic"
     assert state[0]["coverage_start"] == "20240101"
     assert state[0]["coverage_end"] == "20240131"
+    ledger_path = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    assert ledger_path.exists()
+    usage = pd.read_parquet(ledger_path)
+    assert set(usage["status"]) == {"PLANNED", "SUCCESS"}
+    assert set(usage["execution_mode"]) == {"autonomous"}
 
 
 def test_large_marketwide_fetch_requires_new_layout_trade_calendar(tmp_path) -> None:

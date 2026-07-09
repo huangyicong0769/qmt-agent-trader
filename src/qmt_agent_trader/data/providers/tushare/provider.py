@@ -13,6 +13,7 @@ from qmt_agent_trader.data.providers.tushare.planner import (
     TushareFetchPlanner,
     TusharePlannerConfig,
 )
+from qmt_agent_trader.data.providers.tushare.quota import TushareUsageLedger
 from qmt_agent_trader.data.providers.tushare.registry import (
     TushareEndpointRegistry,
     default_tushare_registry,
@@ -28,10 +29,15 @@ class TushareProvider:
         registry: TushareEndpointRegistry | None = None,
         fetcher: TushareFetcher | None = None,
         planner_config: TusharePlannerConfig | None = None,
+        usage_ledger: TushareUsageLedger | None = None,
     ) -> None:
         self.registry = registry or default_tushare_registry()
         self.fetcher = fetcher
-        self.planner = TushareFetchPlanner(self.registry, config=planner_config)
+        self.planner = TushareFetchPlanner(
+            self.registry,
+            config=planner_config,
+            usage_ledger=usage_ledger,
+        )
 
     def list_capabilities(
         self,
