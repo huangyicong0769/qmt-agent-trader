@@ -107,13 +107,15 @@ def build_target_frequency_panel(
                 }
             )
 
-    metadata["coverage_by_field"] = _coverage_by_field(panel, required_fields)
+    metadata["coverage_by_field"] = _coverage_by_field(panel, required_fields, metadata)
     if metadata["unresolved_fields"]:
         metadata["status"] = "PARTIAL_COVERAGE"
     elif metadata["missing_fields"]:
         metadata["status"] = "PARTIAL_COVERAGE"
     else:
         metadata["status"] = "OK"
+    metadata["input_panel_status"] = metadata["status"]
+    metadata["evidence_status"] = "STRONG" if metadata["status"] == "OK" else "BLOCKED"
     return panel, metadata
 
 
@@ -379,9 +381,15 @@ def _add_missing_field(
     return result
 
 
-def _coverage_by_field(panel: pd.DataFrame, fields: list[str]) -> dict[str, dict[str, Any]]:
+def _coverage_by_field(
+    panel: pd.DataFrame,
+    fields: list[str],
+    metadata: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
     coverage: dict[str, dict[str, Any]] = {}
     row_count = len(panel)
+    field_sources = metadata.get("field_sources")
+    field_sources = field_sources if isinstance(field_sources, dict) else {}
     for field in dict.fromkeys(fields):
         if field in panel.columns:
             series = panel[field]
@@ -389,12 +397,21 @@ def _coverage_by_field(panel: pd.DataFrame, fields: list[str]) -> dict[str, dict
             series = pd.Series([pd.NA] * row_count)
         non_null = int(series.notna().sum())
         dates = panel.loc[series.notna(), "trade_date"] if field in panel.columns else []
-        coverage[field] = {
+        item: dict[str, Any] = {
             "non_null": non_null,
+            "non_null_rows": non_null,
+            "total_rows": row_count,
             "coverage": non_null / row_count if row_count else 0.0,
             "first_available_date": _format_date(min(dates)) if len(dates) else None,
             "last_available_date": _format_date(max(dates)) if len(dates) else None,
         }
+        source = field_sources.get(field)
+        if isinstance(source, dict):
+            raw_dataset = str(source.get("raw_dataset_name") or "")
+            item["source"] = f"raw/{raw_dataset}" if raw_dataset else None
+            item["join_policy"] = source.get("fill_policy")
+            item["pit_safe"] = bool(source.get("pit_safe"))
+        coverage[field] = item
     return coverage
 
 

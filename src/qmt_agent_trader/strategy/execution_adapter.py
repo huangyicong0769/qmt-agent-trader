@@ -17,6 +17,8 @@ from qmt_agent_trader.backtest.sensitivity import SensitivityScenario
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.data.field_sources import FieldSourceIndex, fetch_columns_for_source
 from qmt_agent_trader.data.frequency import Frequency
+from qmt_agent_trader.data.providers.base import FetchItem
+from qmt_agent_trader.data.providers.tushare.planner import TushareFetchPlanner
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
@@ -40,6 +42,8 @@ BACKTEST_BASE_FIELDS = [
     "limit_down",
     "st",
 ]
+MIN_REQUIRED_FIELD_COVERAGE = 0.80
+MIN_CROSS_SECTIONAL_COVERAGE = 0.50
 
 
 class StrategyBacktestConfig(BaseModel):
@@ -405,22 +409,32 @@ def _blocked_backtest_from_panel_metadata(
     panel_status = str(panel_metadata.get("status") or "")
     unresolved = _unresolved_fields_for_columns(panel_metadata, missing_columns)
     missing_fields = _missing_fields_for_columns(panel_metadata, missing_columns)
+    low_coverage_fields = _low_coverage_required_fields(
+        panel_metadata=panel_metadata,
+        factor_registry=factor_registry,
+        requested_factor_ids=requested_factor_ids,
+    )
     no_data = panel.empty or panel_status == "NO_DATA"
-    should_block = bool(no_data or missing_columns or unresolved or missing_fields)
+    should_block = bool(
+        no_data or missing_columns or unresolved or missing_fields or low_coverage_fields
+    )
     if not should_block:
+        panel_metadata.setdefault("input_panel_status", panel_status or "OK")
+        panel_metadata.setdefault("evidence_status", "STRONG")
         return None
 
     reason = (
         "INPUT_PANEL_NO_DATA"
         if no_data
         else "INPUT_PANEL_PARTIAL_COVERAGE"
-        if panel_status == "PARTIAL_COVERAGE"
+        if panel_status == "PARTIAL_COVERAGE" or low_coverage_fields
         else "MISSING_FACTOR_INPUTS"
     )
     status = "DATA_NOT_READY" if no_data else "BLOCKED"
+    repair_columns = missing_columns or list(low_coverage_fields)
     suggested_repair = _suggest_repair_for_factor_input_metadata(
         panel_metadata,
-        missing_columns=missing_columns,
+        missing_columns=repair_columns,
         start_date=config.start_date,
         end_date=config.end_date,
         symbols=config.symbols or _symbols_from_date_map(config.symbols_by_date),
@@ -431,8 +445,15 @@ def _blocked_backtest_from_panel_metadata(
     message = (
         "factor input panel has no rows for requested range"
         if no_data
+        else (
+            "factor input panel has required fields below coverage threshold: "
+            f"{low_coverage_fields}"
+        )
+        if low_coverage_fields
         else f"factor input panel is missing required columns: {missing_columns}"
     )
+    panel_metadata["input_panel_status"] = panel_status or "PARTIAL_COVERAGE"
+    panel_metadata["evidence_status"] = "BLOCKED"
     return StrategyBacktestResult(
         run_id=run_id,
         strategy_id=config.strategy_id,
@@ -458,9 +479,11 @@ def _blocked_backtest_from_panel_metadata(
         data_requirements={
             "required_fields": list(panel_metadata.get("required_fields") or []),
             "requested_factor_ids": requested_factor_ids,
+            "min_required_field_coverage": MIN_REQUIRED_FIELD_COVERAGE,
+            "min_cross_sectional_coverage": MIN_CROSS_SECTIONAL_COVERAGE,
         },
         input_panel_metadata=panel_metadata,
-        missing_columns=missing_columns,
+        missing_columns=repair_columns,
         available_columns=sorted(str(column) for column in panel.columns),
         coverage_by_field=dict(panel_metadata.get("coverage_by_field") or {}),
         field_sources=dict(panel_metadata.get("field_sources") or {}),
@@ -475,8 +498,14 @@ def _blocked_backtest_from_panel_metadata(
                 {
                     "name": "factor_input_panel",
                     "status": "BLOCKED",
-                    "observed": missing_columns,
-                    "threshold": "all requested factor required columns present with coverage",
+                    "observed": {
+                        "missing_columns": missing_columns,
+                        "low_coverage_fields": low_coverage_fields,
+                    },
+                    "threshold": {
+                        "required_field_coverage": MIN_REQUIRED_FIELD_COVERAGE,
+                        "cross_sectional_coverage": MIN_CROSS_SECTIONAL_COVERAGE,
+                    },
                     "message": message,
                     "evidence_source": "input_panel_metadata",
                 }
@@ -508,6 +537,57 @@ def _missing_factor_input_columns(
             if panel[column].isna().all() and column not in missing:
                 missing.append(column)
     return missing
+
+
+def _low_coverage_required_fields(
+    *,
+    panel_metadata: dict[str, Any],
+    factor_registry: FactorRegistry | None,
+    requested_factor_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if factor_registry is None:
+        return {}
+    coverage = panel_metadata.get("coverage_by_field")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    low: dict[str, dict[str, Any]] = {}
+    required_fields = _required_factor_fields_only(
+        factor_registry=factor_registry,
+        requested_factor_ids=requested_factor_ids,
+    )
+    for field in required_fields:
+        item = coverage.get(field)
+        if not isinstance(item, dict):
+            continue
+        value = float(item.get("coverage") or 0.0)
+        if 0.0 < value < MIN_REQUIRED_FIELD_COVERAGE:
+            low[field] = {
+                "coverage": value,
+                "threshold": MIN_REQUIRED_FIELD_COVERAGE,
+                "non_null_rows": int(item.get("non_null_rows") or item.get("non_null") or 0),
+                "total_rows": int(item.get("total_rows") or 0),
+                "source": item.get("source"),
+                "join_policy": item.get("join_policy"),
+                "pit_safe": item.get("pit_safe"),
+            }
+    return low
+
+
+def _required_factor_fields_only(
+    *,
+    factor_registry: FactorRegistry,
+    requested_factor_ids: list[str],
+) -> list[str]:
+    fields: list[str] = []
+    for factor_id in requested_factor_ids:
+        saved = factor_registry.get_factor(factor_id)
+        if saved is None:
+            continue
+        for column in saved.required_columns:
+            if column in {"symbol", "trade_date"} or column in BACKTEST_BASE_FIELDS:
+                continue
+            if column not in fields:
+                fields.append(column)
+    return fields
 
 
 def _partial_coverage_warnings(
@@ -570,7 +650,9 @@ def _suggest_repair_for_factor_input_metadata(
     strategy_id: str,
     factor_name: str | None,
 ) -> dict[str, Any]:
-    source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
+    registry = default_tushare_registry()
+    source_index = FieldSourceIndex.from_tushare_registry(registry)
+    planner = TushareFetchPlanner(registry)
     fields_by_api: dict[str, list[str]] = {}
     sources_by_api: dict[str, Any] = {}
     for field in missing_columns:
@@ -594,15 +676,42 @@ def _suggest_repair_for_factor_input_metadata(
             if source is not None
             else list(dict.fromkeys(fields))
         )
+        spec = registry.get(api_name)
+        plan = planner.plan(
+            [
+                FetchItem(
+                    api_name=api_name,
+                    symbols=symbols,
+                    fields=raw_fields,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            ]
+        )
         item: dict[str, Any] = {
             "api_name": api_name,
             "symbols": symbols,
             "fields": raw_fields,
             "start_date": start_date,
             "end_date": end_date,
+            "required_fields": fields,
+            "symbols_count": len(symbols),
+            "estimated_request_count": plan.estimated_request_count,
+            "planner_status": plan.status,
+            "planner_reason": plan.reason,
+            "requires_manual_approval": True,
         }
         if source is not None:
             item["raw_dataset_name"] = source.raw_dataset_name
+            item["target_dataset"] = f"raw/{source.raw_dataset_name}"
+        if spec is not None:
+            item["endpoint_capability"] = {
+                "supports_symbol_range": spec.supports_symbol_range,
+                "supports_marketwide_by_date": spec.supports_marketwide_by_date,
+                "rows_per_request": spec.call_limit.get("rows_per_request"),
+            }
+        if plan.errors:
+            item["planner_errors"] = plan.errors
         items.append(item)
 
     return {
@@ -610,6 +719,10 @@ def _suggest_repair_for_factor_input_metadata(
         "execute_plan": True,
         "items": items,
         "missing_columns": missing_columns,
+        "then_run": [
+            "build_data_table(daily_market)",
+            "run_backtest(...)",
+        ],
         "verification_action": {
             "tool": "run_backtest",
             "args": {

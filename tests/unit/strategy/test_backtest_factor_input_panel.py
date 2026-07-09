@@ -160,6 +160,56 @@ def test_backtest_missing_pb_blocks_with_panel_repair_guidance(tmp_path: Path) -
     assert result.input_panel_metadata["missing_fields"]["pb"]["api_name"] == "daily_basic"
 
 
+def test_backtest_blocks_required_factor_field_below_coverage_threshold(
+    tmp_path: Path,
+) -> None:
+    lake = _lake(tmp_path)
+    _write_bars(lake, symbols=["000001.SZ", "000002.SZ"])
+    _write_daily_basic(
+        lake,
+        field="pb",
+        values={"000001.SZ": 0.8},
+        days=5,
+    )
+
+    result = run_strategy_backtest(
+        lake,
+        StrategyRegistry(tmp_path / "strategies"),
+        _config("pb_rank", symbols=["000001.SZ", "000002.SZ"]),
+        reports_dir=tmp_path / "reports",
+    )
+
+    assert result.status == "BLOCKED"
+    assert result.reason == "INPUT_PANEL_PARTIAL_COVERAGE"
+    assert result.coverage_by_field["pb"]["coverage"] < 0.80
+    assert result.input_panel_metadata["evidence_status"] == "BLOCKED"
+
+
+def test_partial_coverage_warning_only_when_above_minimum(tmp_path: Path) -> None:
+    lake = _lake(tmp_path)
+    _write_bars(lake, symbols=["000001.SZ", "000002.SZ"])
+    _write_daily_basic(
+        lake,
+        field="pb",
+        values={"000001.SZ": 0.8, "000002.SZ": 1.5},
+        days=70,
+    )
+
+    result = run_strategy_backtest(
+        lake,
+        StrategyRegistry(tmp_path / "strategies"),
+        _config("pb_rank", symbols=["000001.SZ", "000002.SZ"]),
+        reports_dir=tmp_path / "reports",
+    )
+
+    assert result.status == "completed"
+    assert result.coverage_by_field["pb"]["coverage"] >= 0.80
+    assert result.coverage_by_field["pb"]["source"] == "raw/tushare/daily_basic"
+    assert result.coverage_by_field["pb"]["join_policy"] == "exact"
+    assert result.input_panel_metadata["evidence_status"] == "STRONG"
+    assert any(warning.startswith("input_panel_partial_coverage:pb") for warning in result.warnings)
+
+
 def test_backtest_technical_factor_still_runs_from_bars(tmp_path: Path) -> None:
     lake = _lake(tmp_path)
     _write_bars(lake, symbols=["000001.SZ", "000002.SZ"])
