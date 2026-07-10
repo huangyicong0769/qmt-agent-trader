@@ -22,10 +22,12 @@ class DatabaseCoordinator:
         self.store_name = store_name
 
     @contextmanager
-    def read_connection(self, operation: str = "read") -> Iterator[duckdb.DuckDBPyConnection]:
+    def read_connection(
+        self, operation: str = "read", *, read_only: bool = False
+    ) -> Iterator[duckdb.DuckDBPyConnection]:
         connection: duckdb.DuckDBPyConnection | None = None
         try:
-            connection = duckdb.connect(str(self.database_path))
+            connection = duckdb.connect(str(self.database_path), read_only=read_only)
             yield connection
         except StorageError:
             raise
@@ -95,8 +97,15 @@ class DatabaseCoordinator:
                     "SELECT coalesce(max(version), 0) FROM storage_schema_migrations" + where,
                     params,
                 ).fetchone()
-        except StorageError:
-            return 0
+        except StorageError as exc:
+            cause = exc.__cause__
+            if (
+                isinstance(cause, duckdb.CatalogException)
+                and "storage_schema_migrations" in str(cause)
+                and "does not exist" in str(cause)
+            ):
+                return 0
+            raise
         return int(result[0]) if result else 0
 
     def _error(self, operation: str, error: BaseException) -> StorageError:

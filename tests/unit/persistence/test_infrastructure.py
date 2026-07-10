@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 from pathlib import Path
 from threading import Thread
 
@@ -17,6 +18,7 @@ from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import (
     StorageConflictError,
+    StorageError,
     StorageLockTimeoutError,
     StorageValidationError,
 )
@@ -33,6 +35,19 @@ def _insert_from_process(database: str, locks: str, value: int) -> None:
     coordinator = DatabaseCoordinator(Path(database), LockManager(Path(locks)))
     with coordinator.write_transaction("process_insert") as connection:
         connection.execute("INSERT INTO serialized VALUES (?)", [value])
+
+
+def _apply_migration_from_process(database: str, locks: str) -> None:
+    coordinator = DatabaseCoordinator(Path(database), LockManager(Path(locks)))
+    migration = Migration(
+        "concurrent-001",
+        "core",
+        1,
+        "insert once",
+        lambda connection: connection.execute("INSERT INTO migration_effect VALUES (1)"),
+        implementation="insert-v1",
+    )
+    MigrationRegistry(coordinator).apply([migration])
 
 
 def test_paths_are_absolute_cwd_independent_and_do_not_create_directories(
@@ -93,6 +108,18 @@ def test_lock_names_are_deterministic_safe_and_enforce_order(tmp_path: Path) -> 
         with pytest.raises(StorageConflictError, match="lock order"):
             with manager.resource_lock("late-resource"):
                 pass
+
+
+def test_path_and_string_resource_aliases_share_one_lock(tmp_path: Path) -> None:
+    manager = LockManager(tmp_path / "locks")
+    monkey_path = tmp_path / "data.json"
+    assert manager.lock_path_for_resource(monkey_path) == manager.lock_path_for_resource(
+        str(monkey_path)
+    )
+    monkey_relative = Path("data.json")
+    assert manager.lock_path_for_resource(monkey_relative) == manager.lock_path_for_resource(
+        "data.json"
+    )
 
 
 def test_lock_timeout_is_mapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,6 +195,26 @@ def test_atomic_json_and_yaml_support_model_validation(tmp_path: Path) -> None:
         store.write_json(json_path, {"version": "invalid"}, model=_Document)
 
 
+def test_jsonl_partial_write_restores_original_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AtomicFileStore(LockManager(tmp_path / "locks"))
+    stream = tmp_path / "events.jsonl"
+    original = b'{"event":"existing"}\n'
+    stream.write_bytes(original)
+    real_write = os.write
+
+    def short_write(descriptor: int, data: bytes) -> int:
+        prefix = data[: len(data) // 2]
+        real_write(descriptor, prefix)
+        return len(prefix)
+
+    monkeypatch.setattr("qmt_agent_trader.persistence.atomic_files.os.write", short_write)
+    with pytest.raises(StorageError, match="append failed"):
+        store.append_jsonl(stream, {"event": "partial"})
+    assert stream.read_bytes() == original
+
+
 def test_database_coordinator_commit_rollback_and_unlocked_read(tmp_path: Path) -> None:
     manager = LockManager(tmp_path / "locks")
     coordinator = DatabaseCoordinator(tmp_path / "control.duckdb", manager)
@@ -229,6 +276,40 @@ def test_lake_and_ledger_share_injected_coordination(tmp_path: Path) -> None:
     assert ledger.lock_manager is manager
 
 
+def test_data_lake_and_ledger_reject_inconsistent_injected_coordination(
+    tmp_path: Path,
+) -> None:
+    first_manager = LockManager(tmp_path / "locks-a")
+    second_manager = LockManager(tmp_path / "locks-b")
+    coordinator = DatabaseCoordinator(tmp_path / "first.duckdb", first_manager)
+    with pytest.raises(ValueError, match="database path"):
+        DataLake(
+            tmp_path / "lake",
+            tmp_path / "second.duckdb",
+            database_coordinator=coordinator,
+        )
+    with pytest.raises(ValueError, match="lock manager"):
+        DataLake(
+            tmp_path / "lake",
+            coordinator.database_path,
+            database_coordinator=coordinator,
+            lock_manager=second_manager,
+        )
+    with pytest.raises(ValueError, match="database path"):
+        TushareUsageLedger(
+            duckdb_path=tmp_path / "second.duckdb",
+            legacy_parquet_path=tmp_path / "legacy.parquet",
+            database_coordinator=coordinator,
+        )
+    with pytest.raises(ValueError, match="lock manager"):
+        TushareUsageLedger(
+            duckdb_path=coordinator.database_path,
+            legacy_parquet_path=tmp_path / "legacy.parquet",
+            database_coordinator=coordinator,
+            lock_manager=second_manager,
+        )
+
+
 def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None:
     coordinator = DatabaseCoordinator(
         tmp_path / "control.duckdb", LockManager(tmp_path / "locks")
@@ -241,7 +322,10 @@ def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None
     assert registry.apply([good]) == ["core-001"]
     assert registry.apply([good]) == []
 
-    changed = Migration("core-001", "core", 1, "changed", lambda con: None)
+    changed = Migration(
+        "core-001", "core", 1, "create sample", lambda con: None,
+        implementation="changed-implementation",
+    )
     with pytest.raises(StorageConflictError, match="checksum"):
         registry.apply([changed])
 
@@ -256,6 +340,88 @@ def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None
             "WHERE migration_id = 'core-002'"
         ).fetchone()
     assert row is not None and row[0] == "FAILED" and "RuntimeError" in row[1]
+
+
+def test_migration_dry_run_has_no_storage_side_effects(tmp_path: Path) -> None:
+    database = tmp_path / "absent/control.duckdb"
+    locks = tmp_path / "locks"
+    registry = MigrationRegistry(DatabaseCoordinator(database, LockManager(locks)))
+    migration = Migration(
+        "dry-001", "core", 1, "dry", lambda connection: None, implementation="dry-v1"
+    )
+    assert registry.apply([migration], dry_run=True) == ["dry-001"]
+    assert not database.exists()
+    assert not locks.exists()
+
+    existing_database = tmp_path / "existing.duckdb"
+    existing_coordinator = DatabaseCoordinator(
+        existing_database, LockManager(tmp_path / "existing-locks")
+    )
+    existing_coordinator.initialize()
+    before = existing_database.stat().st_mtime_ns
+    existing_registry = MigrationRegistry(existing_coordinator)
+    assert existing_registry.apply([migration], dry_run=True) == ["dry-001"]
+    assert existing_database.stat().st_mtime_ns == before
+    with existing_coordinator.read_connection("verify_no_table") as connection:
+        tables = connection.execute("SHOW TABLES").fetchall()
+    assert ("storage_schema_migrations",) not in tables
+
+
+def test_concurrent_migration_is_applied_once(tmp_path: Path) -> None:
+    database = tmp_path / "control.duckdb"
+    locks = tmp_path / "locks"
+    coordinator = DatabaseCoordinator(database, LockManager(locks))
+    with coordinator.write_transaction("setup") as connection:
+        connection.execute("CREATE TABLE migration_effect(value INTEGER)")
+    context = multiprocessing.get_context("spawn")
+    processes = [
+        context.Process(target=_apply_migration_from_process, args=(str(database), str(locks)))
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+        assert process.exitcode == 0
+    with coordinator.read_connection("verify") as connection:
+        assert connection.execute("SELECT count(*) FROM migration_effect").fetchone() == (1,)
+
+
+def test_current_schema_version_propagates_unexpected_storage_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = DatabaseCoordinator(
+        tmp_path / "control.duckdb", LockManager(tmp_path / "locks")
+    )
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise StorageError(
+            store_name="control_db",
+            database_path=coordinator.database_path,
+            operation="current_schema_version",
+            reason="database corrupt",
+        )
+
+    monkeypatch.setattr(coordinator, "read_connection", fail)
+    with pytest.raises(StorageError, match="database corrupt"):
+        coordinator.current_schema_version()
+
+
+def test_ledger_reads_do_not_run_ddl_after_locked_initialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = TushareUsageLedger(
+        duckdb_path=tmp_path / "control.duckdb",
+        legacy_parquet_path=tmp_path / "legacy.parquet",
+    )
+    ledger.ensure_ready()
+
+    def reject_ddl(connection: object) -> None:
+        raise AssertionError("read path attempted DDL")
+
+    monkeypatch.setattr(ledger, "ensure_tables", reject_ddl)
+    assert ledger.usage_today_by_api() == {}
+    assert ledger.request_seen("daily", "missing") is False
 
 
 def test_migrated_modules_have_no_direct_duckdb_connect() -> None:

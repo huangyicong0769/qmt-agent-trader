@@ -78,9 +78,4 @@ class LockManager:
 
 
 def _canonical_resource(resource_id: str | Path) -> str:
-    if isinstance(resource_id, Path):
-        return str(resource_id.expanduser().resolve())
-    candidate = Path(resource_id).expanduser()
-    if candidate.is_absolute() or any(part == ".." for part in candidate.parts):
-        return str(candidate.resolve())
-    return resource_id
+    return str(Path(resource_id).expanduser().resolve())

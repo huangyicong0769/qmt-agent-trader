@@ -37,6 +37,18 @@ class DataLake:
         database_coordinator: DatabaseCoordinator | None = None,
         lock_manager: LockManager | None = None,
     ) -> None:
+        resolved_database_path = duckdb_path.expanduser().resolve()
+        if (
+            database_coordinator is not None
+            and database_coordinator.database_path != resolved_database_path
+        ):
+            raise ValueError("injected coordinator database path does not match duckdb_path")
+        if (
+            database_coordinator is not None
+            and lock_manager is not None
+            and database_coordinator.lock_manager is not lock_manager
+        ):
+            raise ValueError("injected coordinator and lock manager must match")
         self.root = root
         self.duckdb_path = duckdb_path
         self.parquet_lock_timeout_seconds = parquet_lock_timeout_seconds

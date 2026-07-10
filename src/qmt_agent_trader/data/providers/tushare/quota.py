@@ -177,6 +177,18 @@ class TushareUsageLedger:
         database_coordinator: DatabaseCoordinator | None = None,
         lock_manager: LockManager | None = None,
     ) -> None:
+        resolved_database_path = duckdb_path.expanduser().resolve()
+        if (
+            database_coordinator is not None
+            and database_coordinator.database_path != resolved_database_path
+        ):
+            raise ValueError("injected coordinator database path does not match duckdb_path")
+        if (
+            database_coordinator is not None
+            and lock_manager is not None
+            and database_coordinator.lock_manager is not lock_manager
+        ):
+            raise ValueError("injected coordinator and lock manager must match")
         self.duckdb_path = duckdb_path
         self.path = legacy_parquet_path
         self.lock_timeout_seconds = lock_timeout_seconds
@@ -190,6 +202,7 @@ class TushareUsageLedger:
         self.database_coordinator = database_coordinator or DatabaseCoordinator(
             self.duckdb_path, self.lock_manager
         )
+        self._ready = False
 
     @classmethod
     def from_data_lake(
@@ -260,7 +273,6 @@ class TushareUsageLedger:
         cutoff = _as_naive_utc(now) - timedelta(minutes=1)
         self.ensure_ready()
         with self.connect() as connection:
-            self.ensure_tables(connection)
             result = connection.execute(
                 f"""
                 SELECT count(*) FROM {self.table_name}
@@ -277,7 +289,6 @@ class TushareUsageLedger:
         start = datetime.combine(today, datetime.min.time())
         end = start + timedelta(days=1)
         with self.connect() as connection:
-            self.ensure_tables(connection)
             rows = connection.execute(
                 f"""
                 SELECT api_name, count(*) FROM {self.table_name}
@@ -300,7 +311,6 @@ class TushareUsageLedger:
         cutoff = _as_naive_utc(None) - timedelta(minutes=minutes)
         self.ensure_ready()
         with self.connect() as connection:
-            self.ensure_tables(connection)
             frame = connection.execute(
                 f"""
                 SELECT {_ledger_column_sql()} FROM {self.table_name}
@@ -314,7 +324,6 @@ class TushareUsageLedger:
     def request_seen(self, api_name: str, params_hash: str) -> bool:
         self.ensure_ready()
         with self.connect() as connection:
-            self.ensure_tables(connection)
             result = connection.execute(
                 f"""
                 SELECT 1 FROM {self.table_name}
@@ -329,7 +338,6 @@ class TushareUsageLedger:
     def history_warnings(self, *, now: datetime | None = None) -> list[str]:
         self.ensure_ready()
         with self.connect() as connection:
-            self.ensure_tables(connection)
             row = connection.execute(
                 f"SELECT value_json FROM {self.state_table_name} WHERE key = 'history_reset'"
             ).fetchone()
@@ -364,6 +372,8 @@ class TushareUsageLedger:
             )
 
     def ensure_ready(self) -> None:
+        if self._ready:
+            return
         from qmt_agent_trader.data.providers.tushare.ledger_migration import (
             migrate_legacy_usage_ledger,
         )
@@ -371,6 +381,7 @@ class TushareUsageLedger:
         migrate_legacy_usage_ledger(self)
         with self.mutation_lock(), self.connect() as connection:
             self.ensure_tables(connection)
+        self._ready = True
 
     def connect(self) -> AbstractContextManager[Any]:
         return self.database_coordinator.read_connection("tushare_ledger")

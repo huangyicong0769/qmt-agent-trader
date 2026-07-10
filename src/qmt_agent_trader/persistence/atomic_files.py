@@ -103,11 +103,20 @@ class AtomicFileStore:
         with self.lock_manager.resource_lock(path):
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            original_length = os.fstat(descriptor).st_size
             try:
                 written = os.write(descriptor, encoded)
                 if written != len(encoded):
                     raise OSError("partial JSONL append")
                 os.fsync(descriptor)
+            except Exception as exc:
+                os.ftruncate(descriptor, original_length)
+                os.fsync(descriptor)
+                raise StorageError(
+                    store_name="atomic_files", path=path, operation="append_jsonl",
+                    reason="append failed and original length was restored",
+                    recoverable=True, original_error=exc,
+                ) from exc
             finally:
                 os.close(descriptor)
 
