@@ -5,6 +5,7 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
 
 import duckdb
@@ -16,7 +17,10 @@ from qmt_agent_trader.data.providers.tushare.quota import (
 )
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
-from qmt_agent_trader.persistence.errors import StorageLockTimeoutError
+from qmt_agent_trader.persistence.errors import (
+    StorageConflictError,
+    StorageLockTimeoutError,
+)
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
 
@@ -210,3 +214,103 @@ def test_database_process_lock_retry_timeout_is_structured(
             pass
     assert caught.value.operation == "bounded_read"
     assert caught.value.recoverable is True
+
+
+def _thread_coordinator(tmp_path: Path, timeout: float = 2) -> DatabaseCoordinator:
+    coordinator = DatabaseCoordinator(
+        tmp_path / "threaded.duckdb",
+        LockManager(tmp_path / "locks", timeout_seconds=timeout),
+    )
+    with coordinator.write_transaction("setup") as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS values_table(value INTEGER)")
+    return coordinator
+
+
+@pytest.mark.parametrize("holder_kind", ["reader", "writer"])
+def test_same_process_reader_and_writer_wait_without_duckdb_configuration_error(
+    tmp_path: Path, holder_kind: str
+) -> None:
+    coordinator = _thread_coordinator(tmp_path)
+    held, release, waiter_done = Event(), Event(), Event()
+    errors: list[BaseException] = []
+
+    def holder() -> None:
+        context = (
+            coordinator.read_connection("held_reader")
+            if holder_kind == "reader"
+            else coordinator.write_transaction("held_writer")
+        )
+        with context as connection:
+            connection.execute("SELECT count(*) FROM values_table").fetchone()
+            held.set()
+            assert release.wait(timeout=3)
+
+    def waiter() -> None:
+        try:
+            context = (
+                coordinator.write_transaction("waiting_writer")
+                if holder_kind == "reader"
+                else coordinator.read_connection("waiting_reader")
+            )
+            with context as connection:
+                connection.execute("SELECT count(*) FROM values_table").fetchone()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            waiter_done.set()
+
+    holder_thread, waiter_thread = Thread(target=holder), Thread(target=waiter)
+    holder_thread.start()
+    assert held.wait(timeout=2)
+    waiter_thread.start()
+    assert not waiter_done.wait(timeout=0.1)
+    release.set()
+    holder_thread.join(timeout=3)
+    waiter_thread.join(timeout=3)
+    assert waiter_done.is_set()
+    assert errors == []
+
+
+def test_same_process_multiple_readers_overlap(tmp_path: Path) -> None:
+    coordinator = _thread_coordinator(tmp_path)
+    ready = [Event(), Event()]
+    release = Event()
+
+    def reader(signal: Event) -> None:
+        with coordinator.read_connection("parallel_reader") as connection:
+            connection.execute("SELECT count(*) FROM values_table").fetchone()
+            signal.set()
+            assert release.wait(timeout=3)
+
+    threads = [Thread(target=reader, args=(signal,)) for signal in ready]
+    for thread in threads:
+        thread.start()
+    assert all(signal.wait(timeout=2) for signal in ready)
+    release.set()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+
+def test_same_process_gate_timeout_and_nested_write_are_structured(tmp_path: Path) -> None:
+    coordinator = _thread_coordinator(tmp_path, timeout=0.05)
+    held, release = Event(), Event()
+
+    def writer() -> None:
+        with coordinator.write_transaction("held_writer"):
+            held.set()
+            assert release.wait(timeout=3)
+
+    thread = Thread(target=writer)
+    thread.start()
+    assert held.wait(timeout=2)
+    with pytest.raises(StorageLockTimeoutError):
+        with coordinator.read_connection("timed_reader"):
+            pass
+    release.set()
+    thread.join(timeout=3)
+
+    with coordinator.write_transaction("outer_writer"):
+        with pytest.raises(StorageConflictError):
+            with coordinator.read_connection("nested_reader"):
+                pass

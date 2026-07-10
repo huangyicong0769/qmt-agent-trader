@@ -280,6 +280,11 @@ def _corrupt_ledger_payload(exc: TushareUsageLedgerCorruptError) -> dict[str, An
 
 
 def _local_storage_failure_payload(exc: StorageError) -> dict[str, Any]:
+    repair_command = (
+        "qmt-agent data repair-tushare-ledger"
+        if exc.operation == "migrate_legacy_tushare_usage"
+        else "qmt-agent data validate"
+    )
     return {
         "status": "BLOCKED",
         "reason": "LOCAL_STORAGE_INITIALIZATION_FAILED",
@@ -298,7 +303,7 @@ def _local_storage_failure_payload(exc: StorageError) -> dict[str, Any]:
         "next_repair_tool": None,
         "repair_action": {
             "type": "cli",
-            "command": "qmt-agent storage verify",
+            "command": repair_command,
         },
     }
 

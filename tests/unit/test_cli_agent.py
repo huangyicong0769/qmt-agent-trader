@@ -162,6 +162,19 @@ def test_repair_tushare_ledger_explicitly_quarantines_and_records_reset(
     assert not legacy.exists()
 
 
+def test_data_validate_recommended_storage_command_exists_and_returns_output(
+    monkeypatch, tmp_path
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    monkeypatch.setattr("qmt_agent_trader.cli.main._data_lake", lambda: lake)
+
+    result = CliRunner().invoke(app, ["data", "validate"])
+
+    assert result.exit_code == 0
+    assert '"status": "missing_data"' in result.stdout
+    assert '"duckdb_exists": false' in result.stdout
+
+
 def test_data_plan_fetch_migrates_healthy_legacy_usage_ledger(
     monkeypatch,
     tmp_path,

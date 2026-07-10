@@ -440,6 +440,11 @@ def test_incomplete_storage_initialization_blocks_plan_run_and_audit_without_rem
         assert result["remote_request_attempted"] is False
         assert "local_storage_initialization_failed" in result["blockers"]
         assert "secret" not in str(result)
+        assert result["repair_action"]["command"] == (
+            "qmt-agent data validate"
+            if failure_stage == "schema"
+            else "qmt-agent data repair-tushare-ledger"
+        )
     audit_rows = [
         json.loads(line)
         for line in (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()

@@ -14,7 +14,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
     TushareUsageLedger,
     new_usage_record,
 )
-from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.storage import DataLake, _stable_hash
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
@@ -125,6 +125,10 @@ def test_upgrade_from_legacy_no_primary_key_state_preserves_latest_rows(
     tmp_path: Path,
 ) -> None:
     lake = _lake(tmp_path)
+    params = {"trade_date": "20240102"}
+    fields = ["ts_code"]
+    symbols: list[str] = []
+    hashes = [_stable_hash(params), _stable_hash(fields), _stable_hash(symbols)]
     with lake.database_coordinator.write_transaction("create_legacy_schema") as connection:
         connection.execute(
             """
@@ -149,18 +153,20 @@ def test_upgrade_from_legacy_no_primary_key_state_preserves_latest_rows(
         connection.execute(
             """
             INSERT INTO data_fetch_events_v2 VALUES
-            ('tushare','tushare.daily','daily','daily','p','f','s',
+            ('tushare','tushare.daily','daily','daily',?,?,?,
              '2024-01-01','20240101','20240101',1,'event-v2','OLD',NULL)
-            """
+            """,
+            hashes,
         )
         connection.execute(
             """
             INSERT INTO data_fetch_state_v2 VALUES
-            ('tushare','tushare.daily','daily','daily','p','f','s',
+            ('tushare','tushare.daily','daily','daily',?,?,?,
              '2024-01-01',NULL,NULL,1,'old','OLD',NULL),
-            ('tushare','tushare.daily','daily','daily','p','f','s',
+            ('tushare','tushare.daily','daily','daily',?,?,?,
              '2024-01-02',NULL,NULL,2,'new','NEW',NULL)
-            """
+            """,
+            [*hashes, *hashes],
         )
         connection.execute(
             """
@@ -211,9 +217,9 @@ def test_upgrade_from_legacy_no_primary_key_state_preserves_latest_rows(
         dataset_id="tushare.daily",
         api_name="daily",
         endpoint_id="daily",
-        params={"trade_date": "20240102"},
-        fields=["ts_code"],
-        symbols=[],
+        params=params,
+        fields=fields,
+        symbols=symbols,
         coverage_start="20240102",
         coverage_end="20240102",
         row_count=3,
@@ -224,7 +230,7 @@ def test_upgrade_from_legacy_no_primary_key_state_preserves_latest_rows(
     with lake.database_coordinator.read_connection("verify_upgrade") as connection:
         assert connection.execute(
             "SELECT count(*), max(checksum) FROM data_fetch_state_v2"
-        ).fetchone() == (2, "new")
+        ).fetchone() == (1, "latest-v2")
         assert connection.execute(
             "SELECT count(*), max(checksum) FROM data_fetch_state"
         ).fetchone() == (1, "latest")
