@@ -146,6 +146,7 @@ def build_default_runtime(
     lake = DataLake(
         root=resolved.resolved_data_dir / "lake",
         duckdb_path=resolved.resolved_data_dir / "qmt_agent_trader.duckdb",
+        parquet_lock_timeout_seconds=resolved.remote_data_lock_timeout_seconds,
     )
     return AgentRuntime(
         settings=resolved,

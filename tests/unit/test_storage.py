@@ -1,6 +1,19 @@
-import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
 
+import pandas as pd
+import pyarrow.parquet as pq
+import pytest
+from filelock import FileLock
+
+from qmt_agent_trader.data import atomic_io
+from qmt_agent_trader.data import storage as storage_module
 from qmt_agent_trader.data.storage import DataLake
+
+DataLakeLockTimeoutError = getattr(
+    storage_module,
+    "DataLakeLockTimeoutError",
+    type("MissingDataLakeLockTimeoutError", (RuntimeError,), {}),
+)
 
 
 def test_duckdb_parquet_roundtrip(tmp_path) -> None:
@@ -62,6 +75,112 @@ def test_incremental_parquet_merges_by_key(tmp_path) -> None:
         {"ts_code": "000002.SZ", "trade_date": "20240102", "close": 20.0},
         {"ts_code": "000003.SZ", "trade_date": "20240103", "close": 30.0},
     ]
+
+
+def test_write_parquet_failure_preserves_existing_file_and_cleans_temp(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    path = lake.write_parquet(pd.DataFrame([{"value": "old"}]), "raw", "atomic")
+    original_to_parquet = pd.DataFrame.to_parquet
+
+    def fail_after_write(frame, destination, *args, **kwargs):
+        original_to_parquet(frame, destination, *args, **kwargs)
+        raise RuntimeError("simulated interrupted write")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_after_write)
+
+    with pytest.raises(RuntimeError, match="simulated interrupted write"):
+        lake.write_parquet(pd.DataFrame([{"value": "new"}]), "raw", "atomic")
+
+    assert pd.read_parquet(path).to_dict("records") == [{"value": "old"}]
+    assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
+
+
+def test_write_parquet_validation_failure_preserves_existing_file(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    path = lake.write_parquet(pd.DataFrame([{"value": "old"}]), "raw", "validated")
+
+    def reject_new_file(*_args, **_kwargs):
+        raise OSError("simulated row-group validation failure")
+
+    monkeypatch.setattr(pq, "ParquetFile", reject_new_file)
+
+    with pytest.raises(OSError, match="row-group validation failure"):
+        lake.write_parquet(pd.DataFrame([{"value": "new"}]), "raw", "validated")
+
+    assert pd.read_parquet(path).to_dict("records") == [{"value": "old"}]
+
+
+def test_write_parquet_replace_failure_preserves_existing_file(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    path = lake.write_parquet(pd.DataFrame([{"value": "old"}]), "raw", "replace")
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failure"):
+        lake.write_parquet(pd.DataFrame([{"value": "new"}]), "raw", "replace")
+
+    assert pd.read_parquet(path).to_dict("records") == [{"value": "old"}]
+    assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
+
+
+def test_concurrent_incremental_writes_do_not_lose_rows(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    frames = [
+        pd.DataFrame([{"ts_code": f"{index:06d}.SZ", "trade_date": "20240102"}])
+        for index in range(24)
+    ]
+
+    def write(frame: pd.DataFrame) -> None:
+        lake.write_incremental_parquet(
+            frame,
+            "raw",
+            "tushare/concurrent",
+            key_columns=["ts_code", "trade_date"],
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(write, frames))
+
+    loaded = lake.read_parquet("raw", "tushare/concurrent")
+    expected = sorted(frame.iloc[0]["ts_code"] for frame in frames)
+    assert sorted(loaded["ts_code"].tolist()) == expected
+
+
+def test_incremental_lock_timeout_preserves_existing_file(tmp_path) -> None:
+    lake = DataLake(
+        root=tmp_path / "lake",
+        duckdb_path=tmp_path / "db.duckdb",
+        parquet_lock_timeout_seconds=0.01,
+    )
+    path = lake.write_incremental_parquet(
+        pd.DataFrame([{"id": 1, "value": "old"}]),
+        "raw",
+        "locked",
+        key_columns=["id"],
+    )
+    lock = FileLock(str(path) + ".lock")
+
+    with lock, pytest.raises(DataLakeLockTimeoutError):
+        lake.write_incremental_parquet(
+            pd.DataFrame([{"id": 2, "value": "new"}]),
+            "raw",
+            "locked",
+            key_columns=["id"],
+        )
+
+    assert pd.read_parquet(path).to_dict("records") == [{"id": 1, "value": "old"}]
 
 
 def test_incremental_parquet_accepts_empty_fetch_frames(tmp_path) -> None:

@@ -10,12 +10,31 @@ from typing import Any, cast
 
 import duckdb
 import pandas as pd
+from filelock import FileLock, Timeout
+
+from qmt_agent_trader.data.atomic_io import atomic_write_parquet
+
+
+class DataLakeLockTimeoutError(RuntimeError):
+    def __init__(self, path: Path, timeout_seconds: float) -> None:
+        self.path = path
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Timed out after {timeout_seconds}s waiting for Parquet dataset lock: {path}"
+        )
 
 
 class DataLake:
-    def __init__(self, root: Path, duckdb_path: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        duckdb_path: Path,
+        *,
+        parquet_lock_timeout_seconds: float = 30.0,
+    ) -> None:
         self.root = root
         self.duckdb_path = duckdb_path
+        self.parquet_lock_timeout_seconds = parquet_lock_timeout_seconds
         self.root.mkdir(parents=True, exist_ok=True)
         self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -37,7 +56,7 @@ class DataLake:
         writable = frame
         if len(frame.columns) == 0:
             writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
-        writable.to_parquet(path, index=False)
+        atomic_write_parquet(writable, path)
         return path
 
     def write_incremental_parquet(
@@ -48,35 +67,48 @@ class DataLake:
         *,
         key_columns: list[str],
     ) -> Path:
-        if frame.empty and len(frame.columns) == 0:
-            frame = pd.DataFrame({column: pd.Series(dtype="object") for column in key_columns})
-        missing = [column for column in key_columns if column not in frame.columns]
-        if missing:
-            raise ValueError(f"incremental dataset missing key columns: {missing}")
-
-        frames: list[pd.DataFrame] = []
         path = self.dataset_path(layer, name)
-        if path.exists():
-            existing = self.read_parquet(layer, name)
-            if "_empty" in existing.columns:
-                existing = existing.drop(columns=["_empty"])
-            if not existing.empty:
-                frames.append(existing)
-        if not frame.empty:
-            frames.append(frame.copy())
+        lock = FileLock(str(path) + ".lock", timeout=self.parquet_lock_timeout_seconds)
+        try:
+            with lock:
+                if frame.empty and len(frame.columns) == 0:
+                    frame = pd.DataFrame(
+                        {column: pd.Series(dtype="object") for column in key_columns}
+                    )
+                missing = [column for column in key_columns if column not in frame.columns]
+                if missing:
+                    raise ValueError(f"incremental dataset missing key columns: {missing}")
 
-        if frames:
-            merged = (
-                pd.concat(frames, ignore_index=True)
-                .drop_duplicates(key_columns, keep="last")
-                .sort_values(key_columns)
-                .reset_index(drop=True)
-            )
-        else:
-            merged = frame.copy()
-        path = self.write_parquet(merged, layer, name)
-        table_name = name if name.replace("_", "").isalnum() else name.replace("/", "_")
-        self.register_parquet(table_name, layer, name)
+                frames: list[pd.DataFrame] = []
+                if path.exists():
+                    existing = self.read_parquet(layer, name)
+                    if "_empty" in existing.columns:
+                        existing = existing.drop(columns=["_empty"])
+                    if not existing.empty:
+                        frames.append(existing)
+                if not frame.empty:
+                    frames.append(frame.copy())
+
+                if frames:
+                    merged = (
+                        pd.concat(frames, ignore_index=True)
+                        .drop_duplicates(key_columns, keep="last")
+                        .sort_values(key_columns)
+                        .reset_index(drop=True)
+                    )
+                else:
+                    merged = frame.copy()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                writable = merged
+                if len(merged.columns) == 0:
+                    writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
+                atomic_write_parquet(writable, path)
+                table_name = (
+                    name if name.replace("_", "").isalnum() else name.replace("/", "_")
+                )
+                self.register_parquet(table_name, layer, name)
+        except Timeout as exc:
+            raise DataLakeLockTimeoutError(path, self.parquet_lock_timeout_seconds) from exc
         return path
 
     def write_incremental_dataset(
