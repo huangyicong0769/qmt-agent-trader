@@ -23,6 +23,7 @@ from qmt_agent_trader.data.providers.tushare.registry import default_tushare_reg
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 from qmt_agent_trader.strategy.models import FactorLeg, StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
@@ -356,7 +357,11 @@ def _execution_factor_registry(
     factor_name: str | None,
     requested_factor_ids: list[str],
 ) -> tuple[str | None, list[str], FactorRegistry | None, str]:
-    base_registry = FactorRegistry(lake.root.parent / "factors")
+    base_registry = FactorRegistry(
+        lake.root.parent / "factors",
+        lock_manager=lake.lock_manager,
+        atomic_store=AtomicFileStore(lake.lock_manager),
+    )
     if spec is not None and len(spec.factors) > 1:
         composite_name = f"__composite__{config.strategy_id}"
         return (

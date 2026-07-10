@@ -37,6 +37,7 @@ from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import (
     evaluate_factor,
 )
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
@@ -59,6 +60,14 @@ def _get_sandbox() -> CodeSandbox | None:
 
 def _get_lake() -> DataLake | None:
     return _lake_var.get() or _lake
+
+
+def _factor_registry(lake: DataLake, root: Path | None = None) -> FactorRegistry:
+    return FactorRegistry(
+        root or _factor_registry_root(lake),
+        lock_manager=lake.lock_manager,
+        atomic_store=AtomicFileStore(lake.lock_manager),
+    )
 
 
 def _with_deps(
@@ -409,7 +418,7 @@ def _save_factor(input_data: dict[str, Any], context: ToolContext) -> dict[str, 
             "status": "INVALID_REQUEST",
             "message": "factor_id does not match factor_spec",
         }
-    registry = FactorRegistry(_factor_registry_root(lake))
+    registry = _factor_registry(lake)
     try:
         saved = registry.save_factor(
             factor_id=factor_id,
@@ -468,7 +477,7 @@ def _list_saved_factors(input_data: dict[str, Any], context: ToolContext) -> dic
     if lake is None:
         return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
 
-    registry = FactorRegistry(_factor_registry_root(lake))
+    registry = _factor_registry(lake)
     query = str(input_data.get("query") or "").strip()
     include_builtins = bool(input_data.get("include_builtins", True))
     exact = bool(input_data.get("exact", False))
@@ -585,7 +594,7 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
 
     factor_name = str(factor_id).strip()
     registry_root = _factor_registry_root(lake)
-    registry = FactorRegistry(registry_root)
+    registry = _factor_registry(lake, registry_root)
     saved = registry.get_factor(factor_name)
     if saved is None:
         return {

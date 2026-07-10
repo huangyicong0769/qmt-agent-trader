@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -39,6 +38,12 @@ from qmt_agent_trader.factors.library.value import (
     pb_rank,
     pe_ttm_rank,
     size_log_mktcap,
+)
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.repositories.versioned_json import (
+    RegistrySnapshot,
+    VersionedJsonRegistry,
 )
 
 FactorFunction = Callable[[pd.DataFrame], pd.Series]
@@ -94,18 +99,39 @@ class FactorRegistry:
     compute path. Draft files are intentionally invisible until saved here.
     """
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        lock_manager: LockManager | None = None,
+        atomic_store: AtomicFileStore | None = None,
+    ) -> None:
         self.root = root
         self.registry_path = root / "registry.json" if root is not None else None
+        self._repository: VersionedJsonRegistry[SavedFactor] | None = None
         self._saved = _builtin_saved_factors()
         if root is not None and self.registry_path is not None:
             root.mkdir(parents=True, exist_ok=True)
-            self._saved.update(self._load_file_registry())
+            manager = lock_manager or LockManager(root / ".locks")
+            store = atomic_store or AtomicFileStore(manager)
+            self._repository = VersionedJsonRegistry(
+                path=self.registry_path,
+                item_loader=_load_file_factor,
+                item_dumper=SavedFactor.to_dict,
+                item_identity=lambda item: item.factor_id,
+                legacy_items_key="factors",
+                lock_manager=manager,
+                atomic_store=store,
+                store_name="factor_registry",
+            )
+            self._apply_snapshot(self._repository.load_snapshot())
 
     def list_factors(self) -> list[SavedFactor]:
+        self._refresh()
         return sorted(self._saved.values(), key=lambda item: item.factor_id)
 
     def get_factor(self, factor_id: str) -> SavedFactor | None:
+        self._refresh()
         saved = self._saved.get(factor_id)
         if saved is not None:
             return saved
@@ -163,16 +189,6 @@ class FactorRegistry:
     ) -> SavedFactor:
         if implementation_ref.startswith("builtin:"):
             raise ValueError("built-in factors are managed by code")
-        duplicate_names = [
-            item.factor_id
-            for item in self._saved.values()
-            if item.name == name and item.factor_id != factor_id
-        ]
-        if duplicate_names:
-            raise ValueError(
-                f"factor name already exists: {name}; use an existing factor_id "
-                f"or choose a unique name. Conflicts: {duplicate_names}"
-            )
         record = SavedFactor(
             factor_id=factor_id,
             name=name,
@@ -185,8 +201,19 @@ class FactorRegistry:
             created_at=shanghai_now_iso(),
             input_requirements=input_requirements,
         )
-        self._saved[factor_id] = record
-        self._persist_file_registry()
+        if factor_id in _builtin_saved_factors():
+            raise ValueError("built-in factors are managed by code")
+        if self._repository is None:
+            self._validate_factor_name(record, list(self._saved.values()))
+            self._saved[factor_id] = record
+            return record
+
+        def save(items: list[SavedFactor]) -> list[SavedFactor]:
+            all_current = [*_builtin_saved_factors().values(), *items]
+            self._validate_factor_name(record, all_current)
+            return [item for item in items if item.factor_id != factor_id] + [record]
+
+        self._apply_snapshot(self._repository.mutate(save))
         return record
 
     def compute(self, factor_id: str, bars: pd.DataFrame) -> pd.Series:
@@ -210,35 +237,37 @@ class FactorRegistry:
             return result
         raise ValueError(f"unsupported factor implementation: {saved.implementation_ref}")
 
-    def _load_file_registry(self) -> dict[str, SavedFactor]:
-        if self.registry_path is None or not self.registry_path.exists():
-            return {}
-        payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return {}
-        factors = payload.get("factors", [])
-        if not isinstance(factors, list):
-            return {}
-        loaded: dict[str, SavedFactor] = {}
-        for item in factors:
-            if isinstance(item, dict):
-                saved = SavedFactor.from_dict(item)
-                loaded[saved.factor_id] = saved
-        return loaded
+    def _refresh(self) -> None:
+        if self._repository is not None:
+            self._apply_snapshot(self._repository.load_snapshot())
 
-    def _persist_file_registry(self) -> None:
-        if self.registry_path is None:
-            return
-        file_factors = [
-            item.to_dict()
-            for item in self.list_factors()
-            if not item.implementation_ref.startswith("builtin:")
+    def _apply_snapshot(self, snapshot: RegistrySnapshot[SavedFactor]) -> None:
+        saved = _builtin_saved_factors()
+        for item in snapshot.items:
+            saved[item.factor_id] = item
+        self._saved = saved
+
+    @staticmethod
+    def _validate_factor_name(record: SavedFactor, current: list[SavedFactor]) -> None:
+        duplicate_names = [
+            item.factor_id
+            for item in current
+            if item.name == record.name and item.factor_id != record.factor_id
         ]
-        payload = {"version": 1, "factors": file_factors}
-        self.registry_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
+        if duplicate_names:
+            raise ValueError(
+                f"factor name already exists: {record.name}; use an existing factor_id "
+                f"or choose a unique name. Conflicts: {duplicate_names}"
+            )
+
+
+def _load_file_factor(data: dict[str, Any]) -> SavedFactor:
+    saved = SavedFactor.from_dict(data)
+    if saved.factor_id in _builtin_saved_factors() or saved.implementation_ref.startswith(
+        "builtin:"
+    ):
+        raise ValueError("built-in factors are managed by code")
+    return saved
 
 
 def _builtin_saved_factors() -> dict[str, SavedFactor]:

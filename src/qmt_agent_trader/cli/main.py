@@ -57,6 +57,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
@@ -93,7 +94,17 @@ def _settings() -> Settings:
 
 
 def _strategy_registry() -> StrategyRegistry:
-    return StrategyRegistry(_settings().resolved_data_dir / "strategies")
+    settings = _settings()
+    paths = PersistencePaths.from_settings(settings)
+    lock_manager = LockManager(
+        paths.locks_root,
+        timeout_seconds=settings.remote_data_lock_timeout_seconds,
+    )
+    return StrategyRegistry(
+        paths.data_root / "strategies",
+        lock_manager=lock_manager,
+        atomic_store=AtomicFileStore(lock_manager),
+    )
 
 
 def _broker_client() -> RemoteQMTBrokerClient:

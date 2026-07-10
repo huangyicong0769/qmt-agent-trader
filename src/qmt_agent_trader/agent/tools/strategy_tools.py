@@ -30,6 +30,7 @@ from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
@@ -74,6 +75,14 @@ def _get_store() -> ExperimentStore | None:
 
 def _get_lake() -> DataLake | None:
     return _lake_var.get() or _lake
+
+
+def _factor_registry(lake: DataLake, root: Path | None = None) -> FactorRegistry:
+    return FactorRegistry(
+        root or _factor_registry_root(lake),
+        lock_manager=lake.lock_manager,
+        atomic_store=AtomicFileStore(lake.lock_manager),
+    )
 
 
 def _with_deps(
@@ -570,7 +579,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         }
 
     registry_root = _factor_registry_root(lake)
-    factor_registry = FactorRegistry(registry_root)
+    factor_registry = _factor_registry(lake, registry_root)
     requested_factor_ids = (
         [factor.factor_id for factor in strategy_spec.factors]
         if strategy_spec is not None and strategy_spec.factors
@@ -1574,7 +1583,13 @@ def _factor_registry_root(lake: DataLake) -> Path:
 def _strategy_registry() -> StrategyRegistry:
     lake = _get_lake()
     root = lake.root.parent / "strategies" if lake is not None else Path("data/strategies")
-    return StrategyRegistry(root)
+    if lake is None:
+        return StrategyRegistry(root)
+    return StrategyRegistry(
+        root,
+        lock_manager=lake.lock_manager,
+        atomic_store=AtomicFileStore(lake.lock_manager),
+    )
 
 
 def _resolve_backtest_universe(
@@ -2047,7 +2062,7 @@ def _data_fingerprint(lake: DataLake) -> dict[str, tuple[int, int]]:
 
 
 def _factor_fingerprint(lake: DataLake, factor_ids: list[str]) -> dict[str, str]:
-    registry = FactorRegistry(_factor_registry_root(lake))
+    registry = _factor_registry(lake)
     result: dict[str, str] = {}
     for factor_id in factor_ids:
         saved = registry.get_factor(factor_id)
