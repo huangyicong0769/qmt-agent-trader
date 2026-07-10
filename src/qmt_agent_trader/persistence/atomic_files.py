@@ -15,6 +15,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from qmt_agent_trader.persistence.errors import (
+    StorageAppendRollbackError,
     StorageConflictError,
     StorageError,
     StorageValidationError,
@@ -110,8 +111,15 @@ class AtomicFileStore:
                     raise OSError("partial JSONL append")
                 os.fsync(descriptor)
             except Exception as exc:
-                os.ftruncate(descriptor, original_length)
-                os.fsync(descriptor)
+                try:
+                    os.ftruncate(descriptor, original_length)
+                    os.fsync(descriptor)
+                except Exception as rollback_exc:
+                    raise StorageAppendRollbackError(
+                        path=path,
+                        append_error=exc,
+                        rollback_error=rollback_exc,
+                    ) from rollback_exc
                 raise StorageError(
                     store_name="atomic_files", path=path, operation="append_jsonl",
                     reason="append failed and original length was restored",

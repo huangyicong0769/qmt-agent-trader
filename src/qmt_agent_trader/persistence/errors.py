@@ -49,3 +49,28 @@ class StorageConflictError(StorageError): ...
 class StorageRevisionConflictError(StorageConflictError): ...
 class StorageValidationError(StorageError): ...
 class StorageBackupError(StorageError): ...
+
+
+class StorageAppendRollbackError(StorageError):
+    def __init__(
+        self,
+        *,
+        path: Path,
+        append_error: BaseException,
+        rollback_error: BaseException,
+    ) -> None:
+        self.original_append_error_type = type(append_error).__name__
+        self.rollback_error_type = type(rollback_error).__name__
+        super().__init__(
+            store_name="atomic_files",
+            path=path,
+            operation="append_jsonl",
+            reason=(
+                "append and rollback failed "
+                f"(append={self.original_append_error_type}, "
+                f"rollback={self.rollback_error_type})"
+            ),
+            recoverable=False,
+            suggested_repair="quarantine and inspect the JSONL stream",
+            original_error=rollback_error,
+        )

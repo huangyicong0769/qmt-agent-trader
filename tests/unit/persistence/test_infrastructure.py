@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from threading import Thread
 
+import duckdb
 import pandas as pd
 import pytest
 from filelock import Timeout
@@ -215,6 +216,32 @@ def test_jsonl_partial_write_restores_original_length(
     assert stream.read_bytes() == original
 
 
+def test_jsonl_rollback_failure_remains_structured_and_secret_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AtomicFileStore(LockManager(tmp_path / "locks"))
+    stream = tmp_path / "events.jsonl"
+    stream.write_bytes(b'{"event":"existing"}\n')
+    real_write = os.write
+
+    def short_write(descriptor: int, data: bytes) -> int:
+        return real_write(descriptor, data[:1])
+
+    def rollback_failure(descriptor: int, length: int) -> None:
+        raise OSError("rollback-secret-value")
+
+    monkeypatch.setattr("qmt_agent_trader.persistence.atomic_files.os.write", short_write)
+    monkeypatch.setattr(
+        "qmt_agent_trader.persistence.atomic_files.os.ftruncate", rollback_failure
+    )
+    with pytest.raises(StorageError) as caught:
+        store.append_jsonl(stream, {"event": "partial"})
+    assert caught.value.recoverable is False
+    assert caught.value.original_append_error_type == "OSError"
+    assert caught.value.rollback_error_type == "OSError"
+    assert "rollback-secret-value" not in str(caught.value)
+
+
 def test_database_coordinator_commit_rollback_and_unlocked_read(tmp_path: Path) -> None:
     manager = LockManager(tmp_path / "locks")
     coordinator = DatabaseCoordinator(tmp_path / "control.duckdb", manager)
@@ -315,9 +342,11 @@ def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None
         tmp_path / "control.duckdb", LockManager(tmp_path / "locks")
     )
     registry = MigrationRegistry(coordinator)
-    good = Migration("core-001", "core", 1, "create sample", lambda con: con.execute(
-        "CREATE TABLE sample(value INTEGER)"
-    ))
+    good = Migration(
+        "core-001", "core", 1, "create sample",
+        lambda con: con.execute("CREATE TABLE sample(value INTEGER)"),
+        implementation="create-sample-v1",
+    )
     assert registry.apply([good], dry_run=True) == ["core-001"]
     assert registry.apply([good]) == ["core-001"]
     assert registry.apply([good]) == []
@@ -329,9 +358,11 @@ def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None
     with pytest.raises(StorageConflictError, match="checksum"):
         registry.apply([changed])
 
-    bad = Migration("core-002", "core", 2, "fail", lambda con: (_ for _ in ()).throw(
-        RuntimeError("migration broke")
-    ))
+    bad = Migration(
+        "core-002", "core", 2, "fail",
+        lambda con: (_ for _ in ()).throw(RuntimeError("migration broke")),
+        implementation="always-fail-v1",
+    )
     with pytest.raises(Exception, match="migration failed"):
         registry.apply([bad])
     with coordinator.read_connection("audit") as connection:
@@ -340,6 +371,27 @@ def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None
             "WHERE migration_id = 'core-002'"
         ).fetchone()
     assert row is not None and row[0] == "FAILED" and "RuntimeError" in row[1]
+
+
+def test_migration_requires_non_empty_immutable_implementation() -> None:
+    with pytest.raises(TypeError):
+        Migration("missing-001", "core", 1, "missing", lambda connection: None)
+    with pytest.raises(ValueError, match="implementation"):
+        Migration(
+            "empty-001", "core", 1, "empty", lambda connection: None,
+            implementation="",
+        )
+
+    def closure(value: int) -> object:
+        return lambda connection: connection.execute("SELECT ?", [value])
+
+    first = Migration(
+        "closure-001", "core", 1, "closure", closure(1), implementation="closure-v1"
+    )
+    second = Migration(
+        "closure-001", "core", 1, "closure", closure(2), implementation="closure-v2"
+    )
+    assert first.checksum != second.checksum
 
 
 def test_migration_dry_run_has_no_storage_side_effects(tmp_path: Path) -> None:
@@ -365,6 +417,32 @@ def test_migration_dry_run_has_no_storage_side_effects(tmp_path: Path) -> None:
     with existing_coordinator.read_connection("verify_no_table") as connection:
         tables = connection.execute("SHOW TABLES").fetchall()
     assert ("storage_schema_migrations",) not in tables
+
+
+def test_migration_dry_run_propagates_unrelated_catalog_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "control.duckdb"
+    coordinator = DatabaseCoordinator(database, LockManager(tmp_path / "locks"))
+    coordinator.initialize()
+    registry = MigrationRegistry(coordinator)
+    migration = Migration(
+        "dry-002", "core", 1, "dry", lambda connection: None, implementation="dry-v2"
+    )
+    catalog_error = duckdb.CatalogException("unrelated catalog failure")
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise StorageError(
+            store_name="control_db",
+            database_path=database,
+            operation="dry_run_migrations",
+            reason="database operation failed",
+            original_error=catalog_error,
+        )
+
+    monkeypatch.setattr(coordinator, "read_connection", fail)
+    with pytest.raises(StorageError):
+        registry.apply([migration], dry_run=True)
 
 
 def test_concurrent_migration_is_applied_once(tmp_path: Path) -> None:
