@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -193,6 +194,11 @@ class TushareUsageLedger:
     @classmethod
     def from_lake_root(cls, lake_root: Path) -> TushareUsageLedger:
         """Compatibility entry point; production code should use from_data_lake()."""
+        warnings.warn(
+            "TushareUsageLedger.from_lake_root() is deprecated; use from_data_lake().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return cls(
             duckdb_path=lake_root.parent / "qmt_agent_trader.duckdb",
             legacy_parquet_path=lake_root / "metadata" / "tushare_usage_ledger.parquet",

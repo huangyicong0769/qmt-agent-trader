@@ -15,6 +15,9 @@ import pyarrow.parquet as pq
 
 from qmt_agent_trader.data.providers.tushare.quota import (
     TushareUsageLedgerCorruptError,
+    _record_to_row,
+    _row_to_record,
+    redact_params,
 )
 
 if TYPE_CHECKING:
@@ -41,14 +44,17 @@ _REQUIRED_COLUMNS = {
 
 def migrate_legacy_usage_ledger(ledger: TushareUsageLedger) -> dict[str, Any]:
     if not ledger.path.exists():
+        _finalize_archived_pending_migrations(ledger)
         return {"status": "NO_LEGACY_FILE", "imported_rows": 0, "skipped_rows": 0}
     with ledger.mutation_lock():
         if not ledger.path.exists():
             return {"status": "NO_LEGACY_FILE", "imported_rows": 0, "skipped_rows": 0}
         frame = _read_complete_legacy(ledger.path)
         _validate_columns(ledger.path, frame)
+        frame = _normalize_legacy_frame(ledger.path, frame)
         archive_path = _timestamped_path(ledger.path.parent / "archive", "migrated")
         archive_path.parent.mkdir(parents=True, exist_ok=True)
+        migration_id = str(uuid4())
         imported = 0
         skipped = 0
         with ledger.connect() as connection:
@@ -78,28 +84,27 @@ def migrate_legacy_usage_ledger(ledger: TushareUsageLedger) -> dict[str, Any]:
                     raise RuntimeError("DuckDB did not return usage row counts during migration")
                 imported = int(after[0]) - int(before[0])
                 skipped = len(frame) - imported
+                connection.execute(
+                    """
+                    INSERT INTO tushare_usage_migrations_v1 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        migration_id,
+                        datetime.now(tz=UTC).replace(tzinfo=None),
+                        str(ledger.path),
+                        str(archive_path),
+                        imported,
+                        skipped,
+                        "IMPORT_COMMITTED_PENDING_ARCHIVE",
+                        None,
+                    ],
+                )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
         os.replace(ledger.path, archive_path)
-        with ledger.connect() as connection:
-            ledger.ensure_tables(connection)
-            connection.execute(
-                """
-                INSERT INTO tushare_usage_migrations_v1 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    str(uuid4()),
-                    datetime.now(tz=UTC).replace(tzinfo=None),
-                    str(ledger.path),
-                    str(archive_path),
-                    imported,
-                    skipped,
-                    "MIGRATED",
-                    None,
-                ],
-            )
+        _finalize_migration(ledger, migration_id)
         return {
             "status": "MIGRATED",
             "imported_rows": imported,
@@ -118,6 +123,7 @@ def repair_tushare_usage_ledger(
     try:
         frame = _read_complete_legacy(ledger.path)
         _validate_columns(ledger.path, frame)
+        frame = _normalize_legacy_frame(ledger.path, frame)
     except TushareUsageLedgerCorruptError as exc:
         if not quarantine_corrupt:
             return {
@@ -142,11 +148,12 @@ def _quarantine_corrupt_legacy(
     error: TushareUsageLedgerCorruptError,
 ) -> dict[str, Any]:
     with ledger.mutation_lock():
+        if not ledger.path.exists():
+            raise FileNotFoundError(f"legacy usage ledger no longer exists: {ledger.path}")
         digest = _sha256(ledger.path)
         size = ledger.path.stat().st_size
         quarantine_path = _timestamped_path(ledger.path.parent / "corrupt", "")
         quarantine_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(ledger.path, quarantine_path)
         sidecar_path = quarantine_path.with_suffix(quarantine_path.suffix + ".json")
         sidecar = {
             "original_path": str(error.path),
@@ -157,11 +164,19 @@ def _quarantine_corrupt_legacy(
             "error_message": error.original_message,
             "quarantined_at": datetime.now(tz=UTC).isoformat(),
         }
-        _atomic_write_json(sidecar_path, sidecar)
-    ledger.record_history_reset(
-        reason="legacy_usage_ledger_corrupt",
-        legacy_corrupt_file=str(quarantine_path),
-    )
+        with ledger.connect() as connection:
+            _record_history_reset_locked(
+                ledger,
+                connection,
+                reason="legacy_usage_ledger_corrupt",
+                legacy_corrupt_file=str(quarantine_path),
+            )
+        try:
+            _atomic_write_json(sidecar_path, sidecar)
+            os.replace(ledger.path, quarantine_path)
+        except Exception:
+            sidecar_path.unlink(missing_ok=True)
+            raise
     return {
         "status": "QUARANTINED",
         "modified": True,
@@ -194,6 +209,92 @@ def _validate_columns(path: Path, frame: pd.DataFrame) -> None:
     if missing:
         cause = ValueError(f"legacy ledger missing required columns: {missing}")
         raise TushareUsageLedgerCorruptError(path, cause)
+
+
+def _normalize_legacy_frame(path: Path, frame: pd.DataFrame) -> pd.DataFrame:
+    normalized: list[dict[str, Any]] = []
+    try:
+        for payload in frame.to_dict(orient="records"):
+            record = _row_to_record(payload)
+            if record.token_hash is not None and not _valid_sha256(record.token_hash):
+                raise ValueError("token_hash must be a SHA-256 hex digest")
+            record = record.model_copy(
+                update={"params_redacted": redact_params(record.params_redacted)}
+            )
+            normalized.append(_record_to_row(record))
+    except Exception as exc:
+        cause = ValueError(f"legacy ledger record validation failed: {exc}")
+        raise TushareUsageLedgerCorruptError(path, cause) from exc
+    return pd.DataFrame(normalized, columns=sorted(_REQUIRED_COLUMNS))
+
+
+def _valid_sha256(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value.lower()
+    )
+
+
+def _record_history_reset_locked(
+    ledger: TushareUsageLedger,
+    connection: Any,
+    *,
+    reason: str,
+    legacy_corrupt_file: str,
+) -> None:
+    ledger.ensure_tables(connection)
+    payload = json.dumps(
+        {
+            "history_reset_at": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
+            "history_reset_reason": reason,
+            "legacy_corrupt_file": legacy_corrupt_file,
+        },
+        sort_keys=True,
+    )
+    connection.execute(
+        f"""
+        INSERT INTO {ledger.state_table_name} VALUES ('history_reset', ?, current_timestamp)
+        ON CONFLICT (key) DO UPDATE
+        SET value_json = excluded.value_json, updated_at = excluded.updated_at
+        """,
+        [payload],
+    )
+
+
+def _finalize_migration(ledger: TushareUsageLedger, migration_id: str) -> None:
+    with ledger.connect() as connection:
+        ledger.ensure_tables(connection)
+        connection.execute(
+            """
+            UPDATE tushare_usage_migrations_v1
+            SET status = 'MIGRATED'
+            WHERE migration_id = ?
+            """,
+            [migration_id],
+        )
+
+
+def _finalize_archived_pending_migrations(ledger: TushareUsageLedger) -> None:
+    if not ledger.duckdb_path.exists():
+        return
+    with ledger.mutation_lock(), ledger.connect() as connection:
+        ledger.ensure_tables(connection)
+        rows = connection.execute(
+            """
+            SELECT migration_id, source_path, archive_path
+            FROM tushare_usage_migrations_v1
+            WHERE status = 'IMPORT_COMMITTED_PENDING_ARCHIVE'
+            """
+        ).fetchall()
+        for migration_id, source_path, archive_path in rows:
+            if not Path(str(source_path)).exists() and Path(str(archive_path)).exists():
+                connection.execute(
+                    """
+                    UPDATE tushare_usage_migrations_v1
+                    SET status = 'MIGRATED'
+                    WHERE migration_id = ?
+                    """,
+                    [migration_id],
+                )
 
 
 def _timestamped_path(directory: Path, marker: str) -> Path:

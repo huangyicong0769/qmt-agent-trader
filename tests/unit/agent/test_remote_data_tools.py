@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pandas as pd
@@ -9,6 +10,7 @@ from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
+from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
 from qmt_agent_trader.agent.tools import remote_data_tools
 from qmt_agent_trader.agent.tools.base import AgentTool
 from qmt_agent_trader.agent.tools.remote_data_tools import build_remote_data_tools, wire
@@ -289,6 +291,37 @@ def test_plan_tushare_fetch_classifies_corrupt_local_ledger(tmp_path) -> None:
     assert result["blockers"] == ["tushare_usage_ledger_corrupt"]
     assert result["repair_action"]["command"].endswith("--quarantine-corrupt")
     assert "remote_query_failed" not in str(result)
+
+
+def test_corrupt_ledger_reason_is_persisted_in_tool_audit(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"PAR1broken-ledger-pagePAR1")
+    dependencies = _deps(tmp_path, lake)
+    registry = AgentToolRegistry(audit_logger=dependencies.audit_logger)
+    registry.register_all(*build_remote_data_tools(dependencies))
+
+    result = registry.run_tool(
+        "plan_tushare_fetch",
+        {
+            "items": [
+                {
+                    "api_name": "fina_indicator",
+                    "symbols": ["000001.SZ"],
+                    "fields": ["ts_code", "end_date", "roe"],
+                    "start_date": "20240101",
+                    "end_date": "20241231",
+                }
+            ]
+        },
+        ToolContext(run_id="r-corrupt-ledger-audit"),
+    )
+
+    audit = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert result["reason"] == "TUSHARE_USAGE_LEDGER_CORRUPT"
+    assert audit["output_data"]["reason"] == "TUSHARE_USAGE_LEDGER_CORRUPT"
+    assert "tushare_usage_ledger_corrupt" in audit["blockers"]
 
 
 def test_run_tushare_fetch_does_not_contact_remote_when_ledger_is_corrupt(tmp_path) -> None:

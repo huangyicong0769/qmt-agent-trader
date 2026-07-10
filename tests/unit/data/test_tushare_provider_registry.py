@@ -297,7 +297,9 @@ def test_tushare_planner_approves_fina_indicator_49_under_default_quota() -> Non
 
 
 def test_tushare_planner_blocks_by_actual_daily_quota(tmp_path) -> None:
-    ledger = TushareUsageLedger.from_lake_root(tmp_path / "lake")
+    ledger = TushareUsageLedger.from_data_lake(
+        DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    )
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(tz=UTC).replace(tzinfo=None)
     pd.DataFrame(
