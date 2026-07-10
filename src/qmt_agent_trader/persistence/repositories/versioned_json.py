@@ -90,6 +90,12 @@ class VersionedJsonRegistry(Generic[T]):
                 )
             next_items = tuple(operation(list(current.items)))
             dumped = self._dump_and_validate_items(next_items, operation="mutate")
+            current_dumped = self._dump_and_validate_items(
+                current.items,
+                operation="mutate",
+            )
+            if dumped == current_dumped:
+                return current
             payload = self._payload(
                 revision=current.revision + 1,
                 updated_at=shanghai_now_iso(),
@@ -225,7 +231,22 @@ class VersionedJsonRegistry(Generic[T]):
             )
         migrated = self._payload(revision=1, updated_at=shanghai_now_iso(), items=dumped)
         self._write_payload(migrated)
-        return self._parse_v2(migrated)
+        installed = self._load_locked(migrate_legacy=False)
+        if (
+            installed.schema_version != 2
+            or installed.revision != 1
+            or installed.content_hash != migrated["content_hash"]
+            or installed.items != items
+        ):
+            raise StorageCorruptError(
+                store_name=self.store_name,
+                path=self.path,
+                operation="verify_migration",
+                reason="installed v2 registry does not match the verified migration payload",
+                recoverable=False,
+                suggested_repair="restore and migrate the immutable v1 backup",
+            )
+        return installed
 
     def _empty_snapshot(self) -> RegistrySnapshot[T]:
         payload = self._payload(revision=0, updated_at="", items=[])

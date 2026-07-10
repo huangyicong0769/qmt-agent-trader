@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -40,7 +40,11 @@ from qmt_agent_trader.factors.library.value import (
     size_log_mktcap,
 )
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.errors import StorageRevisionConflictError
 from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.repositories.dependencies import (
+    resolve_file_repository_dependencies,
+)
 from qmt_agent_trader.persistence.repositories.versioned_json import (
     RegistrySnapshot,
     VersionedJsonRegistry,
@@ -108,12 +112,19 @@ class FactorRegistry:
     ) -> None:
         self.root = root
         self.registry_path = root / "registry.json" if root is not None else None
+        self.lock_manager = lock_manager
+        self.atomic_store = atomic_store
+        self._snapshot_revision = 0
         self._repository: VersionedJsonRegistry[SavedFactor] | None = None
         self._saved = _builtin_saved_factors()
         if root is not None and self.registry_path is not None:
             root.mkdir(parents=True, exist_ok=True)
-            manager = lock_manager or LockManager(root / ".locks")
-            store = atomic_store or AtomicFileStore(manager)
+            manager, store = resolve_file_repository_dependencies(
+                lock_manager=lock_manager,
+                atomic_store=atomic_store,
+            )
+            self.lock_manager = manager
+            self.atomic_store = store
             self._repository = VersionedJsonRegistry(
                 path=self.registry_path,
                 item_loader=_load_file_factor,
@@ -208,13 +219,46 @@ class FactorRegistry:
             self._saved[factor_id] = record
             return record
 
-        def save(items: list[SavedFactor]) -> list[SavedFactor]:
-            all_current = [*_builtin_saved_factors().values(), *items]
-            self._validate_factor_name(record, all_current)
-            return [item for item in items if item.factor_id != factor_id] + [record]
+        observed_revision = self._snapshot_revision
+        observed = self._saved.get(factor_id)
+        stored = record
 
-        self._apply_snapshot(self._repository.mutate(save))
-        return record
+        def save(items: list[SavedFactor]) -> list[SavedFactor]:
+            nonlocal stored
+            existing = next((item for item in items if item.factor_id == factor_id), None)
+            stored = replace(record, created_at=existing.created_at) if existing else record
+            all_current = [*_builtin_saved_factors().values(), *items]
+            self._validate_factor_name(stored, all_current)
+            return [item for item in items if item.factor_id != factor_id] + [stored]
+
+        try:
+            snapshot = self._repository.mutate(
+                save,
+                expected_revision=observed_revision,
+            )
+        except StorageRevisionConflictError:
+            latest = self._repository.load_snapshot()
+            latest_item = next(
+                (item for item in latest.items if item.factor_id == factor_id),
+                None,
+            )
+            proposed = (
+                replace(record, created_at=latest_item.created_at)
+                if latest_item is not None
+                else record
+            )
+            if latest_item is not None and proposed == latest_item:
+                self._apply_snapshot(latest)
+                return latest_item
+            if latest_item != observed:
+                raise
+            snapshot = self._repository.mutate(
+                save,
+                expected_revision=latest.revision,
+            )
+        self._apply_snapshot(snapshot)
+        persisted = next(item for item in snapshot.items if item.factor_id == factor_id)
+        return persisted
 
     def compute(self, factor_id: str, bars: pd.DataFrame) -> pd.Series:
         saved = self.get_factor(factor_id)
@@ -246,6 +290,7 @@ class FactorRegistry:
         for item in snapshot.items:
             saved[item.factor_id] = item
         self._saved = saved
+        self._snapshot_revision = snapshot.revision
 
     @staticmethod
     def _validate_factor_name(record: SavedFactor, current: list[SavedFactor]) -> None:

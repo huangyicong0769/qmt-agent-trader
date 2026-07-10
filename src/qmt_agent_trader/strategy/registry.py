@@ -11,6 +11,9 @@ from qmt_agent_trader.core.ids import shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.repositories.dependencies import (
+    resolve_file_repository_dependencies,
+)
 from qmt_agent_trader.persistence.repositories.versioned_json import (
     RegistrySnapshot,
     VersionedJsonRegistry,
@@ -37,8 +40,12 @@ class StrategyRegistry:
         self.root = root or get_settings().resolved_data_dir / "strategies"
         self.root.mkdir(parents=True, exist_ok=True)
         self.registry_path = self.root / "registry.json"
-        manager = lock_manager or LockManager(self.root / ".locks")
-        store = atomic_store or AtomicFileStore(manager)
+        manager, store = resolve_file_repository_dependencies(
+            lock_manager=lock_manager,
+            atomic_store=atomic_store,
+        )
+        self.lock_manager = manager
+        self.atomic_store = store
         self._repository = VersionedJsonRegistry(
             path=self.registry_path,
             item_loader=_load_file_strategy,
