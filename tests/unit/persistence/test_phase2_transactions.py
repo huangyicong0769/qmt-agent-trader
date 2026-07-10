@@ -113,7 +113,11 @@ def test_startup_migrations_are_idempotent_across_processes(tmp_path: Path) -> N
             "SELECT migration_id, count(*) FROM storage_schema_migrations "
             "WHERE status='APPLIED' GROUP BY migration_id"
         ).fetchall()
-    assert rows
+    assert {migration_id for migration_id, _ in rows} == {
+        "data-fetch-metadata-v1",
+        "data-fetch-state-primary-keys-v2",
+        "tushare-usage-store-v1",
+    }
     assert all(count == 1 for _, count in rows)
 
 
@@ -134,11 +138,44 @@ def test_upgrade_from_legacy_no_primary_key_state_preserves_latest_rows(
         )
         connection.execute(
             """
+            CREATE TABLE data_fetch_events_v2 (
+                source TEXT, dataset_id TEXT, api_name TEXT, endpoint_id TEXT,
+                param_hash TEXT, fields_hash TEXT, symbols_hash TEXT,
+                fetched_at TIMESTAMP, coverage_start TEXT, coverage_end TEXT,
+                row_count BIGINT, checksum TEXT, status TEXT, error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO data_fetch_events_v2 VALUES
+            ('tushare','tushare.daily','daily','daily','p','f','s',
+             '2024-01-01','20240101','20240101',1,'event-v2','OLD',NULL)
+            """
+        )
+        connection.execute(
+            """
             INSERT INTO data_fetch_state_v2 VALUES
             ('tushare','tushare.daily','daily','daily','p','f','s',
              '2024-01-01',NULL,NULL,1,'old','OLD',NULL),
             ('tushare','tushare.daily','daily','daily','p','f','s',
              '2024-01-02',NULL,NULL,2,'new','NEW',NULL)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE data_fetch_events (
+                source TEXT, dataset TEXT, start_date TEXT, end_date TEXT,
+                status TEXT, row_count BIGINT, checksum TEXT,
+                updated_at TIMESTAMP, error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO data_fetch_events VALUES
+            ('tushare','tushare.daily','20240101','20240131',
+             'OLD',1,'event-v1','2024-01-01',NULL)
             """
         )
         connection.execute(
@@ -169,13 +206,92 @@ def test_upgrade_from_legacy_no_primary_key_state_preserves_latest_rows(
         checksum="latest",
         error=None,
     )
+    lake.record_fetch_metadata(
+        source="tushare",
+        dataset_id="tushare.daily",
+        api_name="daily",
+        endpoint_id="daily",
+        params={"trade_date": "20240102"},
+        fields=["ts_code"],
+        symbols=[],
+        coverage_start="20240102",
+        coverage_end="20240102",
+        row_count=3,
+        checksum="latest-v2",
+        status="LATEST",
+        error=None,
+    )
     with lake.database_coordinator.read_connection("verify_upgrade") as connection:
         assert connection.execute(
             "SELECT count(*), max(checksum) FROM data_fetch_state_v2"
-        ).fetchone() == (1, "new")
+        ).fetchone() == (2, "new")
         assert connection.execute(
             "SELECT count(*), max(checksum) FROM data_fetch_state"
         ).fetchone() == (1, "latest")
+        assert connection.execute(
+            "SELECT checksum FROM data_fetch_events_v2 ORDER BY fetched_at"
+        ).fetchall() == [("event-v2",), ("latest-v2",)]
+        assert connection.execute(
+            "SELECT checksum FROM data_fetch_events ORDER BY updated_at"
+        ).fetchall() == [("event-v1",), ("latest",)]
+        primary_keys = connection.execute(
+            "SELECT table_name FROM duckdb_constraints() "
+            "WHERE constraint_type='PRIMARY KEY' "
+            "AND table_name IN ('data_fetch_state_v2', 'data_fetch_state')"
+        ).fetchall()
+        assert {row[0] for row in primary_keys} == {
+            "data_fetch_state_v2",
+            "data_fetch_state",
+        }
+
+
+def test_no_primary_key_dedupe_tie_break_is_insertion_order_independent(
+    tmp_path: Path,
+) -> None:
+    selected: list[tuple[Any, ...]] = []
+    variants = [
+        ("20240101", "20240131", 7, "same", "SAME", "alpha"),
+        ("20240102", "20240201", 7, "same", "SAME", "omega"),
+    ]
+    for index, ordered in enumerate((variants, list(reversed(variants)))):
+        root = tmp_path / str(index)
+        lake = _lake(root)
+        with lake.database_coordinator.write_transaction("old_schema") as connection:
+            connection.execute(
+                """
+                CREATE TABLE data_fetch_state_v2 (
+                    source TEXT, dataset_id TEXT, api_name TEXT, endpoint_id TEXT,
+                    param_hash TEXT, fields_hash TEXT, symbols_hash TEXT,
+                    fetched_at TIMESTAMP, coverage_start TEXT, coverage_end TEXT,
+                    row_count BIGINT, checksum TEXT, status TEXT, error TEXT
+                )
+                """
+            )
+            connection.executemany(
+                "INSERT INTO data_fetch_state_v2 VALUES "
+                "('tushare','tushare.daily','daily','daily','p','f','s',"
+                "'2024-01-02',?,?,?,?,?,?)",
+                ordered,
+            )
+            connection.execute(
+                """
+                CREATE TABLE data_fetch_state (
+                    source TEXT, dataset TEXT, start_date TEXT, end_date TEXT,
+                    status TEXT, row_count BIGINT, checksum TEXT,
+                    updated_at TIMESTAMP, error TEXT
+                )
+                """
+            )
+        initialize_persistence(lake)
+        with lake.database_coordinator.read_connection("selected") as connection:
+            row = connection.execute(
+                "SELECT coverage_start, coverage_end, row_count, checksum, status, error "
+                "FROM data_fetch_state_v2"
+            ).fetchone()
+        assert row is not None
+        selected.append(tuple(row))
+
+    assert selected == [variants[1], variants[1]]
 
 
 def test_fetch_state_and_event_rollback_together(tmp_path: Path) -> None:

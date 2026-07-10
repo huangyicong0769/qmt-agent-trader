@@ -36,6 +36,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
 )
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import ALLOWED_SILVER_TABLES, DataTableBuilder
+from qmt_agent_trader.persistence.errors import StorageError
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 _lake: DataLake | None = None
@@ -198,6 +199,8 @@ def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dic
         )
     except TushareUsageLedgerCorruptError as exc:
         return _corrupt_ledger_payload(exc)
+    except StorageError as exc:
+        return _local_storage_failure_payload(exc)
     payload = plan.as_dict()
     _attach_plan_summary(payload, lake=lake)
     return payload
@@ -226,12 +229,12 @@ def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict
         return data_tool_invalid_request(message=str(exc), reason="invalid_fetch_items")
 
     items = _attach_trade_dates_for_marketwide_fetches(items, lake)
-    provider = _tushare_provider(
-        lake,
-        run_id=context.run_id,
-        execution_mode="autonomous" if context.requested_by_llm else "manual",
-    )
     try:
+        provider = _tushare_provider(
+            lake,
+            run_id=context.run_id,
+            execution_mode="autonomous" if context.requested_by_llm else "manual",
+        )
         plan = provider.plan_fetch(
             items,
             requested_by_llm=context.requested_by_llm,
@@ -239,6 +242,8 @@ def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict
         )
     except TushareUsageLedgerCorruptError as exc:
         return _corrupt_ledger_payload(exc)
+    except StorageError as exc:
+        return _local_storage_failure_payload(exc)
     if plan.status != "planned":
         payload = plan.as_dict()
         _attach_plan_summary(payload, lake=lake)
@@ -270,6 +275,30 @@ def _corrupt_ledger_payload(exc: TushareUsageLedgerCorruptError) -> dict[str, An
         "repair_action": {
             "type": "cli",
             "command": exc.suggested_repair,
+        },
+    }
+
+
+def _local_storage_failure_payload(exc: StorageError) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": "LOCAL_STORAGE_INITIALIZATION_FAILED",
+        "message": "Local storage initialization failed; remote API was not contacted.",
+        "source": "local_metadata",
+        "path": str(exc.path) if exc.path is not None else None,
+        "error_type": exc.original_error_type or type(exc).__name__,
+        "remote_request_attempted": False,
+        "execution_status": "ERROR",
+        "domain_status": "FAILED",
+        "evidence_status": "INVALID",
+        "recommendation_status": "BLOCKED",
+        "coverage_status": "BLOCKED",
+        "blockers": ["local_storage_initialization_failed"],
+        "warnings": [],
+        "next_repair_tool": None,
+        "repair_action": {
+            "type": "cli",
+            "command": "qmt-agent storage verify",
         },
     }
 
@@ -315,11 +344,7 @@ def _attach_plan_summary(payload: dict[str, Any], *, lake: DataLake | None) -> N
         target for item in items for target in item.get("target_tables", [])
     ]
     payload["wide_table_targets"] = sorted(
-        {
-            target
-            for item in items
-            for target in item.get("wide_table_targets", [])
-        }
+        {target for item in items for target in item.get("wide_table_targets", [])}
     )
     if lake is None:
         payload["local_coverage_status"] = "UNKNOWN"
@@ -371,9 +396,7 @@ def _local_coverage_for_planned_item(
         symbol_partial_reasons = ["missing_symbols"] if missing_symbols else []
         return {
             **coverage,
-            "status": (
-                "PARTIAL_COVERAGE" if symbol_partial_reasons else "LOCAL_DATA_PRESENT"
-            ),
+            "status": ("PARTIAL_COVERAGE" if symbol_partial_reasons else "LOCAL_DATA_PRESENT"),
             "rows": len(scoped),
             "missing_symbols": missing_symbols,
             "date_column": date_column,
@@ -711,8 +734,6 @@ def build_remote_data_tools(deps: AgentToolDependencies) -> list[AgentTool]:
         ),
         tool(
             build_data_table_tool.spec,
-            fn=lambda input_data, context: _with_deps(
-                deps, _build_data_table, input_data, context
-            ),
+            fn=lambda input_data, context: _with_deps(deps, _build_data_table, input_data, context),
         ),
     ]

@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from qmt_agent_trader.agent.audit import AuditLogger
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
@@ -15,13 +16,18 @@ from qmt_agent_trader.agent.tools import remote_data_tools
 from qmt_agent_trader.agent.tools.base import AgentTool
 from qmt_agent_trader.agent.tools.remote_data_tools import build_remote_data_tools, wire
 from qmt_agent_trader.core.config import Settings
+from qmt_agent_trader.data.providers.tushare import ledger_migration
 from qmt_agent_trader.data.providers.tushare.client import TushareClient
 from qmt_agent_trader.data.providers.tushare.ledger_migration import (
     repair_tushare_usage_ledger,
 )
-from qmt_agent_trader.data.providers.tushare.quota import TushareUsageLedger
+from qmt_agent_trader.data.providers.tushare.quota import (
+    TushareUsageLedger,
+    new_usage_record,
+)
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.initialization import initialize_persistence
+from qmt_agent_trader.persistence.migrations import MigrationRegistry
 
 
 class ExplodingGenericClient(TushareClient):
@@ -355,6 +361,90 @@ def test_run_tushare_fetch_does_not_contact_remote_when_ledger_is_corrupt(tmp_pa
 
     assert result["reason"] == "TUSHARE_USAGE_LEDGER_CORRUPT"
     assert result["remote_request_attempted"] is False
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("failure_stage", ["schema", "archive", "finalization"])
+def test_incomplete_storage_initialization_blocks_plan_run_and_audit_without_remote_call(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    if failure_stage == "schema":
+        monkeypatch.setattr(
+            MigrationRegistry,
+            "apply",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("secret schema detail")),
+        )
+    else:
+        ledger = TushareUsageLedger.from_data_lake(lake)
+        record = new_usage_record(
+            api_name="daily",
+            params={"trade_date": "20240102"},
+            fields=["ts_code"],
+            status="SUCCESS",
+            execution_mode="manual",
+        ).model_dump(mode="json")
+        record["params_redacted"] = "{}"
+        record["fields"] = '["ts_code"]'
+        ledger.path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([record]).to_parquet(ledger.path, index=False)
+        if failure_stage == "archive":
+            monkeypatch.setattr(
+                ledger_migration.os,
+                "replace",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("secret archive detail")),
+            )
+        else:
+            monkeypatch.setattr(
+                ledger_migration,
+                "_finalize_migration",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("secret finalization detail")
+                ),
+            )
+
+    client = RecordingGenericClient({})
+    dependencies = _deps(tmp_path, lake)
+    wire(
+        data_lake=lake,
+        settings=dependencies.settings,
+        client_factory=lambda: client,
+    )
+    registry = AgentToolRegistry(audit_logger=dependencies.audit_logger)
+    registry.register_all(*build_remote_data_tools(dependencies))
+    payload = {
+        "items": [
+            {
+                "api_name": "fina_indicator",
+                "symbols": ["000001.SZ"],
+                "fields": ["ts_code", "end_date", "roe"],
+                "start_date": "20240101",
+                "end_date": "20241231",
+            }
+        ]
+    }
+    plan = registry.run_tool(
+        "plan_tushare_fetch",
+        payload,
+        ToolContext(run_id=f"r-init-{failure_stage}"),
+    )
+    run = registry.run_tool(
+        "run_tushare_fetch",
+        {**payload, "execute_plan": True},
+        ToolContext(run_id=f"r-run-init-{failure_stage}"),
+    )
+
+    for result in (plan, run):
+        assert result["status"] == "BLOCKED"
+        assert result["reason"] == "LOCAL_STORAGE_INITIALIZATION_FAILED"
+        assert result["remote_request_attempted"] is False
+        assert "local_storage_initialization_failed" in result["blockers"]
+        assert "secret" not in str(result)
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert all("local_storage_initialization_failed" in row["blockers"] for row in audit_rows[-2:])
     assert client.calls == []
 
 

@@ -67,8 +67,10 @@ class DataLake:
             self.duckdb_path, self.lock_manager
         )
         self._persistence_schema_initialized = False
+        self._persistence_schema_attempted = False
         self._legacy_ledger_initialized = False
-        self._persistence_initialization_error: Exception | None = None
+        self._persistence_schema_error: Exception | None = None
+        self._legacy_ledger_error: Exception | None = None
         self.root.mkdir(parents=True, exist_ok=True)
         self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -78,7 +80,11 @@ class DataLake:
 
     @property
     def persistence_initialized(self) -> bool:
-        return self._persistence_schema_initialized and self._legacy_ledger_initialized
+        return (
+            self._persistence_schema_initialized
+            and self._legacy_ledger_initialized
+            and self.persistence_initialization_error is None
+        )
 
     @property
     def persistence_schema_initialized(self) -> bool:
@@ -90,14 +96,33 @@ class DataLake:
 
     @property
     def persistence_initialization_error(self) -> Exception | None:
-        return self._persistence_initialization_error
+        return self._persistence_schema_error or self._legacy_ledger_error
+
+    @property
+    def persistence_schema_attempted(self) -> bool:
+        return self._persistence_schema_attempted
+
+    @property
+    def persistence_schema_error(self) -> Exception | None:
+        return self._persistence_schema_error
+
+    @property
+    def legacy_ledger_error(self) -> Exception | None:
+        return self._legacy_ledger_error
 
     def mark_persistence_schema_initialized(self) -> None:
+        self._persistence_schema_attempted = True
         self._persistence_schema_initialized = True
+        self._persistence_schema_error = None
+
+    def mark_persistence_schema_failed(self, error: Exception) -> None:
+        self._persistence_schema_attempted = True
+        self._persistence_schema_initialized = False
+        self._persistence_schema_error = error
 
     def mark_legacy_ledger_initialized(self, *, error: Exception | None = None) -> None:
         self._legacy_ledger_initialized = True
-        self._persistence_initialization_error = error
+        self._legacy_ledger_error = error
 
     def dataset_path(self, layer: str, name: str) -> Path:
         return self.root / layer / f"{name}.parquet"

@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 import duckdb
 
-from qmt_agent_trader.persistence.errors import StorageError
+from qmt_agent_trader.persistence.errors import StorageError, StorageLockTimeoutError
 from qmt_agent_trader.persistence.locks import LockManager
 
 
@@ -23,11 +24,12 @@ class DatabaseCoordinator:
 
     @contextmanager
     def read_connection(
-        self, operation: str = "read", *, read_only: bool = False
+        self, operation: str = "read", *, read_only: bool | None = None
     ) -> Iterator[duckdb.DuckDBPyConnection]:
         connection: duckdb.DuckDBPyConnection | None = None
         try:
-            connection = duckdb.connect(str(self.database_path), read_only=read_only)
+            effective_read_only = self.database_path.exists() if read_only is None else read_only
+            connection = self._open_connection(operation, read_only=effective_read_only)
             yield connection
         except StorageError:
             raise
@@ -38,14 +40,12 @@ class DatabaseCoordinator:
                 connection.close()
 
     @contextmanager
-    def write_transaction(
-        self, operation: str = "write"
-    ) -> Iterator[duckdb.DuckDBPyConnection]:
+    def write_transaction(self, operation: str = "write") -> Iterator[duckdb.DuckDBPyConnection]:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_manager.database_write_lock(self.database_path):
             connection: duckdb.DuckDBPyConnection | None = None
             try:
-                connection = duckdb.connect(str(self.database_path))
+                connection = self._open_connection(operation, read_only=False)
                 connection.execute("BEGIN TRANSACTION")
                 yield connection
                 connection.execute("COMMIT")
@@ -63,15 +63,13 @@ class DatabaseCoordinator:
                     connection.close()
 
     @contextmanager
-    def write_connection(
-        self, operation: str = "write"
-    ) -> Iterator[duckdb.DuckDBPyConnection]:
+    def write_connection(self, operation: str = "write") -> Iterator[duckdb.DuckDBPyConnection]:
         """Open a serialized autocommit connection for legacy statement semantics."""
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_manager.database_write_lock(self.database_path):
             connection: duckdb.DuckDBPyConnection | None = None
             try:
-                connection = duckdb.connect(str(self.database_path))
+                connection = self._open_connection(operation, read_only=False)
                 yield connection
             except duckdb.Error as exc:
                 raise self._error(operation, exc) from exc
@@ -89,8 +87,10 @@ class DatabaseCoordinator:
     def current_schema_version(self, component: str | None = None) -> int:
         try:
             with self.read_connection("current_schema_version") as connection:
-                where = " WHERE component = ? AND status = 'APPLIED'" if component else (
-                    " WHERE status = 'APPLIED'"
+                where = (
+                    " WHERE component = ? AND status = 'APPLIED'"
+                    if component
+                    else (" WHERE status = 'APPLIED'")
                 )
                 params = [component] if component else []
                 result = connection.execute(
@@ -110,6 +110,34 @@ class DatabaseCoordinator:
 
     def _error(self, operation: str, error: BaseException) -> StorageError:
         return StorageError(
-            store_name=self.store_name, database_path=self.database_path,
-            operation=operation, reason="database operation failed", original_error=error,
+            store_name=self.store_name,
+            database_path=self.database_path,
+            operation=operation,
+            reason="database operation failed",
+            original_error=error,
         )
+
+    def _open_connection(self, operation: str, *, read_only: bool) -> duckdb.DuckDBPyConnection:
+        deadline = monotonic() + self.lock_manager.timeout_seconds
+        while True:
+            try:
+                return duckdb.connect(str(self.database_path), read_only=read_only)
+            except duckdb.Error as exc:
+                if not _is_database_lock_conflict(exc):
+                    raise
+                if monotonic() >= deadline:
+                    raise StorageLockTimeoutError(
+                        store_name=self.store_name,
+                        database_path=self.database_path,
+                        operation=operation,
+                        reason=("timed out waiting for a compatible DuckDB process connection"),
+                        recoverable=True,
+                        suggested_repair="retry after active database readers or writers finish",
+                        original_error=exc,
+                    ) from exc
+                sleep(min(0.05, max(deadline - monotonic(), 0.0)))
+
+
+def _is_database_lock_conflict(error: duckdb.Error) -> bool:
+    message = str(error).lower()
+    return "lock" in message and ("conflict" in message or "could not set lock" in message)

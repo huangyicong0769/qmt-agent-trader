@@ -238,10 +238,15 @@ class TushareUsageLedger:
             DeprecationWarning,
             stacklevel=2,
         )
-        return cls(
+        from qmt_agent_trader.data.storage import DataLake
+        from qmt_agent_trader.persistence.initialization import initialize_persistence
+
+        lake = DataLake(
+            root=lake_root,
             duckdb_path=lake_root.parent / "qmt_agent_trader.duckdb",
-            legacy_parquet_path=lake_root / "metadata" / "tushare_usage_ledger.parquet",
         )
+        initialize_persistence(lake)
+        return cls.from_data_lake(lake)
 
     def append(self, record: TushareUsageRecord) -> None:
         self.ensure_ready()

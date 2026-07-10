@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from qmt_agent_trader.persistence.errors import (
+    StorageError,
+    StorageMigrationFailedError,
+)
 from qmt_agent_trader.persistence.migrations import Migration, MigrationRegistry
 
 if TYPE_CHECKING:
@@ -135,7 +139,8 @@ SELECT * EXCLUDE (dedupe_rank) FROM (
         PARTITION BY source, dataset_id, api_name, endpoint_id,
                      param_hash, fields_hash, symbols_hash
         ORDER BY fetched_at DESC, status DESC, checksum DESC NULLS LAST,
-                 row_count DESC
+                 row_count DESC, coverage_start DESC NULLS LAST,
+                 coverage_end DESC NULLS LAST, error DESC NULLS LAST
     ) AS dedupe_rank
     FROM data_fetch_state_v2
 ) WHERE dedupe_rank = 1;
@@ -158,7 +163,7 @@ SELECT * EXCLUDE (dedupe_rank) FROM (
     SELECT *, row_number() OVER (
         PARTITION BY source, dataset, start_date, end_date
         ORDER BY updated_at DESC, status DESC, checksum DESC NULLS LAST,
-                 row_count DESC
+                 row_count DESC, error DESC NULLS LAST
     ) AS dedupe_rank
     FROM data_fetch_state
 ) WHERE dedupe_rank = 1;
@@ -212,23 +217,39 @@ def initialize_persistence(
     raise_on_legacy_error: bool = True,
 ) -> dict[str, Any]:
     """Apply pending schemas and run legacy recovery once for this lake instance."""
+    if lake.persistence_schema_error is not None:
+        if raise_on_legacy_error:
+            raise lake.persistence_schema_error
+        return {
+            "status": "FAILED",
+            "schema_error": lake.persistence_schema_error,
+            "legacy_error": lake.legacy_ledger_error,
+        }
     if lake.persistence_schema_initialized and (
         not migrate_legacy_ledger or lake.legacy_ledger_initialized
     ):
-        error = lake.persistence_initialization_error
+        error = lake.legacy_ledger_error if migrate_legacy_ledger else None
         if error is not None and migrate_legacy_ledger and raise_on_legacy_error:
             raise error
         return {"status": "ALREADY_INITIALIZED", "legacy_error": error}
 
-    applied = (
-        []
-        if lake.persistence_schema_initialized
-        else MigrationRegistry(lake.database_coordinator).apply(storage_migrations())
-    )
+    try:
+        applied = (
+            []
+            if lake.persistence_schema_initialized
+            else MigrationRegistry(lake.database_coordinator).apply(storage_migrations())
+        )
+    except Exception as exc:
+        error = _initialization_error(lake, "initialize_schema", exc)
+        lake.mark_persistence_schema_failed(error)
+        if raise_on_legacy_error:
+            if error is exc:
+                raise
+            raise error from exc
+        return {"status": "FAILED", "schema_error": error, "legacy_error": None}
     lake.mark_persistence_schema_initialized()
     legacy_result: dict[str, Any] | None = None
     legacy_error: Exception | None = None
-    legacy_attempt_completed = False
     if migrate_legacy_ledger and not lake.legacy_ledger_initialized:
         from qmt_agent_trader.data.providers.tushare.ledger_migration import (
             migrate_legacy_usage_ledger,
@@ -238,16 +259,17 @@ def initialize_persistence(
         ledger = TushareUsageLedger.from_data_lake(lake)
         try:
             legacy_result = migrate_legacy_usage_ledger(ledger)
-            legacy_attempt_completed = True
         except Exception as exc:
-            legacy_error = exc
             from qmt_agent_trader.data.providers.tushare.quota import (
                 TushareUsageLedgerCorruptError,
             )
 
-            legacy_attempt_completed = isinstance(exc, TushareUsageLedgerCorruptError)
-        if legacy_attempt_completed:
-            lake.mark_legacy_ledger_initialized(error=legacy_error)
+            legacy_error = (
+                exc
+                if isinstance(exc, TushareUsageLedgerCorruptError)
+                else _initialization_error(lake, "migrate_legacy_tushare_usage", exc)
+            )
+        lake.mark_legacy_ledger_initialized(error=legacy_error)
     if legacy_error is not None and raise_on_legacy_error:
         raise legacy_error
     return {
@@ -256,3 +278,17 @@ def initialize_persistence(
         "legacy_result": legacy_result,
         "legacy_error": legacy_error,
     }
+
+
+def _initialization_error(lake: DataLake, operation: str, error: Exception) -> StorageError:
+    if isinstance(error, StorageError):
+        return error
+    return StorageMigrationFailedError(
+        store_name="persistence_initialization",
+        database_path=lake.duckdb_path,
+        operation=operation,
+        reason="local persistence initialization did not complete",
+        recoverable=True,
+        suggested_repair="restart initialization after inspecting local storage health",
+        original_error=error,
+    )

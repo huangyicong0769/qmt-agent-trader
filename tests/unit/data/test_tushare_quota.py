@@ -26,6 +26,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
     normalized_request_hash,
 )
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.errors import StorageMigrationFailedError
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 
@@ -488,8 +489,10 @@ def test_migration_audit_survives_finalization_failure(monkeypatch, tmp_path) ->
         raising=False,
     )
 
-    with pytest.raises(RuntimeError, match="migration finalization failure"):
+    with pytest.raises(StorageMigrationFailedError):
         initialize_persistence(lake)
+    with pytest.raises(StorageMigrationFailedError):
+        ledger.usage_today_by_api()
 
     with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
         audit = connection.execute(
@@ -530,12 +533,19 @@ def test_migration_retry_resumes_pending_archive_without_duplicate_audit(
 
     monkeypatch.setattr(ledger_migration.os, "replace", fail_first_archive)
 
-    with pytest.raises(OSError, match="archive replace failure"):
+    with pytest.raises(StorageMigrationFailedError):
         initialize_persistence(lake)
     assert ledger.path.exists()
 
-    initialize_persistence(lake)
-    assert ledger.usage_today("daily_basic") == 0
+    with pytest.raises(StorageMigrationFailedError):
+        initialize_persistence(lake)
+    with pytest.raises(StorageMigrationFailedError):
+        ledger.usage_today("daily_basic")
+
+    resumed_lake = DataLake(root=lake.root, duckdb_path=lake.duckdb_path)
+    initialize_persistence(resumed_lake)
+    resumed_ledger = TushareUsageLedger.from_data_lake(resumed_lake)
+    assert resumed_ledger.usage_today("daily_basic") == 0
 
     with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
         migrations = connection.execute(
