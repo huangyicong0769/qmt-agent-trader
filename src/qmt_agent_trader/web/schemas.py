@@ -20,6 +20,8 @@ class ChatMessage(BaseModel):
 
 
 class ChatSession(BaseModel):
+    schema_version: int = 2
+    revision: int = 0
     session_id: str = Field(default_factory=lambda: new_id("chat"))
     title: str = "New research chat"
     created_at: str = Field(default_factory=shanghai_now_iso)

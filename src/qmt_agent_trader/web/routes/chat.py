@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
+from functools import lru_cache
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
+from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
+from qmt_agent_trader.persistence.paths import PersistencePaths
+from qmt_agent_trader.web.chat_repository import ChatSessionRepository
 from qmt_agent_trader.web.event_bus import AgentEvent, AgentEventType, event_bus
 from qmt_agent_trader.web.runtime import get_agent_runtime
 from qmt_agent_trader.web.schemas import (
@@ -26,8 +30,6 @@ from qmt_agent_trader.web.schemas import (
 )
 
 router = APIRouter()
-
-_sessions: dict[str, ChatSession] = {}
 
 # Lazily built orchestrator (cache after first use)
 _orchestrator: AgentOrchestrator | None = None
@@ -46,7 +48,7 @@ async def create_session(request: CreateChatSessionRequest) -> ChatSession:
         title=request.title or "New research chat",
         context=request.context,
     )
-    _sessions[session.session_id] = session
+    session = get_chat_session_repository().create(session)
     await event_bus.publish(
         AgentEvent(
             run_id=session.session_id,
@@ -60,7 +62,7 @@ async def create_session(request: CreateChatSessionRequest) -> ChatSession:
 
 @router.get("/sessions", response_model=list[ChatSession])
 async def list_sessions() -> list[ChatSession]:
-    return sorted(_sessions.values(), key=lambda s: s.updated_at, reverse=True)
+    return get_chat_session_repository().list()
 
 
 @router.get("/sessions/{session_id}", response_model=ChatSession)
@@ -83,8 +85,12 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict[str
     )
     orchestrator = _get_orchestrator()
     llm_configured = orchestrator.settings.deepseek_api_key is not None
-    session.messages.append(user_message)
-    session.updated_at = shanghai_now_iso()
+    session = get_chat_session_repository().update(
+        session_id,
+        lambda current: current.model_copy(
+            update={"messages": [*current.messages, user_message], "updated_at": shanghai_now_iso()}
+        ),
+    )
 
     await event_bus.publish(
         AgentEvent(
@@ -141,8 +147,12 @@ async def execute_stream(session_id: str, request: Request) -> StreamingResponse
 
     if not using_session_message:
         user_msg = ChatMessage(session_id=session_id, role="user", content=message)
-        session.messages.append(user_msg)
-        session.updated_at = shanghai_now_iso()
+        session = get_chat_session_repository().update(
+            session_id,
+            lambda current: current.model_copy(
+                update={"messages": [*current.messages, user_msg], "updated_at": shanghai_now_iso()}
+            ),
+        )
 
     orchestrator = _get_orchestrator()
 
@@ -153,10 +163,7 @@ async def execute_stream(session_id: str, request: Request) -> StreamingResponse
                 message=message,
                 run_id=run_id,
                 session_id=session_id,
-                history=[
-                    {"role": m.role, "content": m.content}
-                    for m in session.messages
-                ],
+                history=[{"role": m.role, "content": m.content} for m in session.messages],
             ):
                 sse = event.to_sse()
                 yield f"event: {event.type}\n"
@@ -175,9 +182,7 @@ async def execute_stream(session_id: str, request: Request) -> StreamingResponse
                 )
 
         except Exception as exc:
-            error_payload = json.dumps(
-                {"type": "error", "message": str(exc)}, ensure_ascii=False
-            )
+            error_payload = json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False)
             yield f"event: error\ndata: {error_payload}\n\n"
 
     return StreamingResponse(
@@ -208,7 +213,17 @@ def _to_agent_event_type(event_type: str) -> AgentEventType:
 
 
 def _get_session_or_404(session_id: str) -> ChatSession:
-    session = _sessions.get(session_id)
+    session = get_chat_session_repository().get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="chat session not found")
     return session
+
+
+@lru_cache
+def get_chat_session_repository() -> ChatSessionRepository:
+    paths = PersistencePaths.from_settings(get_settings())
+    return ChatSessionRepository(
+        paths.sessions_root,
+        locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "chat_sessions",
+    )

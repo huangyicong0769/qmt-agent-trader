@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
+from qmt_agent_trader.persistence.repositories.versioned_record import VersionedRecordRepository
 
 MAX_TODO_ITEMS = 50
 MAX_TODO_TITLE_LENGTH = 200
@@ -44,6 +44,8 @@ class TodoItem(BaseModel):
 
 
 class TodoListRecord(BaseModel):
+    schema_version: int = 2
+    revision: int = 0
     session_id: str
     goal: str | None = None
     items: list[TodoItem] = Field(default_factory=list)
@@ -78,9 +80,7 @@ class TodoListRecord(BaseModel):
 
     def to_payload(self, *, include_completed: bool = True) -> dict[str, Any]:
         items = [
-            item
-            for item in self.items
-            if include_completed or item.status != TodoStatus.COMPLETED
+            item for item in self.items if include_completed or item.status != TodoStatus.COMPLETED
         ]
         active = self.active_item
         return {
@@ -96,19 +96,28 @@ class TodoListRecord(BaseModel):
 class TodoListStore:
     """JSON-file store keyed by a hashed session id."""
 
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.root.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self, root: Path, *, locks_root: Path | None = None, quarantine_root: Path | None = None
+    ) -> None:
+        self.root = root.expanduser().resolve()
+        self.repository = VersionedRecordRepository(
+            self.root,
+            TodoListRecord,
+            store_name="todos",
+            locks_root=locks_root,
+            quarantine_root=quarantine_root,
+        )
 
     def path_for_session(self, session_id: str) -> Path:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
-        return self.root / f"{digest}.json"
+        return self.repository.path_for(digest)
 
     def get(self, session_id: str) -> TodoListRecord:
-        path = self.path_for_session(session_id)
-        if not path.exists():
-            return TodoListRecord(session_id=session_id)
-        return TodoListRecord.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+        record = self.repository.load(digest, missing=lambda: TodoListRecord(session_id=session_id))
+        if record.session_id != session_id:
+            raise ValueError("todo session id does not match its canonical record")
+        return record
 
     def replace_items(
         self,
@@ -133,7 +142,7 @@ class TodoListStore:
             ],
             updated_at=now,
         )
-        return self._write(self._normalize_active(record))
+        return self._replace(record)
 
     def add_item(
         self,
@@ -142,10 +151,7 @@ class TodoListStore:
         title: str,
         notes: str = "",
     ) -> TodoListRecord:
-        record = self.get(session_id)
-        self._validate_item_count(len(record.items) + 1)
-        record.items.append(TodoItem(title=self._clean_title(title), notes=notes))
-        return self._write(record)
+        return self._mutate(session_id, lambda record: self._add(record, title, notes))
 
     def update_item(
         self,
@@ -156,7 +162,20 @@ class TodoListStore:
         title: str | None = None,
         notes: str | None = None,
     ) -> TodoListRecord:
-        record = self.get(session_id)
+        return self._mutate(
+            session_id,
+            lambda record: self._update(record, item_id, status=status, title=title, notes=notes),
+        )
+
+    def _update(
+        self,
+        record: TodoListRecord,
+        item_id: str,
+        *,
+        status: TodoStatus | str | None,
+        title: str | None,
+        notes: str | None,
+    ) -> TodoListRecord:
         item = self._find_item(record, item_id)
         updates: dict[str, Any] = {"updated_at": shanghai_now_iso()}
         if status is not None:
@@ -175,28 +194,35 @@ class TodoListStore:
                         "updated_at": shanghai_now_iso(),
                     }
                 )
-                if existing.item_id != item_id
-                and existing.status == TodoStatus.IN_PROGRESS
+                if existing.item_id != item_id and existing.status == TodoStatus.IN_PROGRESS
                 else existing
                 for existing in record.items
             ]
         record.updated_at = shanghai_now_iso()
-        return self._write(self._normalize_active(record))
+        return self._normalize_active(record)
 
     def clear_completed(self, session_id: str) -> TodoListRecord:
-        record = self.get(session_id)
-        record.items = [
-            item for item in record.items if item.status != TodoStatus.COMPLETED
-        ]
-        record.updated_at = shanghai_now_iso()
-        return self._write(record)
+        return self._mutate(session_id, self._clear_completed)
 
-    def _write(self, record: TodoListRecord) -> TodoListRecord:
-        path = self.path_for_session(record.session_id)
-        path.write_text(
-            json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+    def _mutate(self, session_id: str, operation: Any) -> TodoListRecord:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+        return self.repository.mutate(
+            digest, operation, missing=lambda: TodoListRecord(session_id=session_id)
         )
+
+    def _replace(self, record: TodoListRecord) -> TodoListRecord:
+        return self._mutate(record.session_id, lambda _current: self._normalize_active(record))
+
+    def _add(self, record: TodoListRecord, title: str, notes: str) -> TodoListRecord:
+        self._validate_item_count(len(record.items) + 1)
+        record.items.append(TodoItem(title=self._clean_title(title), notes=notes))
+        record.updated_at = shanghai_now_iso()
+        return record
+
+    @staticmethod
+    def _clear_completed(record: TodoListRecord) -> TodoListRecord:
+        record.items = [item for item in record.items if item.status != TodoStatus.COMPLETED]
+        record.updated_at = shanghai_now_iso()
         return record
 
     @staticmethod

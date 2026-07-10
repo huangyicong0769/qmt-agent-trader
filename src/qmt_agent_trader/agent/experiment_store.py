@@ -7,21 +7,33 @@ project data root so it stays alongside the data lake.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from qmt_agent_trader.agent.errors import ExperimentNotFoundError
 from qmt_agent_trader.agent.schemas import ExperimentRecord, ExperimentStatus
-from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
+from qmt_agent_trader.core.ids import new_id
+from qmt_agent_trader.persistence.repositories.versioned_record import (
+    RecordDiagnostic,
+    VersionedRecordRepository,
+)
 
 
 class ExperimentStore:
     """Create, update, search, and recall Agent experiments."""
 
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.root.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self, root: Path, *, locks_root: Path | None = None, quarantine_root: Path | None = None
+    ) -> None:
+        self.root = root.expanduser().resolve()
+        self.repository = VersionedRecordRepository(
+            self.root,
+            ExperimentRecord,
+            store_name="experiments",
+            locks_root=locks_root,
+            quarantine_root=quarantine_root,
+        )
+        self.last_diagnostics: list[RecordDiagnostic] = []
 
     # ── CRUD ──────────────────────────────────────────────────────────────
 
@@ -40,41 +52,35 @@ class ExperimentStore:
             hypothesis=hypothesis,
             tags=tags or [],
         )
-        self._write(record)
-        return record
+        return self.repository.create(experiment_id, record)
 
-    def update_experiment(
-        self, experiment_id: str, **updates: Any
-    ) -> ExperimentRecord:
-        record = self.get_experiment(experiment_id)
-        data = record.model_dump(mode="json")
-        data.update(updates)
-        data["updated_at"] = datetime.now(tz=UTC)
-        updated = ExperimentRecord.model_validate(data)
-        self._write(updated)
-        return updated
+    def update_experiment(self, experiment_id: str, **updates: Any) -> ExperimentRecord:
+        expected_revision = updates.pop("expected_revision", None)
+
+        def apply(record: ExperimentRecord) -> ExperimentRecord:
+            data = record.model_dump(mode="json")
+            data.update(updates)
+            return ExperimentRecord.model_validate(data)
+
+        return self.repository.mutate(experiment_id, apply, expected_revision=expected_revision)
 
     def get_experiment(self, experiment_id: str) -> ExperimentRecord:
-        path = self._path(experiment_id)
-        if not path.exists():
-            raise ExperimentNotFoundError(
-                f"experiment '{experiment_id}' not found"
-            )
-        return ExperimentRecord.model_validate(
-            json.loads(path.read_text(encoding="utf-8"))
-        )
+        try:
+            return self.repository.load(experiment_id)
+        except FileNotFoundError:
+            raise ExperimentNotFoundError(f"experiment '{experiment_id}' not found") from None
 
     def add_lesson(self, experiment_id: str, lesson: str) -> None:
-        record = self.get_experiment(experiment_id)
-        lessons = list(record.lessons)
-        lessons.append(lesson)
-        self.update_experiment(experiment_id, lessons=lessons)
+        self.repository.mutate(
+            experiment_id,
+            lambda record: record.model_copy(update={"lessons": [*record.lessons, lesson]}),
+        )
 
     def add_artifact(self, experiment_id: str, artifact: str) -> None:
-        record = self.get_experiment(experiment_id)
-        artifacts = list(record.artifacts)
-        artifacts.append(artifact)
-        self.update_experiment(experiment_id, artifacts=artifacts)
+        self.repository.mutate(
+            experiment_id,
+            lambda record: record.model_copy(update={"artifacts": [*record.artifacts, artifact]}),
+        )
 
     # ── Search ────────────────────────────────────────────────────────────
 
@@ -86,19 +92,11 @@ class ExperimentStore:
         limit: int = 20,
     ) -> list[ExperimentRecord]:
         results: list[ExperimentRecord] = []
-        for path in sorted(
-            self.root.glob("exp_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        ):
+        records, self.last_diagnostics = self.repository.list_with_diagnostics()
+        records.sort(key=lambda record: record.updated_at, reverse=True)
+        for record in records:
             if len(results) >= limit:
                 break
-            try:
-                record = ExperimentRecord.model_validate(
-                    json.loads(path.read_text(encoding="utf-8"))
-                )
-            except Exception:
-                continue
             if not self._matches_filter(record, query=query, tags=tags):
                 continue
             results.append(record)
@@ -114,15 +112,7 @@ class ExperimentStore:
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _path(self, experiment_id: str) -> Path:
-        return self.root / f"{experiment_id}.json"
-
-    def _write(self, record: ExperimentRecord) -> None:
-        data = record.model_dump(mode="json")
-        data["updated_at"] = shanghai_now_iso()
-        self._path(record.experiment_id).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
+        return self.repository.path_for(experiment_id)
 
     @staticmethod
     def _matches_filter(

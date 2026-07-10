@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import anyio
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from qmt_agent_trader.agent.orchestrator import OrchestratorEvent
+from qmt_agent_trader.web.chat_repository import ChatSessionRepository
 from qmt_agent_trader.web.routes import chat
 
 
+@pytest.fixture(autouse=True)
+def isolated_chat_repository(tmp_path, monkeypatch) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    monkeypatch.setattr(chat, "get_chat_session_repository", lambda: repository)
+
+
 def test_chat_api_create_and_send_message() -> None:
-    chat._sessions.clear()
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -39,7 +46,6 @@ def test_chat_api_create_and_send_message() -> None:
 
 
 def test_chat_api_lists_sessions() -> None:
-    chat._sessions.clear()
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -53,7 +59,6 @@ def test_chat_api_lists_sessions() -> None:
 
 def test_send_message_without_mode_works() -> None:
     """Sending a message without mode should not fail."""
-    chat._sessions.clear()
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -72,7 +77,6 @@ def test_send_message_without_mode_works() -> None:
 
 def test_send_message_with_advanced_options() -> None:
     """Advanced options should be accepted but not required."""
-    chat._sessions.clear()
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -90,7 +94,6 @@ def test_send_message_with_advanced_options() -> None:
 
 def test_execute_without_body_reuses_queued_message_without_duplicate() -> None:
     """Executing an enqueued message should not append the same user text again."""
-    chat._sessions.clear()
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -119,14 +122,11 @@ def test_execute_without_body_reuses_queued_message_without_duplicate() -> None:
 
     anyio.run(call_execute)
     payload = client.get(f"/sessions/{session_id}").json()
-    user_messages = [
-        message for message in payload["messages"] if message["role"] == "user"
-    ]
+    user_messages = [message for message in payload["messages"] if message["role"] == "user"]
     assert [message["content"] for message in user_messages] == ["发现因子"]
 
 
 def test_execute_stream_outputs_todo_status_event_with_session_id(monkeypatch) -> None:
-    chat._sessions.clear()
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -163,7 +163,6 @@ def test_execute_stream_outputs_todo_status_event_with_session_id(monkeypatch) -
 
 def test_session_schema_no_mode_field() -> None:
     """ChatSession should not have a required 'mode' field."""
-    chat._sessions.clear()
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)

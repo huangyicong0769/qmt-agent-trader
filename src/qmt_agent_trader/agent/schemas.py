@@ -86,6 +86,8 @@ class ExperimentStatus(StrEnum):
 
 
 class ExperimentRecord(BaseModel):
+    schema_version: int = 2
+    revision: int = 0
     experiment_id: str
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(tz=UTC)
