@@ -170,6 +170,15 @@ uv run qmt-agent data build-table --table daily_market
 uv run qmt-agent data validate
 ```
 
+Tushare usage accounting is stored in DuckDB rather than a mutable Parquet event log. To inspect
+or explicitly quarantine a corrupt legacy ledger, follow
+[Tushare usage ledger recovery](docs/tushare_usage_ledger.md):
+
+```bash
+uv run qmt-agent data repair-tushare-ledger
+uv run qmt-agent data repair-tushare-ledger --quarantine-corrupt
+```
+
 Legacy Tushare raw files such as `raw/tushare_daily.parquet` and
 `raw/tushare_daily_20240101_20240131.parquet` are one-way migrated into the new
 `raw/tushare/*.parquet` layout with:
