@@ -1,40 +1,23 @@
-"""Crash-safe local file writers used by the data lake."""
+"""Compatibility facade for shared persistence atomic file operations."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from uuid import uuid4
 
 import pandas as pd
-import pyarrow.parquet as pq
+
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.errors import StorageError
+from qmt_agent_trader.persistence.locks import LockManager
 
 
-def atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
-    """Write and validate a Parquet file before atomically replacing its target."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+def atomic_write_parquet(frame: pd.DataFrame, path: Path | os.PathLike[str]) -> None:
+    """Preserve the historical function while delegating to the shared store."""
+    path = Path(path)
     try:
-        frame.to_parquet(temp_path, index=False)
-        parquet = pq.ParquetFile(temp_path)  # type: ignore[no-untyped-call]
-        for row_group in range(parquet.num_row_groups):
-            parquet.read_row_group(row_group)  # type: ignore[no-untyped-call]
-        with temp_path.open("rb") as handle:
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-        _fsync_directory(path.parent)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-def _fsync_directory(directory: Path) -> None:
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
+        AtomicFileStore(LockManager(path.parent / ".locks")).write_parquet(path, frame)
+    except StorageError as exc:
+        if exc.__cause__ is not None:
+            raise exc.__cause__ from exc
+        raise

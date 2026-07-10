@@ -170,7 +170,7 @@ def test_incremental_lock_timeout_preserves_existing_file(tmp_path) -> None:
         "locked",
         key_columns=["id"],
     )
-    lock = FileLock(str(path) + ".lock")
+    lock = FileLock(str(lake.lock_manager.lock_path_for_resource(path)))
 
     with lock, pytest.raises(DataLakeLockTimeoutError):
         lake.write_incremental_parquet(

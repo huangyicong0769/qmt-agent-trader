@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-import duckdb
 import pandas as pd
-from filelock import FileLock
 from pydantic import BaseModel, Field
+
+from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.locks import LockManager
 
 if TYPE_CHECKING:
     from qmt_agent_trader.data.storage import DataLake
@@ -173,10 +174,22 @@ class TushareUsageLedger:
         duckdb_path: Path,
         legacy_parquet_path: Path,
         lock_timeout_seconds: float = 30.0,
+        database_coordinator: DatabaseCoordinator | None = None,
+        lock_manager: LockManager | None = None,
     ) -> None:
         self.duckdb_path = duckdb_path
         self.path = legacy_parquet_path
         self.lock_timeout_seconds = lock_timeout_seconds
+        self.lock_manager = lock_manager or (
+            database_coordinator.lock_manager
+            if database_coordinator is not None
+            else LockManager(
+                self.duckdb_path.parent / "locks", timeout_seconds=lock_timeout_seconds
+            )
+        )
+        self.database_coordinator = database_coordinator or DatabaseCoordinator(
+            self.duckdb_path, self.lock_manager
+        )
 
     @classmethod
     def from_data_lake(
@@ -189,6 +202,8 @@ class TushareUsageLedger:
             duckdb_path=lake.duckdb_path,
             legacy_parquet_path=lake.root / "metadata" / "tushare_usage_ledger.parquet",
             lock_timeout_seconds=lock_timeout_seconds,
+            database_coordinator=lake.database_coordinator,
+            lock_manager=lake.lock_manager,
         )
 
     @classmethod
@@ -357,15 +372,13 @@ class TushareUsageLedger:
         with self.mutation_lock(), self.connect() as connection:
             self.ensure_tables(connection)
 
-    def connect(self) -> duckdb.DuckDBPyConnection:
-        self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
-        return duckdb.connect(str(self.duckdb_path))
+    def connect(self) -> AbstractContextManager[Any]:
+        return self.database_coordinator.read_connection("tushare_ledger")
 
-    def mutation_lock(self) -> AbstractContextManager[FileLock]:
-        lock_path = self.duckdb_path.with_suffix(self.duckdb_path.suffix + ".tushare.lock")
-        return FileLock(str(lock_path), timeout=self.lock_timeout_seconds)
+    def mutation_lock(self) -> AbstractContextManager[Any]:
+        return self.lock_manager.database_write_lock(self.duckdb_path)
 
-    def ensure_tables(self, connection: duckdb.DuckDBPyConnection) -> None:
+    def ensure_tables(self, connection: Any) -> None:
         connection.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {self.table_name} (

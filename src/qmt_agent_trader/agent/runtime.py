@@ -13,6 +13,9 @@ from qmt_agent_trader.broker.remote_client import RemoteQMTBrokerClient
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.paths import PersistencePaths
 
 if TYPE_CHECKING:
     from qmt_agent_trader.agent.tool_registry import AgentToolRegistry
@@ -143,17 +146,24 @@ def build_default_runtime(
     broker_client: RemoteQMTBrokerClient | None = None,
 ) -> AgentRuntime:
     resolved = settings or get_settings()
+    paths = PersistencePaths.from_settings(resolved)
+    lock_manager = LockManager(
+        paths.locks_root, timeout_seconds=resolved.remote_data_lock_timeout_seconds
+    )
+    coordinator = DatabaseCoordinator(paths.control_db_path, lock_manager)
     lake = DataLake(
-        root=resolved.resolved_data_dir / "lake",
-        duckdb_path=resolved.resolved_data_dir / "qmt_agent_trader.duckdb",
+        root=paths.lake_root,
+        duckdb_path=paths.control_db_path,
         parquet_lock_timeout_seconds=resolved.remote_data_lock_timeout_seconds,
+        database_coordinator=coordinator,
+        lock_manager=lock_manager,
     )
     return AgentRuntime(
         settings=resolved,
         lake=lake,
-        reports_dir=resolved.project_root / "reports" / "backtests",
-        research_reports_dir=resolved.project_root / "reports" / "research",
-        approvals_dir=resolved.project_root / "approvals",
+        reports_dir=paths.reports_root / "backtests",
+        research_reports_dir=paths.reports_root / "research",
+        approvals_dir=paths.approvals_root,
         broker_client=broker_client or _optional_broker_client(resolved),
     )
 

@@ -57,6 +57,9 @@ from qmt_agent_trader.data.providers.tushare.quota import (
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
+from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
     build_sample_paper_order_plan,
     load_order_plan,
@@ -122,10 +125,16 @@ def _generic_tushare_client() -> GenericTushareClient:
 
 def _data_lake() -> DataLake:
     settings = _settings()
+    paths = PersistencePaths.from_settings(settings)
+    lock_manager = LockManager(
+        paths.locks_root, timeout_seconds=settings.remote_data_lock_timeout_seconds
+    )
     return DataLake(
-        root=settings.resolved_data_dir / "lake",
-        duckdb_path=settings.resolved_data_dir / "qmt_agent_trader.duckdb",
+        root=paths.lake_root,
+        duckdb_path=paths.control_db_path,
         parquet_lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+        database_coordinator=DatabaseCoordinator(paths.control_db_path, lock_manager),
+        lock_manager=lock_manager,
     )
 
 

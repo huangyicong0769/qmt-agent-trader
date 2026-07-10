@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import duckdb
 import pandas as pd
-from filelock import FileLock, Timeout
 
 from qmt_agent_trader.data.atomic_io import atomic_write_parquet
+from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.errors import StorageLockTimeoutError
+from qmt_agent_trader.persistence.locks import LockManager
 
 
 class DataLakeLockTimeoutError(RuntimeError):
@@ -31,15 +34,29 @@ class DataLake:
         duckdb_path: Path,
         *,
         parquet_lock_timeout_seconds: float = 30.0,
+        database_coordinator: DatabaseCoordinator | None = None,
+        lock_manager: LockManager | None = None,
     ) -> None:
         self.root = root
         self.duckdb_path = duckdb_path
         self.parquet_lock_timeout_seconds = parquet_lock_timeout_seconds
+        self.lock_manager = lock_manager or (
+            database_coordinator.lock_manager
+            if database_coordinator is not None
+            else LockManager(
+                self.duckdb_path.parent / "locks",
+                timeout_seconds=parquet_lock_timeout_seconds,
+            )
+        )
+        self.database_coordinator = database_coordinator or DatabaseCoordinator(
+            self.duckdb_path, self.lock_manager
+        )
         self.root.mkdir(parents=True, exist_ok=True)
         self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.duckdb_path))
+    def connect(self) -> AbstractContextManager[duckdb.DuckDBPyConnection]:
+        """Compatibility read connection; writes use the injected coordinator."""
+        return self.database_coordinator.read_connection("data_lake_read")
 
     def dataset_path(self, layer: str, name: str) -> Path:
         return self.root / layer / f"{name}.parquet"
@@ -68,9 +85,8 @@ class DataLake:
         key_columns: list[str],
     ) -> Path:
         path = self.dataset_path(layer, name)
-        lock = FileLock(str(path) + ".lock", timeout=self.parquet_lock_timeout_seconds)
         try:
-            with lock:
+            with self.lock_manager.resource_lock(path):
                 if frame.empty and len(frame.columns) == 0:
                     frame = pd.DataFrame(
                         {column: pd.Series(dtype="object") for column in key_columns}
@@ -107,7 +123,7 @@ class DataLake:
                     name if name.replace("_", "").isalnum() else name.replace("/", "_")
                 )
                 self.register_parquet(table_name, layer, name)
-        except Timeout as exc:
+        except StorageLockTimeoutError as exc:
             raise DataLakeLockTimeoutError(path, self.parquet_lock_timeout_seconds) from exc
         return path
 
@@ -214,11 +230,11 @@ class DataLake:
             f"CREATE OR REPLACE VIEW {table_name} "
             f"AS SELECT * FROM read_parquet('{escaped_path}')"
         )
-        with self.connect() as con:
+        with self.database_coordinator.write_connection("register_parquet") as con:
             con.execute(sql)
 
     def ensure_fetch_tables(self) -> None:
-        with self.connect() as con:
+        with self.database_coordinator.write_connection("ensure_fetch_tables") as con:
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS data_fetch_state_v2 (
@@ -325,7 +341,7 @@ class DataLake:
             status,
             error,
         ]
-        with self.connect() as con:
+        with self.database_coordinator.write_connection("record_fetch_metadata") as con:
             con.execute(
                 """
                 DELETE FROM data_fetch_state_v2
@@ -379,7 +395,7 @@ class DataLake:
             updated_at,
             error,
         ]
-        with self.connect() as con:
+        with self.database_coordinator.write_connection("record_fetch_result") as con:
             con.execute(
                 """
                 DELETE FROM data_fetch_state
