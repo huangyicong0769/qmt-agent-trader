@@ -495,6 +495,55 @@ def test_migration_audit_survives_finalization_failure(monkeypatch, tmp_path) ->
     assert Path(str(audit[3])).exists()
 
 
+def test_migration_retry_resumes_pending_archive_without_duplicate_audit(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    record = new_usage_record(
+        api_name="daily_basic",
+        params={"trade_date": "20240102"},
+        fields=["ts_code"],
+        status="SUCCESS",
+        execution_mode="manual",
+    )
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([_usage_row(record)]).to_parquet(ledger.path, index=False)
+    original_replace = ledger_migration.os.replace
+    failed = False
+
+    def fail_first_archive(source, destination):
+        nonlocal failed
+        if Path(source) == ledger.path and not failed:
+            failed = True
+            raise OSError("simulated archive replace failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(ledger_migration.os, "replace", fail_first_archive)
+
+    with pytest.raises(OSError, match="archive replace failure"):
+        ledger.usage_today_by_api()
+    assert ledger.path.exists()
+
+    assert ledger.usage_today("daily_basic") == 0
+
+    with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
+        migrations = connection.execute(
+            """
+            SELECT status, imported_rows, skipped_rows, archive_path
+            FROM tushare_usage_migrations_v1
+            """
+        ).fetchall()
+        usage_count = connection.execute(
+            "SELECT count(*) FROM tushare_usage_events_v1"
+        ).fetchone()
+    assert len(migrations) == 1
+    assert migrations[0][0:3] == ("MIGRATED", 1, 0)
+    assert Path(str(migrations[0][3])).exists()
+    assert usage_count == (1,)
+
+
 def _usage_row(record) -> dict[str, object]:
     payload = record.model_dump(mode="json")
     payload["params_redacted"] = "{}"

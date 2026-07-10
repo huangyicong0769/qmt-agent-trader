@@ -7,7 +7,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import pandas as pd
@@ -52,13 +52,27 @@ def migrate_legacy_usage_ledger(ledger: TushareUsageLedger) -> dict[str, Any]:
         frame = _read_complete_legacy(ledger.path)
         _validate_columns(ledger.path, frame)
         frame = _normalize_legacy_frame(ledger.path, frame)
-        archive_path = _timestamped_path(ledger.path.parent / "archive", "migrated")
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        migration_id = str(uuid4())
+        archive_path: Path
+        migration_id: str
         imported = 0
         skipped = 0
+        resume_pending = False
         with ledger.connect() as connection:
             ledger.ensure_tables(connection)
+            pending = _pending_migration_for_source(connection, ledger.path)
+            if pending is not None and not Path(str(pending[3])).exists():
+                migration_id = str(pending[0])
+                archive_path = Path(str(pending[3]))
+                imported = int(pending[1])
+                skipped = int(pending[2])
+                resume_pending = True
+            else:
+                migration_id = str(uuid4())
+                archive_path = _timestamped_path(
+                    ledger.path.parent / "archive",
+                    "migrated",
+                )
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
             connection.execute("BEGIN TRANSACTION")
             try:
                 before = connection.execute(
@@ -82,23 +96,25 @@ def migrate_legacy_usage_ledger(ledger: TushareUsageLedger) -> dict[str, Any]:
                 ).fetchone()
                 if before is None or after is None:
                     raise RuntimeError("DuckDB did not return usage row counts during migration")
-                imported = int(after[0]) - int(before[0])
-                skipped = len(frame) - imported
-                connection.execute(
-                    """
-                    INSERT INTO tushare_usage_migrations_v1 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        migration_id,
-                        datetime.now(tz=UTC).replace(tzinfo=None),
-                        str(ledger.path),
-                        str(archive_path),
-                        imported,
-                        skipped,
-                        "IMPORT_COMMITTED_PENDING_ARCHIVE",
-                        None,
-                    ],
-                )
+                if not resume_pending:
+                    imported = int(after[0]) - int(before[0])
+                    skipped = len(frame) - imported
+                    connection.execute(
+                        """
+                        INSERT INTO tushare_usage_migrations_v1
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            migration_id,
+                            datetime.now(tz=UTC).replace(tzinfo=None),
+                            str(ledger.path),
+                            str(archive_path),
+                            imported,
+                            skipped,
+                            "IMPORT_COMMITTED_PENDING_ARCHIVE",
+                            None,
+                        ],
+                    )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -258,6 +274,23 @@ def _record_history_reset_locked(
         """,
         [payload],
     )
+
+
+def _pending_migration_for_source(
+    connection: Any,
+    source_path: Path,
+) -> tuple[Any, ...] | None:
+    row = connection.execute(
+        """
+        SELECT migration_id, imported_rows, skipped_rows, archive_path
+        FROM tushare_usage_migrations_v1
+        WHERE source_path = ? AND status = 'IMPORT_COMMITTED_PENDING_ARCHIVE'
+        ORDER BY migrated_at DESC
+        LIMIT 1
+        """,
+        [str(source_path)],
+    ).fetchone()
+    return cast(tuple[Any, ...] | None, row)
 
 
 def _finalize_migration(ledger: TushareUsageLedger, migration_id: str) -> None:
