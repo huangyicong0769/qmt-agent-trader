@@ -319,6 +319,7 @@ def _quota_metadata(
 ) -> dict[str, Any]:
     decision = budget_decision.model_dump(mode="json")
     return {
+        "warnings": quota_state.warnings,
         "quota_profile": quota_state.profile.model_dump(mode="json"),
         "quota_state": quota_state.model_dump(mode="json"),
         "cost_estimate": cost_estimate.model_dump(mode="json"),

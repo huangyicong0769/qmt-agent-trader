@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from importlib import import_module, util
+from multiprocessing import get_context
+from pathlib import Path
 
+import duckdb
 import pandas as pd
+import pyarrow.parquet as pq
+import pytest
 
+from qmt_agent_trader.data.providers.tushare import quota as quota_module
 from qmt_agent_trader.data.providers.tushare.quota import (
     DEFAULT_TUSHARE_2000_POINT_PROFILE,
     TushareAccountQuotaProfile,
@@ -12,6 +20,13 @@ from qmt_agent_trader.data.providers.tushare.quota import (
     TushareUsageLedger,
     new_usage_record,
     normalized_request_hash,
+)
+from qmt_agent_trader.data.storage import DataLake
+
+TushareUsageLedgerCorruptError = getattr(
+    quota_module,
+    "TushareUsageLedgerCorruptError",
+    type("MissingTushareUsageLedgerCorruptError", (RuntimeError,), {}),
 )
 
 
@@ -164,6 +179,255 @@ def test_usage_ledger_records_success_failure_rate_limit_and_ignores_dry_run(
     assert ledger.usage_today("daily_basic") == 3
     assert len(ledger.recent_rate_limit_errors()) == 1
     assert ledger.request_seen("daily_basic", request_hash) is True
+
+
+def test_usage_ledger_uses_duckdb_and_request_id_is_idempotent(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    record = new_usage_record(
+        api_name="daily_basic",
+        params={"trade_date": "20240102"},
+        fields=["ts_code", "trade_date"],
+        status="SUCCESS",
+        execution_mode="manual",
+        finished_at=datetime.now(tz=UTC),
+    )
+
+    ledger.append(record)
+    ledger.append(record)
+
+    assert not ledger.path.exists()
+    with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
+        count = connection.execute("SELECT count(*) FROM tushare_usage_events_v1").fetchone()
+    assert count == (1,)
+    assert ledger.request_seen("daily_basic", record.params_hash) is True
+
+
+def test_empty_legacy_ledger_is_archived_without_usage(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=_usage_row_columns()).to_parquet(ledger.path, index=False)
+
+    assert ledger.usage_today_by_api() == {}
+    assert not ledger.path.exists()
+    assert len(list((ledger.path.parent / "archive").glob("*.parquet"))) == 1
+
+
+def test_legacy_ledger_missing_required_columns_is_rejected(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{"request_id": "incomplete"}]).to_parquet(ledger.path, index=False)
+
+    with pytest.raises(TushareUsageLedgerCorruptError, match="missing required columns"):
+        ledger.usage_today_by_api()
+
+    assert ledger.path.exists()
+
+
+def test_footer_readable_but_data_page_corrupt_ledger_is_rejected(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    record = new_usage_record(
+        api_name="daily_basic",
+        params={"trade_date": "20240102"},
+        fields=["ts_code"],
+        status="SUCCESS",
+        execution_mode="manual",
+        finished_at=datetime.now(tz=UTC),
+    )
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([_usage_row(record)]).to_parquet(ledger.path, index=False)
+    parquet = pq.ParquetFile(ledger.path)
+    page_offset = parquet.metadata.row_group(0).column(0).data_page_offset
+    with ledger.path.open("r+b") as handle:
+        handle.seek(page_offset)
+        handle.write(b"\xff" * 12)
+
+    pq.read_metadata(ledger.path)
+    with pytest.raises(Exception, match="Local Tushare usage ledger is unreadable"):
+        ledger.usage_last_minute()
+
+
+def test_usage_ledger_never_persists_plaintext_token(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    ledger.append(
+        new_usage_record(
+            api_name="daily_basic",
+            params={"token": "top-secret", "trade_date": "20240102"},
+            fields=["ts_code"],
+            status="SUCCESS",
+            execution_mode="manual",
+            token_hash=quota_module.token_hash("top-secret"),
+            finished_at=datetime.now(tz=UTC),
+        )
+    )
+
+    with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
+        stored = connection.execute(
+            "SELECT params_redacted, token_hash FROM tushare_usage_events_v1"
+        ).fetchone()
+    assert stored is not None
+    assert "top-secret" not in str(stored)
+    assert "<redacted>" in str(stored)
+
+
+def test_usage_ledger_serializes_independent_process_writers(tmp_path) -> None:
+    lake_root = tmp_path / "lake"
+    duckdb_path = tmp_path / "db.duckdb"
+    context = get_context("spawn")
+
+    with context.Pool(processes=4) as pool:
+        pool.starmap(
+            _append_usage_in_process,
+            [(str(lake_root), str(duckdb_path), index) for index in range(8)],
+        )
+
+    with duckdb.connect(str(duckdb_path), read_only=True) as connection:
+        count = connection.execute("SELECT count(*) FROM tushare_usage_events_v1").fetchone()
+    assert count == (8,)
+
+
+def test_usage_ledger_concurrent_appends_keep_every_record(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    records = [
+        new_usage_record(
+            api_name="daily_basic",
+            params={"trade_date": f"202401{index + 1:02d}"},
+            fields=["ts_code", "trade_date"],
+            status="SUCCESS",
+            execution_mode="manual",
+            finished_at=datetime.now(tz=UTC),
+        )
+        for index in range(20)
+    ]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(ledger.append, records))
+
+    with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
+        count = connection.execute("SELECT count(*) FROM tushare_usage_events_v1").fetchone()
+    assert count == (20,)
+
+
+def test_healthy_legacy_ledger_is_migrated_once_and_archived(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    record = new_usage_record(
+        api_name="daily_basic",
+        params={"trade_date": "20240102"},
+        fields=["ts_code"],
+        status="SUCCESS",
+        execution_mode="manual",
+        finished_at=datetime.now(tz=UTC),
+    )
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([_usage_row(record)]).to_parquet(ledger.path, index=False)
+
+    assert ledger.usage_today("daily_basic") == 1
+    assert not ledger.path.exists()
+    archives = list((ledger.path.parent / "archive").glob("*.parquet"))
+    assert len(archives) == 1
+
+    assert ledger.usage_today("daily_basic") == 1
+    with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
+        count = connection.execute("SELECT count(*) FROM tushare_usage_events_v1").fetchone()
+    assert count == (1,)
+    with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
+        migration = connection.execute(
+            """
+            SELECT imported_rows, skipped_rows, archive_path
+            FROM tushare_usage_migrations_v1
+            """
+        ).fetchone()
+    assert migration is not None
+    assert migration[0:2] == (1, 0)
+    assert str(migration[2]).endswith(".parquet")
+
+
+def test_corrupt_legacy_ledger_blocks_until_explicit_quarantine(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_bytes(b"PAR1broken-ledger-pagePAR1")
+
+    with pytest.raises(TushareUsageLedgerCorruptError) as caught:
+        ledger.usage_last_minute()
+
+    assert caught.value.path == ledger.path
+    assert caught.value.suggested_repair == (
+        "qmt-agent data repair-tushare-ledger --quarantine-corrupt"
+    )
+    repair_tushare_usage_ledger = _repair_function()
+    inspected = repair_tushare_usage_ledger(ledger, quarantine_corrupt=False)
+    assert inspected["status"] == "CORRUPT"
+    assert inspected["modified"] is False
+    assert ledger.path.exists()
+
+    repaired = repair_tushare_usage_ledger(ledger, quarantine_corrupt=True)
+    assert repaired["status"] == "QUARANTINED"
+    assert repaired["history_reset"] is True
+    assert not ledger.path.exists()
+    quarantine_path = tmp_path / repaired["quarantine_path"]
+    sidecar_path = tmp_path / repaired["sidecar_path"]
+    assert quarantine_path.exists()
+    sidecar = pd.read_json(sidecar_path, typ="series")
+    assert sidecar["sha256"]
+    assert sidecar["original_path"].endswith("tushare_usage_ledger.parquet")
+    assert "history" in repaired["warning"].lower()
+    assert ledger.history_warnings() == ["TUSHARE_USAGE_HISTORY_RESET"]
+
+
+def _usage_row(record) -> dict[str, object]:
+    payload = record.model_dump(mode="json")
+    payload["params_redacted"] = "{}"
+    payload["fields"] = '["ts_code"]'
+    return payload
+
+
+def _usage_row_columns() -> list[str]:
+    return [
+        "request_id",
+        "run_id",
+        "api_name",
+        "params_hash",
+        "params_redacted",
+        "fields",
+        "planned_at",
+        "started_at",
+        "finished_at",
+        "status",
+        "row_count",
+        "error_type",
+        "error_message",
+        "token_hash",
+        "execution_mode",
+    ]
+
+
+def _append_usage_in_process(lake_root: str, duckdb_path: str, index: int) -> None:
+    lake = DataLake(root=Path(lake_root), duckdb_path=Path(duckdb_path))
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    ledger.append(
+        new_usage_record(
+            api_name="daily_basic",
+            params={"request": index},
+            fields=["ts_code"],
+            status="SUCCESS",
+            execution_mode="manual",
+            finished_at=datetime.now(tz=UTC),
+        )
+    )
+
+
+def _repair_function():
+    module_name = "qmt_agent_trader.data.providers.tushare.ledger_migration"
+    if util.find_spec(module_name) is None:
+        pytest.fail(f"missing required module: {module_name}")
+    return import_module(module_name).repair_tushare_usage_ledger
 
 
 def test_equivalent_request_hash_is_stable() -> None:

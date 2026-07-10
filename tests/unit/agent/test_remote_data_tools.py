@@ -14,6 +14,10 @@ from qmt_agent_trader.agent.tools.base import AgentTool
 from qmt_agent_trader.agent.tools.remote_data_tools import build_remote_data_tools, wire
 from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.data.providers.tushare.client import TushareClient
+from qmt_agent_trader.data.providers.tushare.ledger_migration import (
+    repair_tushare_usage_ledger,
+)
+from qmt_agent_trader.data.providers.tushare.quota import TushareUsageLedger
 from qmt_agent_trader.data.storage import DataLake
 
 
@@ -253,6 +257,100 @@ def test_run_tushare_fetch_dry_run_does_not_query_remote(tmp_path) -> None:
     assert not lake.dataset_path("raw", "tushare/daily_basic").exists()
 
 
+def test_plan_tushare_fetch_classifies_corrupt_local_ledger(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"PAR1broken-ledger-pagePAR1")
+
+    result = _tools(tmp_path, lake)["plan_tushare_fetch"].run(
+        {
+            "items": [
+                {
+                    "api_name": "fina_indicator",
+                    "symbols": ["000001.SZ"],
+                    "fields": ["ts_code", "end_date", "roe"],
+                    "start_date": "20240101",
+                    "end_date": "20241231",
+                }
+            ]
+        },
+        ToolContext(run_id="r-corrupt-ledger"),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "TUSHARE_USAGE_LEDGER_CORRUPT"
+    assert result["source"] == "local_metadata"
+    assert result["remote_request_attempted"] is False
+    assert result["execution_status"] == "ERROR"
+    assert result["domain_status"] == "FAILED"
+    assert result["evidence_status"] == "INVALID"
+    assert result["recommendation_status"] == "BLOCKED"
+    assert result["blockers"] == ["tushare_usage_ledger_corrupt"]
+    assert result["repair_action"]["command"].endswith("--quarantine-corrupt")
+    assert "remote_query_failed" not in str(result)
+
+
+def test_run_tushare_fetch_does_not_contact_remote_when_ledger_is_corrupt(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"PAR1broken-ledger-pagePAR1")
+    client = RecordingGenericClient({})
+    wire(
+        data_lake=lake,
+        settings=Settings(project_root=tmp_path, tushare_token=None),
+        client_factory=lambda: client,
+    )
+
+    result = _tools(tmp_path, lake)["run_tushare_fetch"].run(
+        {
+            "items": [
+                {
+                    "api_name": "fina_indicator",
+                    "symbols": ["000001.SZ"],
+                    "fields": ["ts_code", "end_date", "roe"],
+                    "start_date": "20240101",
+                    "end_date": "20241231",
+                }
+            ],
+            "execute_plan": True,
+        },
+        ToolContext(run_id="r-corrupt-ledger-live"),
+    )
+
+    assert result["reason"] == "TUSHARE_USAGE_LEDGER_CORRUPT"
+    assert result["remote_request_attempted"] is False
+    assert client.calls == []
+
+
+def test_plan_discloses_usage_history_reset_after_explicit_quarantine(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"PAR1broken-ledger-pagePAR1")
+    ledger = TushareUsageLedger.from_data_lake(lake)
+    repair_tushare_usage_ledger(ledger, quarantine_corrupt=True)
+
+    result = _tools(tmp_path, lake)["plan_tushare_fetch"].run(
+        {
+            "items": [
+                {
+                    "api_name": "fina_indicator",
+                    "symbols": ["000001.SZ"],
+                    "fields": ["ts_code", "end_date", "roe"],
+                    "start_date": "20240101",
+                    "end_date": "20241231",
+                }
+            ]
+        },
+        ToolContext(run_id="r-history-reset"),
+    )
+
+    assert result["status"] == "planned"
+    assert result["warnings"] == ["TUSHARE_USAGE_HISTORY_RESET"]
+
+
 def test_run_tushare_fetch_live_writes_new_layout_and_metadata(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     client = RecordingGenericClient(
@@ -313,9 +411,10 @@ def test_run_tushare_fetch_live_writes_new_layout_and_metadata(tmp_path) -> None
     assert state[0]["dataset_id"] == "tushare.daily_basic"
     assert state[0]["coverage_start"] == "20240101"
     assert state[0]["coverage_end"] == "20240131"
-    ledger_path = lake.root / "metadata" / "tushare_usage_ledger.parquet"
-    assert ledger_path.exists()
-    usage = pd.read_parquet(ledger_path)
+    assert not (lake.root / "metadata" / "tushare_usage_ledger.parquet").exists()
+    usage = lake.query_parquet(
+        "SELECT status, execution_mode FROM tushare_usage_events_v1 ORDER BY status"
+    )
     assert set(usage["status"]) == {"PLANNED", "SUCCESS"}
     assert set(usage["execution_mode"]) == {"autonomous"}
 

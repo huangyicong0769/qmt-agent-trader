@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pandas as pd
 from typer.testing import CliRunner
 
 from qmt_agent_trader.cli.main import app
 from qmt_agent_trader.core.types import ApprovalStatus
+from qmt_agent_trader.data.providers.tushare.quota import new_usage_record
+from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.strategy.models import SavedStrategy, StrategySource, StrategySpec
 
 
@@ -116,3 +119,86 @@ def test_strategy_approve_rejects_non_review_required_candidate(monkeypatch) -> 
 
     assert result.exit_code != 0
     assert "REVIEW_REQUIRED" in result.output
+
+
+def test_repair_tushare_ledger_is_read_only_without_explicit_quarantine(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"PAR1broken-ledger-pagePAR1")
+    monkeypatch.setattr("qmt_agent_trader.cli.main._data_lake", lambda: lake)
+
+    result = CliRunner().invoke(app, ["data", "repair-tushare-ledger"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "CORRUPT"
+    assert payload["modified"] is False
+    assert legacy.exists()
+
+
+def test_repair_tushare_ledger_explicitly_quarantines_and_records_reset(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"PAR1broken-ledger-pagePAR1")
+    monkeypatch.setattr("qmt_agent_trader.cli.main._data_lake", lambda: lake)
+
+    result = CliRunner().invoke(
+        app,
+        ["data", "repair-tushare-ledger", "--quarantine-corrupt"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "QUARANTINED"
+    assert payload["history_reset"] is True
+    assert not legacy.exists()
+
+
+def test_data_plan_fetch_migrates_healthy_legacy_usage_ledger(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    record = new_usage_record(
+        api_name="daily_basic",
+        params={"trade_date": "20240102"},
+        fields=["ts_code", "trade_date"],
+        status="SUCCESS",
+        execution_mode="manual",
+    ).model_dump(mode="json")
+    record["params_redacted"] = "{}"
+    record["fields"] = '["ts_code", "trade_date"]'
+    pd.DataFrame([record]).to_parquet(legacy, index=False)
+    monkeypatch.setattr("qmt_agent_trader.cli.main._data_lake", lambda: lake)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "plan-fetch",
+            "--api",
+            "daily_basic",
+            "--symbols",
+            "000001.SZ",
+            "--fields",
+            "ts_code,trade_date,pe_ttm",
+            "--from",
+            "20240101",
+            "--to",
+            "20240131",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert not legacy.exists()
+    assert len(list((legacy.parent / "archive").glob("*.parquet"))) == 1

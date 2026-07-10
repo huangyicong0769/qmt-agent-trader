@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import pandas as pd
 import typer
@@ -43,7 +43,17 @@ from qmt_agent_trader.data.macro import MACRO_DATASETS
 from qmt_agent_trader.data.providers.base import FetchItem
 from qmt_agent_trader.data.providers.tushare.client import TushareClient as GenericTushareClient
 from qmt_agent_trader.data.providers.tushare.fetcher import TushareFetcher
+from qmt_agent_trader.data.providers.tushare.ledger_migration import (
+    repair_tushare_usage_ledger,
+)
+from qmt_agent_trader.data.providers.tushare.planner import TusharePlannerConfig
 from qmt_agent_trader.data.providers.tushare.provider import TushareProvider
+from qmt_agent_trader.data.providers.tushare.quota import (
+    QuotaSource,
+    TushareQuotaManager,
+    TushareUsageLedger,
+    profile_from_settings,
+)
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
@@ -115,12 +125,24 @@ def _data_lake() -> DataLake:
     return DataLake(
         root=settings.resolved_data_dir / "lake",
         duckdb_path=settings.resolved_data_dir / "qmt_agent_trader.duckdb",
+        parquet_lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
     )
 
 
 def _tushare_provider() -> TushareProvider:
     settings = _settings()
     lake = _data_lake()
+    quota_profile = profile_from_settings(
+        source=cast(QuotaSource, settings.tushare_quota_profile_source),
+        points=settings.tushare_points,
+        max_requests_per_minute=settings.tushare_max_requests_per_minute,
+        max_requests_per_day_per_api=settings.tushare_max_requests_per_day_per_api,
+    )
+    ledger = TushareUsageLedger.from_data_lake(
+        lake,
+        lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+    )
+    quota_manager = TushareQuotaManager(profile=quota_profile, ledger=ledger)
     return TushareProvider(
         fetcher=TushareFetcher(
             _generic_tushare_client(),
@@ -128,7 +150,15 @@ def _tushare_provider() -> TushareProvider:
             min_interval_seconds=settings.remote_data_min_interval_seconds,
             retry_attempts=settings.remote_data_retry_attempts,
             retry_backoff_seconds=settings.remote_data_retry_backoff_seconds,
-        )
+            quota_manager=quota_manager,
+            usage_ledger=ledger,
+        ),
+        planner_config=TusharePlannerConfig(
+            symbol_fanout_threshold=30,
+            quota_profile=quota_profile,
+            max_days_per_batch=settings.remote_data_max_days_per_call,
+        ),
+        usage_ledger=ledger,
     )
 
 
@@ -260,6 +290,32 @@ def data_validate() -> None:
             "missing": missing,
             "duckdb_exists": lake.duckdb_path.exists(),
         }
+    )
+
+
+@data_app.command("repair-tushare-ledger")
+def data_repair_tushare_ledger(
+    quarantine_corrupt: Annotated[
+        bool,
+        typer.Option("--quarantine-corrupt"),
+    ] = False,
+) -> None:
+    """Inspect the legacy usage ledger and explicitly quarantine it if corrupt."""
+    lake = _data_lake()
+    ledger = TushareUsageLedger.from_data_lake(
+        lake,
+        lock_timeout_seconds=_settings().remote_data_lock_timeout_seconds,
+    )
+    typer.echo(
+        json.dumps(
+            repair_tushare_usage_ledger(
+                ledger,
+                quarantine_corrupt=quarantine_corrupt,
+            ),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
     )
 
 

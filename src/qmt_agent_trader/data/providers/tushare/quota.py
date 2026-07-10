@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
+import duckdb
 import pandas as pd
+from filelock import FileLock
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from qmt_agent_trader.data.storage import DataLake
 
 QuotaSource = Literal[
     "official_table",
@@ -106,6 +112,7 @@ class TushareQuotaState(BaseModel):
     remaining_requests_today_by_api: dict[str, int | None]
     recent_rate_limit_errors: list[str]
     confidence: Confidence
+    warnings: list[str] = Field(default_factory=list)
 
 
 class EndpointCostBreakdown(BaseModel):
@@ -142,49 +149,124 @@ class TushareBudgetDecision(BaseModel):
     user_message: str
 
 
-class TushareUsageLedger:
-    def __init__(self, path: Path) -> None:
+class TushareUsageLedgerCorruptError(RuntimeError):
+    suggested_repair = "qmt-agent data repair-tushare-ledger --quarantine-corrupt"
+
+    def __init__(self, path: Path, cause: Exception) -> None:
         self.path = path
+        self.error_type = type(cause).__name__
+        self.original_message = str(cause)
+        super().__init__(
+            f"Local Tushare usage ledger is unreadable: {path}: "
+            f"{self.error_type}: {self.original_message}"
+        )
+
+
+class TushareUsageLedger:
+    table_name = "tushare_usage_events_v1"
+    state_table_name = "tushare_usage_state_v1"
+
+    def __init__(
+        self,
+        *,
+        duckdb_path: Path,
+        legacy_parquet_path: Path,
+        lock_timeout_seconds: float = 30.0,
+    ) -> None:
+        self.duckdb_path = duckdb_path
+        self.path = legacy_parquet_path
+        self.lock_timeout_seconds = lock_timeout_seconds
+
+    @classmethod
+    def from_data_lake(
+        cls,
+        lake: DataLake,
+        *,
+        lock_timeout_seconds: float = 30.0,
+    ) -> TushareUsageLedger:
+        return cls(
+            duckdb_path=lake.duckdb_path,
+            legacy_parquet_path=lake.root / "metadata" / "tushare_usage_ledger.parquet",
+            lock_timeout_seconds=lock_timeout_seconds,
+        )
 
     @classmethod
     def from_lake_root(cls, lake_root: Path) -> TushareUsageLedger:
-        return cls(lake_root / "metadata" / "tushare_usage_ledger.parquet")
+        """Compatibility entry point; production code should use from_data_lake()."""
+        return cls(
+            duckdb_path=lake_root.parent / "qmt_agent_trader.duckdb",
+            legacy_parquet_path=lake_root / "metadata" / "tushare_usage_ledger.parquet",
+        )
 
     def append(self, record: TushareUsageRecord) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        frame = pd.DataFrame([_record_to_row(record)])
-        if self.path.exists():
-            existing = pd.read_parquet(self.path)
-            frame = pd.concat([existing, frame], ignore_index=True)
-        frame.to_parquet(self.path, index=False)
+        self.ensure_ready()
+        row = _record_to_row(record)
+        with self.mutation_lock(), self.connect() as connection:
+            self.ensure_tables(connection)
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.execute(
+                    f"""
+                    INSERT INTO {self.table_name} VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ) ON CONFLICT (request_id) DO NOTHING
+                    """,
+                    [
+                        row["request_id"],
+                        row["run_id"],
+                        row["api_name"],
+                        row["params_hash"],
+                        row["params_redacted"],
+                        row["fields"],
+                        row["planned_at"],
+                        row["started_at"],
+                        row["finished_at"],
+                        row["status"],
+                        row["row_count"],
+                        row["error_type"],
+                        row["error_message"],
+                        row["token_hash"],
+                        row["execution_mode"],
+                        _as_naive_utc(None),
+                    ],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def usage_last_minute(self, *, now: datetime | None = None) -> int:
         cutoff = _as_naive_utc(now) - timedelta(minutes=1)
-        frame = self._read()
-        if frame.empty:
-            return 0
-        finished_at = _datetime_series(frame["finished_at"])
-        return int(
-            frame[
-                frame["status"].isin(EXECUTED_USAGE_STATUSES)
-                & (finished_at >= cutoff)
-            ].shape[0]
-        )
+        self.ensure_ready()
+        with self.connect() as connection:
+            self.ensure_tables(connection)
+            result = connection.execute(
+                f"""
+                SELECT count(*) FROM {self.table_name}
+                WHERE status IN ({_sql_placeholders(len(EXECUTED_USAGE_STATUSES))})
+                  AND finished_at >= ?
+                """,
+                [*sorted(EXECUTED_USAGE_STATUSES), cutoff],
+            ).fetchone()
+        return int(result[0]) if result is not None else 0
 
     def usage_today_by_api(self, *, now: datetime | None = None) -> dict[str, int]:
         today = _as_naive_utc(now).date()
-        frame = self._read()
-        if frame.empty:
-            return {}
-        finished = _datetime_series(frame["finished_at"])
-        scoped = frame[
-            frame["status"].isin(EXECUTED_USAGE_STATUSES)
-            & (finished.dt.date == today)
-        ]
-        if scoped.empty:
-            return {}
-        counts = scoped.groupby("api_name").size().to_dict()
-        return {str(api_name): int(count) for api_name, count in counts.items()}
+        self.ensure_ready()
+        start = datetime.combine(today, datetime.min.time())
+        end = start + timedelta(days=1)
+        with self.connect() as connection:
+            self.ensure_tables(connection)
+            rows = connection.execute(
+                f"""
+                SELECT api_name, count(*) FROM {self.table_name}
+                WHERE status IN ({_sql_placeholders(len(EXECUTED_USAGE_STATUSES))})
+                  AND finished_at >= ? AND finished_at < ?
+                GROUP BY api_name
+                """,
+                [*sorted(EXECUTED_USAGE_STATUSES), start, end],
+            ).fetchall()
+        return {str(api_name): int(count) for api_name, count in rows}
 
     def usage_today(self, api_name: str, *, now: datetime | None = None) -> int:
         return self.usage_today_by_api(now=now).get(api_name, 0)
@@ -195,30 +277,134 @@ class TushareUsageLedger:
         minutes: int = 10,
     ) -> list[TushareUsageRecord]:
         cutoff = _as_naive_utc(None) - timedelta(minutes=minutes)
-        frame = self._read()
-        if frame.empty:
-            return []
-        scoped = frame[
-            (frame["status"] == "RATE_LIMITED")
-            & (_datetime_series(frame["finished_at"]) >= cutoff)
-        ]
-        return [_row_to_record(row) for row in scoped.to_dict(orient="records")]
+        self.ensure_ready()
+        with self.connect() as connection:
+            self.ensure_tables(connection)
+            frame = connection.execute(
+                f"""
+                SELECT {_ledger_column_sql()} FROM {self.table_name}
+                WHERE status = 'RATE_LIMITED' AND finished_at >= ?
+                ORDER BY finished_at
+                """,
+                [cutoff],
+            ).fetchdf()
+        return [_row_to_record(row) for row in frame.to_dict(orient="records")]
 
     def request_seen(self, api_name: str, params_hash: str) -> bool:
-        frame = self._read()
-        if frame.empty:
-            return False
-        scoped = frame[
-            (frame["api_name"] == api_name)
-            & (frame["params_hash"] == params_hash)
-            & frame["status"].isin(COMPLETED_CACHE_STATUSES)
-        ]
-        return not scoped.empty
+        self.ensure_ready()
+        with self.connect() as connection:
+            self.ensure_tables(connection)
+            result = connection.execute(
+                f"""
+                SELECT 1 FROM {self.table_name}
+                WHERE api_name = ? AND params_hash = ?
+                  AND status IN ({_sql_placeholders(len(COMPLETED_CACHE_STATUSES))})
+                LIMIT 1
+                """,
+                [api_name, params_hash, *sorted(COMPLETED_CACHE_STATUSES)],
+            ).fetchone()
+        return result is not None
 
-    def _read(self) -> pd.DataFrame:
-        if not self.path.exists():
-            return _empty_ledger_frame()
-        return pd.read_parquet(self.path)
+    def history_warnings(self, *, now: datetime | None = None) -> list[str]:
+        self.ensure_ready()
+        with self.connect() as connection:
+            self.ensure_tables(connection)
+            row = connection.execute(
+                f"SELECT value_json FROM {self.state_table_name} WHERE key = 'history_reset'"
+            ).fetchone()
+        if row is None:
+            return []
+        payload = json.loads(str(row[0]))
+        reset_at = _as_naive_utc(datetime.fromisoformat(str(payload["history_reset_at"])))
+        return (
+            ["TUSHARE_USAGE_HISTORY_RESET"]
+            if reset_at.date() == _as_naive_utc(now).date()
+            else []
+        )
+
+    def record_history_reset(self, *, reason: str, legacy_corrupt_file: str) -> None:
+        payload = json.dumps(
+            {
+                "history_reset_at": _as_naive_utc(None).isoformat(),
+                "history_reset_reason": reason,
+                "legacy_corrupt_file": legacy_corrupt_file,
+            },
+            sort_keys=True,
+        )
+        with self.mutation_lock(), self.connect() as connection:
+            self.ensure_tables(connection)
+            connection.execute(
+                f"""
+                INSERT INTO {self.state_table_name} VALUES ('history_reset', ?, ?)
+                ON CONFLICT (key) DO UPDATE
+                SET value_json = excluded.value_json, updated_at = excluded.updated_at
+                """,
+                [payload, _as_naive_utc(None)],
+            )
+
+    def ensure_ready(self) -> None:
+        from qmt_agent_trader.data.providers.tushare.ledger_migration import (
+            migrate_legacy_usage_ledger,
+        )
+
+        migrate_legacy_usage_ledger(self)
+        with self.mutation_lock(), self.connect() as connection:
+            self.ensure_tables(connection)
+
+    def connect(self) -> duckdb.DuckDBPyConnection:
+        self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+        return duckdb.connect(str(self.duckdb_path))
+
+    def mutation_lock(self) -> AbstractContextManager[FileLock]:
+        lock_path = self.duckdb_path.with_suffix(self.duckdb_path.suffix + ".tushare.lock")
+        return FileLock(str(lock_path), timeout=self.lock_timeout_seconds)
+
+    def ensure_tables(self, connection: duckdb.DuckDBPyConnection) -> None:
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.table_name} (
+                request_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                api_name TEXT NOT NULL,
+                params_hash TEXT NOT NULL,
+                params_redacted TEXT NOT NULL,
+                fields TEXT NOT NULL,
+                planned_at TIMESTAMP,
+                started_at TIMESTAMP,
+                finished_at TIMESTAMP,
+                status TEXT NOT NULL,
+                row_count BIGINT,
+                error_type TEXT,
+                error_message TEXT,
+                token_hash TEXT,
+                execution_mode TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.state_table_name} (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tushare_usage_migrations_v1 (
+                migration_id TEXT PRIMARY KEY,
+                migrated_at TIMESTAMP NOT NULL,
+                source_path TEXT NOT NULL,
+                archive_path TEXT NOT NULL,
+                imported_rows BIGINT NOT NULL,
+                skipped_rows BIGINT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT
+            )
+            """
+        )
 
 
 class TushareQuotaManager:
@@ -264,6 +450,7 @@ class TushareQuotaManager:
             remaining_requests_today_by_api=remaining_by_api,
             recent_rate_limit_errors=recent_errors,
             confidence=self.profile.confidence,
+            warnings=self.ledger.history_warnings() if self.ledger is not None else [],
         )
 
     def estimate_cost(
@@ -608,6 +795,14 @@ def _as_naive_utc(value: datetime | None) -> datetime:
 
 def _datetime_series(values: pd.Series) -> pd.Series:
     return pd.to_datetime(values, errors="coerce", utc=True).dt.tz_localize(None)
+
+
+def _sql_placeholders(count: int) -> str:
+    return ", ".join("?" for _ in range(count))
+
+
+def _ledger_column_sql() -> str:
+    return ", ".join(_empty_ledger_frame().columns)
 
 
 def _normalized(value: Any) -> Any:

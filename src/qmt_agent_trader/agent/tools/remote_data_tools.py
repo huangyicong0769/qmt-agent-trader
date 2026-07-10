@@ -31,6 +31,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
     TushareAccountQuotaProfile,
     TushareQuotaManager,
     TushareUsageLedger,
+    TushareUsageLedgerCorruptError,
     profile_from_settings,
 )
 from qmt_agent_trader.data.storage import DataLake
@@ -107,7 +108,14 @@ def _tushare_provider(
 ) -> TushareProvider:
     settings = _get_settings()
     quota_profile = _quota_profile_from_settings(settings)
-    usage_ledger = TushareUsageLedger.from_lake_root(lake.root) if lake is not None else None
+    usage_ledger = (
+        TushareUsageLedger.from_data_lake(
+            lake,
+            lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
+        )
+        if lake is not None
+        else None
+    )
     config = TusharePlannerConfig(
         symbol_fanout_threshold=30,
         quota_profile=quota_profile,
@@ -179,11 +187,14 @@ def _plan_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dic
     lake = _get_lake()
     if lake is not None:
         items = _attach_trade_dates_for_marketwide_fetches(items, lake)
-    plan = _tushare_provider(lake, with_fetcher=False).plan_fetch(
-        items,
-        requested_by_llm=context.requested_by_llm,
-        storage_mode=str(input_data.get("storage_mode", "persistent")),
-    )
+    try:
+        plan = _tushare_provider(lake, with_fetcher=False).plan_fetch(
+            items,
+            requested_by_llm=context.requested_by_llm,
+            storage_mode=str(input_data.get("storage_mode", "persistent")),
+        )
+    except TushareUsageLedgerCorruptError as exc:
+        return _corrupt_ledger_payload(exc)
     payload = plan.as_dict()
     _attach_plan_summary(payload, lake=lake)
     return payload
@@ -217,11 +228,14 @@ def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict
         run_id=context.run_id,
         execution_mode="autonomous" if context.requested_by_llm else "manual",
     )
-    plan = provider.plan_fetch(
-        items,
-        requested_by_llm=context.requested_by_llm,
-        storage_mode=str(input_data.get("storage_mode", "persistent")),
-    )
+    try:
+        plan = provider.plan_fetch(
+            items,
+            requested_by_llm=context.requested_by_llm,
+            storage_mode=str(input_data.get("storage_mode", "persistent")),
+        )
+    except TushareUsageLedgerCorruptError as exc:
+        return _corrupt_ledger_payload(exc)
     if plan.status != "planned":
         payload = plan.as_dict()
         _attach_plan_summary(payload, lake=lake)
@@ -231,6 +245,30 @@ def _run_tushare_fetch(input_data: dict[str, Any], context: ToolContext) -> dict
     result["dry_run"] = dry_run
     result["execute_plan"] = execute_plan
     return result
+
+
+def _corrupt_ledger_payload(exc: TushareUsageLedgerCorruptError) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": "TUSHARE_USAGE_LEDGER_CORRUPT",
+        "message": "Local Tushare usage ledger is unreadable; remote API was not contacted.",
+        "source": "local_metadata",
+        "path": str(exc.path),
+        "error_type": exc.error_type,
+        "remote_request_attempted": False,
+        "execution_status": "ERROR",
+        "domain_status": "FAILED",
+        "evidence_status": "INVALID",
+        "recommendation_status": "BLOCKED",
+        "coverage_status": "BLOCKED",
+        "blockers": ["tushare_usage_ledger_corrupt"],
+        "warnings": [],
+        "next_repair_tool": None,
+        "repair_action": {
+            "type": "cli",
+            "command": exc.suggested_repair,
+        },
+    }
 
 
 def _build_data_table(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:

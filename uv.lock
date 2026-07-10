@@ -2607,6 +2607,7 @@ source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
     { name = "fastapi" },
+    { name = "filelock" },
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "loguru" },
@@ -2646,6 +2647,7 @@ dependencies = [
 requires-dist = [
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "fastapi", specifier = ">=0.128.8" },
+    { name = "filelock", specifier = ">=3.20.3" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "hypothesis", specifier = ">=6.141.1" },
     { name = "loguru", specifier = ">=0.7.3" },
