@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Condition, Lock, get_ident
 from time import monotonic, sleep
 from typing import Any
+from weakref import WeakValueDictionary
 
 import duckdb
 
@@ -19,7 +20,7 @@ from qmt_agent_trader.persistence.errors import (
 from qmt_agent_trader.persistence.locks import LockManager
 
 _gates_lock = Lock()
-_database_gates: dict[Path, _ReadWriteGate] = {}
+_database_gates: WeakValueDictionary[Path, _ReadWriteGate] = WeakValueDictionary()
 
 
 class DatabaseCoordinator:
@@ -266,6 +267,8 @@ class _ReadWriteGate:
                 self._writer_thread = thread_id
             finally:
                 self._waiting_writers -= 1
+                if self._waiting_writers == 0:
+                    self._condition.notify_all()
 
     def release_write(self) -> None:
         thread_id = get_ident()
