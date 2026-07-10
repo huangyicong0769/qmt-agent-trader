@@ -46,7 +46,7 @@ def migrate_legacy_usage_ledger(ledger: TushareUsageLedger) -> dict[str, Any]:
     if not ledger.path.exists():
         _finalize_archived_pending_migrations(ledger)
         return {"status": "NO_LEGACY_FILE", "imported_rows": 0, "skipped_rows": 0}
-    with ledger.mutation_lock():
+    with ledger.lock_manager.resource_lock(ledger.path):
         if not ledger.path.exists():
             return {"status": "NO_LEGACY_FILE", "imported_rows": 0, "skipped_rows": 0}
         frame = _read_complete_legacy(ledger.path)
@@ -57,8 +57,9 @@ def migrate_legacy_usage_ledger(ledger: TushareUsageLedger) -> dict[str, Any]:
         imported = 0
         skipped = 0
         resume_pending = False
-        with ledger.connect() as connection:
-            ledger.ensure_tables(connection)
+        with ledger.database_coordinator.write_transaction(
+            "migrate_legacy_tushare_usage"
+        ) as connection:
             pending = _pending_migration_for_source(connection, ledger.path)
             if pending is not None and not Path(str(pending[3])).exists():
                 migration_id = str(pending[0])
@@ -73,52 +74,42 @@ def migrate_legacy_usage_ledger(ledger: TushareUsageLedger) -> dict[str, Any]:
                     "migrated",
                 )
             archive_path.parent.mkdir(parents=True, exist_ok=True)
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                before = connection.execute(
-                    f"SELECT count(*) FROM {ledger.table_name}"
-                ).fetchone()
-                connection.register("legacy_tushare_usage", frame)
+            before = connection.execute(f"SELECT count(*) FROM {ledger.table_name}").fetchone()
+            connection.register("legacy_tushare_usage", frame)
+            connection.execute(
+                f"""
+                INSERT INTO {ledger.table_name}
+                SELECT
+                    request_id, run_id, api_name, params_hash,
+                    params_redacted, fields, planned_at, started_at,
+                    finished_at, status, row_count, error_type,
+                    error_message, token_hash, execution_mode, current_timestamp
+                FROM legacy_tushare_usage
+                ON CONFLICT (request_id) DO NOTHING
+                """
+            )
+            after = connection.execute(f"SELECT count(*) FROM {ledger.table_name}").fetchone()
+            if before is None or after is None:
+                raise RuntimeError("DuckDB did not return usage row counts during migration")
+            if not resume_pending:
+                imported = int(after[0]) - int(before[0])
+                skipped = len(frame) - imported
                 connection.execute(
-                    f"""
-                    INSERT INTO {ledger.table_name}
-                    SELECT
-                        request_id, run_id, api_name, params_hash,
-                        params_redacted, fields, planned_at, started_at,
-                        finished_at, status, row_count, error_type,
-                        error_message, token_hash, execution_mode, current_timestamp
-                    FROM legacy_tushare_usage
-                    ON CONFLICT (request_id) DO NOTHING
                     """
+                    INSERT INTO tushare_usage_migrations_v1
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        migration_id,
+                        datetime.now(tz=UTC).replace(tzinfo=None),
+                        str(ledger.path),
+                        str(archive_path),
+                        imported,
+                        skipped,
+                        "IMPORT_COMMITTED_PENDING_ARCHIVE",
+                        None,
+                    ],
                 )
-                after = connection.execute(
-                    f"SELECT count(*) FROM {ledger.table_name}"
-                ).fetchone()
-                if before is None or after is None:
-                    raise RuntimeError("DuckDB did not return usage row counts during migration")
-                if not resume_pending:
-                    imported = int(after[0]) - int(before[0])
-                    skipped = len(frame) - imported
-                    connection.execute(
-                        """
-                        INSERT INTO tushare_usage_migrations_v1
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            migration_id,
-                            datetime.now(tz=UTC).replace(tzinfo=None),
-                            str(ledger.path),
-                            str(archive_path),
-                            imported,
-                            skipped,
-                            "IMPORT_COMMITTED_PENDING_ARCHIVE",
-                            None,
-                        ],
-                    )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
         os.replace(ledger.path, archive_path)
         _finalize_migration(ledger, migration_id)
         return {
@@ -163,7 +154,7 @@ def _quarantine_corrupt_legacy(
     ledger: TushareUsageLedger,
     error: TushareUsageLedgerCorruptError,
 ) -> dict[str, Any]:
-    with ledger.mutation_lock():
+    with ledger.lock_manager.resource_lock(ledger.path):
         if not ledger.path.exists():
             raise FileNotFoundError(f"legacy usage ledger no longer exists: {ledger.path}")
         digest = _sha256(ledger.path)
@@ -180,7 +171,9 @@ def _quarantine_corrupt_legacy(
             "error_message": error.original_message,
             "quarantined_at": datetime.now(tz=UTC).isoformat(),
         }
-        with ledger.connect() as connection:
+        with ledger.database_coordinator.write_transaction(
+            "quarantine_tushare_usage_history_reset"
+        ) as connection:
             _record_history_reset_locked(
                 ledger,
                 connection,
@@ -193,6 +186,9 @@ def _quarantine_corrupt_legacy(
         except Exception:
             sidecar_path.unlink(missing_ok=True)
             raise
+    if ledger._data_lake is not None:
+        ledger._data_lake.mark_legacy_ledger_initialized(error=None)
+    ledger._ready = False
     return {
         "status": "QUARANTINED",
         "modified": True,
@@ -245,9 +241,7 @@ def _normalize_legacy_frame(path: Path, frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _valid_sha256(value: str) -> bool:
-    return len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value.lower()
-    )
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value.lower())
 
 
 def _record_history_reset_locked(
@@ -257,7 +251,6 @@ def _record_history_reset_locked(
     reason: str,
     legacy_corrupt_file: str,
 ) -> None:
-    ledger.ensure_tables(connection)
     payload = json.dumps(
         {
             "history_reset_at": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
@@ -294,8 +287,9 @@ def _pending_migration_for_source(
 
 
 def _finalize_migration(ledger: TushareUsageLedger, migration_id: str) -> None:
-    with ledger.connect() as connection:
-        ledger.ensure_tables(connection)
+    with ledger.database_coordinator.write_transaction(
+        "finalize_tushare_usage_migration"
+    ) as connection:
         connection.execute(
             """
             UPDATE tushare_usage_migrations_v1
@@ -309,8 +303,9 @@ def _finalize_migration(ledger: TushareUsageLedger, migration_id: str) -> None:
 def _finalize_archived_pending_migrations(ledger: TushareUsageLedger) -> None:
     if not ledger.duckdb_path.exists():
         return
-    with ledger.mutation_lock(), ledger.connect() as connection:
-        ledger.ensure_tables(connection)
+    with ledger.database_coordinator.write_transaction(
+        "resume_tushare_usage_migration"
+    ) as connection:
         rows = connection.execute(
             """
             SELECT migration_id, source_path, archive_path

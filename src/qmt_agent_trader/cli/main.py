@@ -58,6 +58,7 @@ from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
@@ -129,18 +130,21 @@ def _data_lake() -> DataLake:
     lock_manager = LockManager(
         paths.locks_root, timeout_seconds=settings.remote_data_lock_timeout_seconds
     )
-    return DataLake(
+    lake = DataLake(
         root=paths.lake_root,
         duckdb_path=paths.control_db_path,
         parquet_lock_timeout_seconds=settings.remote_data_lock_timeout_seconds,
         database_coordinator=DatabaseCoordinator(paths.control_db_path, lock_manager),
         lock_manager=lock_manager,
     )
+    initialize_persistence(lake, raise_on_legacy_error=False)
+    return lake
 
 
 def _tushare_provider() -> TushareProvider:
     settings = _settings()
     lake = _data_lake()
+    initialize_persistence(lake, raise_on_legacy_error=False)
     quota_profile = profile_from_settings(
         source=cast(QuotaSource, settings.tushare_quota_profile_source),
         points=settings.tushare_points,
@@ -311,6 +315,7 @@ def data_repair_tushare_ledger(
 ) -> None:
     """Inspect the legacy usage ledger and explicitly quarantine it if corrupt."""
     lake = _data_lake()
+    initialize_persistence(lake, migrate_legacy_ledger=False)
     ledger = TushareUsageLedger.from_data_lake(
         lake,
         lock_timeout_seconds=_settings().remote_data_lock_timeout_seconds,

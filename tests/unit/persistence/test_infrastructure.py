@@ -23,6 +23,7 @@ from qmt_agent_trader.persistence.errors import (
     StorageLockTimeoutError,
     StorageValidationError,
 )
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.migrations import Migration, MigrationRegistry
 from qmt_agent_trader.persistence.paths import PersistencePaths
@@ -488,11 +489,9 @@ def test_current_schema_version_propagates_unexpected_storage_errors(
 def test_ledger_reads_do_not_run_ddl_after_locked_initialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ledger = TushareUsageLedger(
-        duckdb_path=tmp_path / "control.duckdb",
-        legacy_parquet_path=tmp_path / "legacy.parquet",
-    )
-    ledger.ensure_ready()
+    lake = DataLake(tmp_path / "lake", tmp_path / "control.duckdb")
+    initialize_persistence(lake)
+    ledger = TushareUsageLedger.from_data_lake(lake)
 
     def reject_ddl(connection: object) -> None:
         raise AssertionError("read path attempted DDL")

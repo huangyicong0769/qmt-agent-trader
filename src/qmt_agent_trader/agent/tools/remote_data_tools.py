@@ -36,6 +36,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
 )
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import ALLOWED_SILVER_TABLES, DataTableBuilder
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 _lake: DataLake | None = None
 _settings: Settings | None = None
@@ -107,6 +108,8 @@ def _tushare_provider(
     with_fetcher: bool = True,
 ) -> TushareProvider:
     settings = _get_settings()
+    if lake is not None:
+        initialize_persistence(lake, raise_on_legacy_error=False)
     quota_profile = _quota_profile_from_settings(settings)
     usage_ledger = (
         TushareUsageLedger.from_data_lake(

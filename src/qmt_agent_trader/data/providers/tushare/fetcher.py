@@ -16,7 +16,7 @@ from qmt_agent_trader.data.providers.tushare.client import TushareClient
 from qmt_agent_trader.data.providers.tushare.quota import (
     ExecutionMode,
     TushareQuotaManager,
-    TushareUsageLedger,
+    TushareUsageStore,
     UsageStatus,
     new_usage_record,
     token_hash,
@@ -26,6 +26,7 @@ from qmt_agent_trader.data.providers.tushare.registry import (
     default_tushare_registry,
 )
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 
 class TushareFetcher:
@@ -39,11 +40,12 @@ class TushareFetcher:
         retry_attempts: int = 3,
         retry_backoff_seconds: float = 2.0,
         quota_manager: TushareQuotaManager | None = None,
-        usage_ledger: TushareUsageLedger | None = None,
+        usage_ledger: TushareUsageStore | None = None,
         run_id: str | None = None,
         execution_mode: ExecutionMode = "manual",
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        initialize_persistence(lake, migrate_legacy_ledger=False)
         self.client = client
         self.lake = lake
         self.registry = registry or default_tushare_registry()

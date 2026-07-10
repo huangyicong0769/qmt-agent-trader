@@ -14,6 +14,7 @@ from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.paths import PersistencePaths
 
@@ -158,6 +159,7 @@ def build_default_runtime(
         database_coordinator=coordinator,
         lock_manager=lock_manager,
     )
+    initialize_persistence(lake, raise_on_legacy_error=False)
     return AgentRuntime(
         settings=resolved,
         lake=lake,

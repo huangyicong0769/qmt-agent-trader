@@ -21,6 +21,7 @@ from qmt_agent_trader.data.providers.tushare.ledger_migration import (
 )
 from qmt_agent_trader.data.providers.tushare.quota import TushareUsageLedger
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 
 class ExplodingGenericClient(TushareClient):
@@ -359,6 +360,7 @@ def test_run_tushare_fetch_does_not_contact_remote_when_ledger_is_corrupt(tmp_pa
 
 def test_plan_discloses_usage_history_reset_after_explicit_quarantine(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake, migrate_legacy_ledger=False)
     legacy = lake.root / "metadata" / "tushare_usage_ledger.parquet"
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_bytes(b"PAR1broken-ledger-pagePAR1")

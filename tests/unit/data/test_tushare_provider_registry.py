@@ -26,6 +26,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 
 class FakeGenericClient(TushareClient):
@@ -297,9 +298,8 @@ def test_tushare_planner_approves_fina_indicator_49_under_default_quota() -> Non
 
 
 def test_tushare_planner_blocks_by_actual_daily_quota(tmp_path) -> None:
-    ledger = TushareUsageLedger.from_data_lake(
-        DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
-    )
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    ledger = TushareUsageLedger.from_data_lake(lake)
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(tz=UTC).replace(tzinfo=None)
     pd.DataFrame(
@@ -324,6 +324,7 @@ def test_tushare_planner_blocks_by_actual_daily_quota(tmp_path) -> None:
             for index in range(99990)
         ]
     ).to_parquet(ledger.path, index=False)
+    initialize_persistence(lake)
     planner = TushareFetchPlanner(usage_ledger=ledger)
 
     plan = planner.plan(

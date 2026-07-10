@@ -26,6 +26,7 @@ from qmt_agent_trader.data.providers.tushare.quota import (
     normalized_request_hash,
 )
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 
 def test_default_tushare_quota_profile_is_2000_point_account() -> None:
@@ -181,6 +182,7 @@ def test_usage_ledger_records_success_failure_rate_limit_and_ignores_dry_run(
 
 def test_usage_ledger_uses_duckdb_and_request_id_is_idempotent(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake)
     ledger = TushareUsageLedger.from_data_lake(lake)
     record = new_usage_record(
         api_name="daily_basic",
@@ -211,6 +213,7 @@ def test_empty_legacy_ledger_is_archived_without_usage(tmp_path) -> None:
     ledger = TushareUsageLedger.from_data_lake(lake)
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=_usage_row_columns()).to_parquet(ledger.path, index=False)
+    initialize_persistence(lake)
 
     assert ledger.usage_today_by_api() == {}
     assert not ledger.path.exists()
@@ -224,7 +227,7 @@ def test_legacy_ledger_missing_required_columns_is_rejected(tmp_path) -> None:
     pd.DataFrame([{"request_id": "incomplete"}]).to_parquet(ledger.path, index=False)
 
     with pytest.raises(TushareUsageLedgerCorruptError, match="missing required columns"):
-        ledger.usage_today_by_api()
+        initialize_persistence(lake)
 
     assert ledger.path.exists()
 
@@ -245,7 +248,7 @@ def test_legacy_ledger_invalid_record_is_rejected_before_import(tmp_path) -> Non
     pd.DataFrame([payload]).to_parquet(ledger.path, index=False)
 
     with pytest.raises(TushareUsageLedgerCorruptError, match="validation"):
-        ledger.usage_today_by_api()
+        initialize_persistence(lake)
 
     assert ledger.path.exists()
 
@@ -266,7 +269,7 @@ def test_legacy_migration_reapplies_token_redaction(tmp_path) -> None:
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([payload]).to_parquet(ledger.path, index=False)
 
-    ledger.usage_today_by_api()
+    initialize_persistence(lake)
 
     with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
         params = connection.execute(
@@ -298,11 +301,12 @@ def test_footer_readable_but_data_page_corrupt_ledger_is_rejected(tmp_path) -> N
 
     pq.read_metadata(ledger.path)
     with pytest.raises(Exception, match="Local Tushare usage ledger is unreadable"):
-        ledger.usage_last_minute()
+        initialize_persistence(lake)
 
 
 def test_usage_ledger_never_persists_plaintext_token(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake)
     ledger = TushareUsageLedger.from_data_lake(lake)
     ledger.append(
         new_usage_record(
@@ -343,6 +347,7 @@ def test_usage_ledger_serializes_independent_process_writers(tmp_path) -> None:
 
 def test_usage_ledger_concurrent_appends_keep_every_record(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake)
     ledger = TushareUsageLedger.from_data_lake(lake)
     records = [
         new_usage_record(
@@ -377,6 +382,7 @@ def test_healthy_legacy_ledger_is_migrated_once_and_archived(tmp_path) -> None:
     )
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([_usage_row(record)]).to_parquet(ledger.path, index=False)
+    initialize_persistence(lake)
 
     assert ledger.usage_today("daily_basic") == 1
     assert not ledger.path.exists()
@@ -404,6 +410,7 @@ def test_corrupt_legacy_ledger_blocks_until_explicit_quarantine(tmp_path) -> Non
     ledger = TushareUsageLedger.from_data_lake(lake)
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     ledger.path.write_bytes(b"PAR1broken-ledger-pagePAR1")
+    initialize_persistence(lake, raise_on_legacy_error=False)
 
     with pytest.raises(TushareUsageLedgerCorruptError) as caught:
         ledger.usage_last_minute()
@@ -439,6 +446,7 @@ def test_quarantine_keeps_source_when_history_reset_persistence_fails(
     ledger = TushareUsageLedger.from_data_lake(lake)
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     ledger.path.write_bytes(b"PAR1broken-ledger-pagePAR1")
+    initialize_persistence(lake, raise_on_legacy_error=False)
 
     def fail_history_reset(*_args, **_kwargs):
         raise RuntimeError("simulated history reset failure")
@@ -481,7 +489,7 @@ def test_migration_audit_survives_finalization_failure(monkeypatch, tmp_path) ->
     )
 
     with pytest.raises(RuntimeError, match="migration finalization failure"):
-        ledger.usage_today_by_api()
+        initialize_persistence(lake)
 
     with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
         audit = connection.execute(
@@ -523,9 +531,10 @@ def test_migration_retry_resumes_pending_archive_without_duplicate_audit(
     monkeypatch.setattr(ledger_migration.os, "replace", fail_first_archive)
 
     with pytest.raises(OSError, match="archive replace failure"):
-        ledger.usage_today_by_api()
+        initialize_persistence(lake)
     assert ledger.path.exists()
 
+    initialize_persistence(lake)
     assert ledger.usage_today("daily_basic") == 0
 
     with duckdb.connect(str(lake.duckdb_path), read_only=True) as connection:
@@ -535,9 +544,7 @@ def test_migration_retry_resumes_pending_archive_without_duplicate_audit(
             FROM tushare_usage_migrations_v1
             """
         ).fetchall()
-        usage_count = connection.execute(
-            "SELECT count(*) FROM tushare_usage_events_v1"
-        ).fetchone()
+        usage_count = connection.execute("SELECT count(*) FROM tushare_usage_events_v1").fetchone()
     assert len(migrations) == 1
     assert migrations[0][0:3] == ("MIGRATED", 1, 0)
     assert Path(str(migrations[0][3])).exists()
@@ -552,9 +559,9 @@ def _usage_row(record) -> dict[str, object]:
 
 
 def _ledger(tmp_path: Path) -> TushareUsageLedger:
-    return TushareUsageLedger.from_data_lake(
-        DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "qmt_agent_trader.duckdb")
-    )
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "qmt_agent_trader.duckdb")
+    initialize_persistence(lake, migrate_legacy_ledger=False)
+    return TushareUsageLedger.from_data_lake(lake)
 
 
 def _usage_row_columns() -> list[str]:
@@ -579,6 +586,7 @@ def _usage_row_columns() -> list[str]:
 
 def _append_usage_in_process(lake_root: str, duckdb_path: str, index: int) -> None:
     lake = DataLake(root=Path(lake_root), duckdb_path=Path(duckdb_path))
+    initialize_persistence(lake)
     ledger = TushareUsageLedger.from_data_lake(lake)
     ledger.append(
         new_usage_record(
@@ -657,3 +665,5 @@ def _write_usage_rows(
             for index in range(count)
         ]
     ).to_parquet(ledger.path, index=False)
+    assert ledger._data_lake is not None
+    initialize_persistence(ledger._data_lake)

@@ -8,7 +8,7 @@ import warnings
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
 import pandas as pd
@@ -82,9 +82,7 @@ DEFAULT_TUSHARE_2000_POINT_PROFILE = TushareAccountQuotaProfile(
     minute_quota_scope="account_global",
     daily_quota_scope="per_api",
     confidence="MEDIUM",
-    notes=[
-        "Default project profile configured from Tushare official point-frequency table."
-    ],
+    notes=["Default project profile configured from Tushare official point-frequency table."],
 )
 
 
@@ -164,6 +162,16 @@ class TushareUsageLedgerCorruptError(RuntimeError):
         )
 
 
+class TushareUsageStore(Protocol):
+    def append(self, record: TushareUsageRecord) -> None: ...
+    def usage_last_minute(self, *, now: datetime | None = None) -> int: ...
+    def usage_today_by_api(self, *, now: datetime | None = None) -> dict[str, int]: ...
+    def usage_today(self, api_name: str, *, now: datetime | None = None) -> int: ...
+    def recent_rate_limit_errors(self, *, minutes: int = 10) -> list[TushareUsageRecord]: ...
+    def request_seen(self, api_name: str, params_hash: str) -> bool: ...
+    def history_warnings(self, *, now: datetime | None = None) -> list[str]: ...
+
+
 class TushareUsageLedger:
     table_name = "tushare_usage_events_v1"
     state_table_name = "tushare_usage_state_v1"
@@ -202,6 +210,7 @@ class TushareUsageLedger:
         self.database_coordinator = database_coordinator or DatabaseCoordinator(
             self.duckdb_path, self.lock_manager
         )
+        self._data_lake: DataLake | None = None
         self._ready = False
 
     @classmethod
@@ -211,13 +220,15 @@ class TushareUsageLedger:
         *,
         lock_timeout_seconds: float = 30.0,
     ) -> TushareUsageLedger:
-        return cls(
+        ledger = cls(
             duckdb_path=lake.duckdb_path,
             legacy_parquet_path=lake.root / "metadata" / "tushare_usage_ledger.parquet",
             lock_timeout_seconds=lock_timeout_seconds,
             database_coordinator=lake.database_coordinator,
             lock_manager=lake.lock_manager,
         )
+        ledger._data_lake = lake
+        return ledger
 
     @classmethod
     def from_lake_root(cls, lake_root: Path) -> TushareUsageLedger:
@@ -235,39 +246,32 @@ class TushareUsageLedger:
     def append(self, record: TushareUsageRecord) -> None:
         self.ensure_ready()
         row = _record_to_row(record)
-        with self.mutation_lock(), self.connect() as connection:
-            self.ensure_tables(connection)
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                connection.execute(
-                    f"""
-                    INSERT INTO {self.table_name} VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    ) ON CONFLICT (request_id) DO NOTHING
-                    """,
-                    [
-                        row["request_id"],
-                        row["run_id"],
-                        row["api_name"],
-                        row["params_hash"],
-                        row["params_redacted"],
-                        row["fields"],
-                        row["planned_at"],
-                        row["started_at"],
-                        row["finished_at"],
-                        row["status"],
-                        row["row_count"],
-                        row["error_type"],
-                        row["error_message"],
-                        row["token_hash"],
-                        row["execution_mode"],
-                        _as_naive_utc(None),
-                    ],
-                )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+        with self.database_coordinator.write_transaction("append_tushare_usage") as connection:
+            connection.execute(
+                f"""
+                INSERT INTO {self.table_name} VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ) ON CONFLICT (request_id) DO NOTHING
+                """,
+                [
+                    row["request_id"],
+                    row["run_id"],
+                    row["api_name"],
+                    row["params_hash"],
+                    row["params_redacted"],
+                    row["fields"],
+                    row["planned_at"],
+                    row["started_at"],
+                    row["finished_at"],
+                    row["status"],
+                    row["row_count"],
+                    row["error_type"],
+                    row["error_message"],
+                    row["token_hash"],
+                    row["execution_mode"],
+                    _as_naive_utc(None),
+                ],
+            )
 
     def usage_last_minute(self, *, now: datetime | None = None) -> int:
         cutoff = _as_naive_utc(now) - timedelta(minutes=1)
@@ -346,9 +350,7 @@ class TushareUsageLedger:
         payload = json.loads(str(row[0]))
         reset_at = _as_naive_utc(datetime.fromisoformat(str(payload["history_reset_at"])))
         return (
-            ["TUSHARE_USAGE_HISTORY_RESET"]
-            if reset_at.date() == _as_naive_utc(now).date()
-            else []
+            ["TUSHARE_USAGE_HISTORY_RESET"] if reset_at.date() == _as_naive_utc(now).date() else []
         )
 
     def record_history_reset(self, *, reason: str, legacy_corrupt_file: str) -> None:
@@ -360,8 +362,10 @@ class TushareUsageLedger:
             },
             sort_keys=True,
         )
-        with self.mutation_lock(), self.connect() as connection:
-            self.ensure_tables(connection)
+        self.ensure_ready()
+        with self.database_coordinator.write_transaction(
+            "record_tushare_history_reset"
+        ) as connection:
             connection.execute(
                 f"""
                 INSERT INTO {self.state_table_name} VALUES ('history_reset', ?, ?)
@@ -374,67 +378,58 @@ class TushareUsageLedger:
     def ensure_ready(self) -> None:
         if self._ready:
             return
-        from qmt_agent_trader.data.providers.tushare.ledger_migration import (
-            migrate_legacy_usage_ledger,
+        initialization_error = getattr(
+            getattr(self, "_data_lake", None), "persistence_initialization_error", None
         )
+        if initialization_error is not None:
+            raise initialization_error
+        if getattr(getattr(self, "_data_lake", None), "persistence_schema_initialized", False):
+            self._ready = True
+            return
+        from qmt_agent_trader.persistence.errors import StorageMigrationRequiredError
 
-        migrate_legacy_usage_ledger(self)
-        with self.mutation_lock(), self.connect() as connection:
-            self.ensure_tables(connection)
+        if not self.duckdb_path.exists():
+            raise StorageMigrationRequiredError(
+                store_name="tushare_usage",
+                database_path=self.duckdb_path,
+                operation="ensure_ready",
+                reason="Tushare usage schema is not initialized",
+                recoverable=True,
+                suggested_repair="initialize persistence before using the ledger",
+            )
+        with self.database_coordinator.read_connection(
+            "assert_tushare_usage_schema", read_only=True
+        ) as connection:
+            rows = connection.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_name IN (?, ?, ?)",
+                [self.table_name, self.state_table_name, "tushare_usage_migrations_v1"],
+            ).fetchall()
+        if {str(row[0]) for row in rows} != {
+            self.table_name,
+            self.state_table_name,
+            "tushare_usage_migrations_v1",
+        }:
+            raise StorageMigrationRequiredError(
+                store_name="tushare_usage",
+                database_path=self.duckdb_path,
+                operation="ensure_ready",
+                reason="Tushare usage schema is incomplete",
+                recoverable=True,
+                suggested_repair="run persistence initialization",
+            )
         self._ready = True
 
     def connect(self) -> AbstractContextManager[Any]:
         return self.database_coordinator.read_connection("tushare_ledger")
 
-    def mutation_lock(self) -> AbstractContextManager[Any]:
-        return self.lock_manager.database_write_lock(self.duckdb_path)
-
     def ensure_tables(self, connection: Any) -> None:
-        connection.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self.table_name} (
-                request_id TEXT PRIMARY KEY,
-                run_id TEXT,
-                api_name TEXT NOT NULL,
-                params_hash TEXT NOT NULL,
-                params_redacted TEXT NOT NULL,
-                fields TEXT NOT NULL,
-                planned_at TIMESTAMP,
-                started_at TIMESTAMP,
-                finished_at TIMESTAMP,
-                status TEXT NOT NULL,
-                row_count BIGINT,
-                error_type TEXT,
-                error_message TEXT,
-                token_hash TEXT,
-                execution_mode TEXT NOT NULL,
-                created_at TIMESTAMP NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self.state_table_name} (
-                key TEXT PRIMARY KEY,
-                value_json TEXT NOT NULL,
-                updated_at TIMESTAMP NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tushare_usage_migrations_v1 (
-                migration_id TEXT PRIMARY KEY,
-                migrated_at TIMESTAMP NOT NULL,
-                source_path TEXT NOT NULL,
-                archive_path TEXT NOT NULL,
-                imported_rows BIGINT NOT NULL,
-                skipped_rows BIGINT NOT NULL,
-                status TEXT NOT NULL,
-                error_message TEXT
-            )
-            """
-        )
+        """Compatibility assertion; schema creation belongs to startup migrations."""
+        tables = connection.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_name IN (?, ?, ?)",
+            [self.table_name, self.state_table_name, "tushare_usage_migrations_v1"],
+        ).fetchall()
+        if len(tables) != 3:
+            raise RuntimeError("Tushare usage schema is not initialized")
 
 
 class TushareQuotaManager:
@@ -442,15 +437,13 @@ class TushareQuotaManager:
         self,
         *,
         profile: TushareAccountQuotaProfile,
-        ledger: TushareUsageLedger | None = None,
+        ledger: TushareUsageStore | None = None,
     ) -> None:
         self.profile = profile
         self.ledger = ledger
 
     def current_state(self) -> TushareQuotaState:
-        used_last_minute = (
-            self.ledger.usage_last_minute() if self.ledger is not None else 0
-        )
+        used_last_minute = self.ledger.usage_last_minute() if self.ledger is not None else 0
         used_today = self.ledger.usage_today_by_api() if self.ledger is not None else {}
         remaining_minute = (
             max(self.profile.max_requests_per_minute - used_last_minute, 0)
@@ -532,8 +525,7 @@ class TushareQuotaManager:
                         "estimated_request_count": (
                             existing.estimated_request_count + planned_batches
                         ),
-                        "estimated_cost_units": existing.estimated_cost_units
-                        + endpoint_net_new,
+                        "estimated_cost_units": existing.estimated_cost_units + endpoint_net_new,
                     }
                 )
         return TushareFetchCostEstimate(
@@ -632,8 +624,7 @@ def profile_from_settings(
     if (
         source == DEFAULT_TUSHARE_2000_POINT_PROFILE.source
         and points == DEFAULT_TUSHARE_2000_POINT_PROFILE.points
-        and max_requests_per_minute
-        == DEFAULT_TUSHARE_2000_POINT_PROFILE.max_requests_per_minute
+        and max_requests_per_minute == DEFAULT_TUSHARE_2000_POINT_PROFILE.max_requests_per_minute
         and max_requests_per_day_per_api
         == DEFAULT_TUSHARE_2000_POINT_PROFILE.max_requests_per_day_per_api
     ):
@@ -645,12 +636,8 @@ def profile_from_settings(
         tier=tier,
         max_requests_per_minute=max_requests_per_minute,
         max_requests_per_day_per_api=max_requests_per_day_per_api,
-        minute_quota_scope="account_global"
-        if max_requests_per_minute is not None
-        else "unknown",
-        daily_quota_scope="per_api"
-        if max_requests_per_day_per_api is not None
-        else "unknown",
+        minute_quota_scope="account_global" if max_requests_per_minute is not None else "unknown",
+        daily_quota_scope="per_api" if max_requests_per_day_per_api is not None else "unknown",
         confidence="MEDIUM" if source != "unknown" else "LOW",
         notes=["Tushare quota profile loaded from project settings."],
     )

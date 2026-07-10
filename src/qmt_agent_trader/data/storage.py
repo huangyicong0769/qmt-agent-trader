@@ -14,7 +14,10 @@ import pandas as pd
 
 from qmt_agent_trader.data.atomic_io import atomic_write_parquet
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
-from qmt_agent_trader.persistence.errors import StorageLockTimeoutError
+from qmt_agent_trader.persistence.errors import (
+    StorageLockTimeoutError,
+    StorageMigrationRequiredError,
+)
 from qmt_agent_trader.persistence.locks import LockManager
 
 
@@ -63,12 +66,38 @@ class DataLake:
         self.database_coordinator = database_coordinator or DatabaseCoordinator(
             self.duckdb_path, self.lock_manager
         )
+        self._persistence_schema_initialized = False
+        self._legacy_ledger_initialized = False
+        self._persistence_initialization_error: Exception | None = None
         self.root.mkdir(parents=True, exist_ok=True)
         self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 
     def connect(self) -> AbstractContextManager[duckdb.DuckDBPyConnection]:
         """Compatibility read connection; writes use the injected coordinator."""
         return self.database_coordinator.read_connection("data_lake_read")
+
+    @property
+    def persistence_initialized(self) -> bool:
+        return self._persistence_schema_initialized and self._legacy_ledger_initialized
+
+    @property
+    def persistence_schema_initialized(self) -> bool:
+        return self._persistence_schema_initialized
+
+    @property
+    def legacy_ledger_initialized(self) -> bool:
+        return self._legacy_ledger_initialized
+
+    @property
+    def persistence_initialization_error(self) -> Exception | None:
+        return self._persistence_initialization_error
+
+    def mark_persistence_schema_initialized(self) -> None:
+        self._persistence_schema_initialized = True
+
+    def mark_legacy_ledger_initialized(self, *, error: Exception | None = None) -> None:
+        self._legacy_ledger_initialized = True
+        self._persistence_initialization_error = error
 
     def dataset_path(self, layer: str, name: str) -> Path:
         return self.root / layer / f"{name}.parquet"
@@ -131,9 +160,7 @@ class DataLake:
                 if len(merged.columns) == 0:
                     writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
                 atomic_write_parquet(writable, path)
-                table_name = (
-                    name if name.replace("_", "").isalnum() else name.replace("/", "_")
-                )
+                table_name = name if name.replace("_", "").isalnum() else name.replace("/", "_")
                 self.register_parquet(table_name, layer, name)
         except StorageLockTimeoutError as exc:
             raise DataLakeLockTimeoutError(path, self.parquet_lock_timeout_seconds) from exc
@@ -178,9 +205,7 @@ class DataLake:
 
         escaped_path = str(path).replace("'", "''")
         with self.connect() as con:
-            schema = con.execute(
-                f"DESCRIBE SELECT * FROM read_parquet('{escaped_path}')"
-            ).fetchdf()
+            schema = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{escaped_path}')").fetchdf()
             available_columns = [str(item) for item in schema["column_name"].tolist()]
             available = set(available_columns)
             selected_columns = (
@@ -238,85 +263,15 @@ class DataLake:
             raise ValueError("table_name must be alphanumeric or underscore")
         path = self.dataset_path(layer, name)
         escaped_path = str(path).replace("'", "''")
-        sql = (
-            f"CREATE OR REPLACE VIEW {table_name} "
-            f"AS SELECT * FROM read_parquet('{escaped_path}')"
-        )
-        with self.database_coordinator.write_connection("register_parquet") as con:
+        sql = f"CREATE OR REPLACE VIEW {table_name} AS SELECT * FROM read_parquet('{escaped_path}')"
+        with self.database_coordinator.write_transaction("register_parquet") as con:
             con.execute(sql)
 
     def ensure_fetch_tables(self) -> None:
-        with self.database_coordinator.write_connection("ensure_fetch_tables") as con:
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS data_fetch_state_v2 (
-                    source TEXT NOT NULL,
-                    dataset_id TEXT NOT NULL,
-                    api_name TEXT NOT NULL,
-                    endpoint_id TEXT NOT NULL,
-                    param_hash TEXT NOT NULL,
-                    fields_hash TEXT NOT NULL,
-                    symbols_hash TEXT NOT NULL,
-                    fetched_at TIMESTAMP NOT NULL,
-                    coverage_start TEXT,
-                    coverage_end TEXT,
-                    row_count BIGINT NOT NULL,
-                    checksum TEXT,
-                    status TEXT NOT NULL,
-                    error TEXT
-                )
-                """
-            )
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS data_fetch_events_v2 (
-                    source TEXT NOT NULL,
-                    dataset_id TEXT NOT NULL,
-                    api_name TEXT NOT NULL,
-                    endpoint_id TEXT NOT NULL,
-                    param_hash TEXT NOT NULL,
-                    fields_hash TEXT NOT NULL,
-                    symbols_hash TEXT NOT NULL,
-                    fetched_at TIMESTAMP NOT NULL,
-                    coverage_start TEXT,
-                    coverage_end TEXT,
-                    row_count BIGINT NOT NULL,
-                    checksum TEXT,
-                    status TEXT NOT NULL,
-                    error TEXT
-                )
-                """
-            )
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS data_fetch_state (
-                    source TEXT NOT NULL,
-                    dataset TEXT NOT NULL,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    row_count BIGINT NOT NULL,
-                    checksum TEXT,
-                    updated_at TIMESTAMP NOT NULL,
-                    error TEXT
-                )
-                """
-            )
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS data_fetch_events (
-                    source TEXT NOT NULL,
-                    dataset TEXT NOT NULL,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    row_count BIGINT NOT NULL,
-                    checksum TEXT,
-                    updated_at TIMESTAMP NOT NULL,
-                    error TEXT
-                )
-                """
-            )
+        """Compatibility initialization entry point; normal reads never call it."""
+        from qmt_agent_trader.persistence.initialization import initialize_persistence
+
+        initialize_persistence(self, migrate_legacy_ledger=False)
 
     def record_fetch_metadata(
         self,
@@ -335,7 +290,7 @@ class DataLake:
         status: str,
         error: str | None,
     ) -> None:
-        self.ensure_fetch_tables()
+        self._assert_fetch_tables_ready()
         fetched_at = datetime.now(tz=UTC).replace(tzinfo=None)
         values = [
             source,
@@ -353,24 +308,22 @@ class DataLake:
             status,
             error,
         ]
-        with self.database_coordinator.write_connection("record_fetch_metadata") as con:
-            con.execute(
-                """
-                DELETE FROM data_fetch_state_v2
-                WHERE source = ?
-                  AND dataset_id = ?
-                  AND api_name = ?
-                  AND endpoint_id = ?
-                  AND param_hash = ?
-                  AND fields_hash = ?
-                  AND symbols_hash = ?
-                """,
-                values[:7],
-            )
+        with self.database_coordinator.write_transaction("record_fetch_metadata") as con:
             con.execute(
                 """
                 INSERT INTO data_fetch_state_v2
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (
+                    source, dataset_id, api_name, endpoint_id,
+                    param_hash, fields_hash, symbols_hash
+                ) DO UPDATE SET
+                    fetched_at = excluded.fetched_at,
+                    coverage_start = excluded.coverage_start,
+                    coverage_end = excluded.coverage_end,
+                    row_count = excluded.row_count,
+                    checksum = excluded.checksum,
+                    status = excluded.status,
+                    error = excluded.error
                 """,
                 values,
             )
@@ -394,7 +347,7 @@ class DataLake:
         checksum: str | None,
         error: str | None,
     ) -> None:
-        self.ensure_fetch_tables()
+        self._assert_fetch_tables_ready()
         updated_at = datetime.now(tz=UTC).replace(tzinfo=None)
         values = [
             source,
@@ -407,23 +360,17 @@ class DataLake:
             updated_at,
             error,
         ]
-        with self.database_coordinator.write_connection("record_fetch_result") as con:
-            con.execute(
-                """
-                DELETE FROM data_fetch_state
-                WHERE source = ?
-                  AND dataset = ?
-                  AND start_date = ?
-                  AND end_date = ?
-                """,
-                [source, dataset, start_date, end_date],
-            )
+        with self.database_coordinator.write_transaction("record_fetch_result") as con:
             con.execute(
                 """
                 INSERT INTO data_fetch_state
-                VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source, dataset, start_date, end_date) DO UPDATE SET
+                    status = excluded.status,
+                    row_count = excluded.row_count,
+                    checksum = excluded.checksum,
+                    updated_at = excluded.updated_at,
+                    error = excluded.error
                 """,
                 values,
             )
@@ -438,7 +385,7 @@ class DataLake:
             )
 
     def fetch_state(self, source: str, dataset: str) -> list[dict[str, Any]]:
-        self.ensure_fetch_tables()
+        self._assert_fetch_tables_ready()
         with self.connect() as con:
             rows = con.execute(
                 """
@@ -452,7 +399,7 @@ class DataLake:
         return cast(list[dict[str, Any]], rows.to_dict(orient="records"))
 
     def fetch_events(self, source: str, dataset: str) -> list[dict[str, Any]]:
-        self.ensure_fetch_tables()
+        self._assert_fetch_tables_ready()
         with self.connect() as con:
             rows = con.execute(
                 """
@@ -464,6 +411,37 @@ class DataLake:
                 [source, dataset],
             ).fetchdf()
         return cast(list[dict[str, Any]], rows.to_dict(orient="records"))
+
+    def _assert_fetch_tables_ready(self) -> None:
+        if self._persistence_schema_initialized:
+            return
+        required = {
+            "data_fetch_state_v2",
+            "data_fetch_events_v2",
+            "data_fetch_state",
+            "data_fetch_events",
+        }
+        if not self.duckdb_path.exists():
+            raise self._fetch_schema_required()
+        with self.database_coordinator.read_connection(
+            "assert_fetch_schema", read_only=True
+        ) as con:
+            rows = con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_name IN (?, ?, ?, ?)",
+                sorted(required),
+            ).fetchall()
+        if {str(row[0]) for row in rows} != required:
+            raise self._fetch_schema_required()
+
+    def _fetch_schema_required(self) -> StorageMigrationRequiredError:
+        return StorageMigrationRequiredError(
+            store_name="data_lake",
+            database_path=self.duckdb_path,
+            operation="assert_fetch_schema",
+            reason="fetch metadata schema is not initialized",
+            recoverable=True,
+            suggested_repair="initialize persistence before reading or writing fetch metadata",
+        )
 
 
 def _quote_identifier(identifier: str) -> str:

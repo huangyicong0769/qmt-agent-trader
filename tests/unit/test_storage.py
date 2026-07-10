@@ -8,6 +8,7 @@ from filelock import FileLock
 from qmt_agent_trader.data import atomic_io
 from qmt_agent_trader.data import storage as storage_module
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 DataLakeLockTimeoutError = getattr(
     storage_module,
@@ -239,6 +240,7 @@ def test_catalog_exposes_unmigrated_legacy_batches_instead_of_hiding_them(tmp_pa
 
 def test_fetch_state_and_events_are_persisted(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake)
 
     lake.record_fetch_result(
         source="tushare",
