@@ -45,6 +45,7 @@ Thumbs.db
 /approvals/
 /reports/
 /sessions/
+/.superpowers/
 
 # Agent-generated source and report artifacts
 /src/qmt_agent_trader/agent/generated/
