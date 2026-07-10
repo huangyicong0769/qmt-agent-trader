@@ -47,11 +47,30 @@ class UniverseRegistry:
     @classmethod
     def for_lake(cls, lake: DataLake) -> UniverseRegistry:
         data_root = lake.root.parent.resolve()
-        return cls(
+        registry = cls(
             data_root / "registries" / "universes",
             locks_root=data_root / "locks",
             quarantine_root=data_root / "quarantine" / "universes",
         )
+        registry._migrate_previous_root(data_root / "universes" / "registry")
+        return registry
+
+    def _migrate_previous_root(self, previous_root: Path) -> None:
+        if not previous_root.exists() or previous_root.resolve() == self.root:
+            return
+        migration_resource = self.root.parent / ".universe-root-migration"
+        with self.repository.lock_manager.resource_lock(migration_resource):
+            legacy = UniverseRegistry(
+                previous_root,
+                locks_root=self.repository.lock_manager.locks_root,
+                quarantine_root=self.repository.quarantine_root / "legacy-root",
+            )
+            specs, diagnostics = legacy.repository.list_with_diagnostics()
+            if diagnostics:
+                self.last_diagnostics.extend(diagnostics)
+            for record in specs:
+                if self.load(record.spec.universe_id) is None:
+                    self.repository.create(record.spec.universe_id, record)
 
     def save(self, spec: UniverseSpec, *, expected_revision: int | None = None) -> Path:
         if spec.source == "agent_generated":
@@ -70,6 +89,12 @@ class UniverseRegistry:
     def load(self, universe_id: str) -> UniverseSpec | None:
         try:
             return self.repository.load(universe_id).spec
+        except FileNotFoundError:
+            return None
+
+    def load_record(self, universe_id: str) -> UniverseStoredRecord | None:
+        try:
+            return self.repository.load(universe_id)
         except FileNotFoundError:
             return None
 

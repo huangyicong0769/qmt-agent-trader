@@ -8,6 +8,7 @@ import pytest
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools import build_agent_registry
+from qmt_agent_trader.agent.tools.universe_tools import save_universe_spec_tool
 from qmt_agent_trader.data.storage import DataLake
 
 
@@ -168,8 +169,11 @@ def test_save_list_and_inspect_universe_spec_with_preview(registry) -> None:
     assert saved["status"] == "saved"
     assert saved["universe_spec"]["research_only"] is True
     assert saved["universe_spec"]["live_trading_allowed"] is False
+    assert saved["revision"] == 1
     assert [item["universe_id"] for item in listed["universes"]] == ["u_saved"]
+    assert listed["universes"][0]["revision"] == 1
     assert inspected["status"] == "OK"
+    assert inspected["revision"] == 1
     assert inspected["preview"]["symbols"] == ["000001.SZ", "000002.SZ"]
 
 
@@ -209,6 +213,13 @@ def test_list_universes_reports_degraded_corrupt_records(registry, lake: DataLak
     result = registry.run_tool("list_universes", {}, ToolContext(run_id="run_diag"))
     assert result["status"] == "DEGRADED"
     assert len(result["diagnostics"]) == 1
+
+
+def test_save_universe_schema_exposes_nonnegative_cas() -> None:
+    assert save_universe_spec_tool.spec.input_schema["properties"]["expected_revision"] == {
+        "type": "integer",
+        "minimum": 0,
+    }
 
 
 def _bar(symbol: str, trade_date: str, *, suspended: bool = False) -> dict[str, object]:

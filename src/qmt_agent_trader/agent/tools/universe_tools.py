@@ -150,11 +150,13 @@ def _save_universe_spec(input_data: dict[str, Any], _context: ToolContext) -> di
     except ValueError as exc:
         return _with_universe_evidence_status({"status": "INVALID_REQUEST", "reason": str(exc)})
     path = registry.save(spec, expected_revision=input_data.get("expected_revision"))
+    saved_record = registry.load_record(spec.universe_id)
     return _with_universe_evidence_status(
         {
             "status": "saved",
             "path": str(path),
             "universe_spec": spec.model_dump(mode="json"),
+            "revision": saved_record.revision if saved_record is not None else None,
             "research_only": spec.research_only,
             "live_trading_allowed": spec.live_trading_allowed,
         }
@@ -183,6 +185,11 @@ def _list_universes(input_data: dict[str, Any], _context: ToolContext) -> dict[s
             "universes": [
                 {
                     "universe_id": spec.universe_id,
+                    "revision": (
+                        record.revision
+                        if (record := registry.load_record(spec.universe_id)) is not None
+                        else None
+                    ),
                     "name": spec.name,
                     "description": spec.description,
                     "source": spec.source,
@@ -216,6 +223,11 @@ def _inspect_universe(input_data: dict[str, Any], _context: ToolContext) -> dict
     payload: dict[str, Any] = {
         "status": "OK",
         "universe_spec": spec.model_dump(mode="json"),
+        "revision": (
+            record.revision
+            if (record := registry.load_record(spec.universe_id)) is not None
+            else None
+        ),
         "spec_fingerprint": fingerprint_spec(spec),
     }
     if bool(input_data.get("preview")):
@@ -458,7 +470,9 @@ validate_universe_spec_tool: AgentTool = tool(
         description="Statically validate a declarative universe spec and return a normalized copy.",
         input_schema={
             "type": "object",
-            "properties": {"universe_spec": _UNIVERSE_SPEC_SCHEMA},
+            "properties": {
+                "universe_spec": _UNIVERSE_SPEC_SCHEMA,
+            },
             "required": ["universe_spec"],
         },
         permission=PermissionLevel.READ_ONLY,
@@ -498,7 +512,10 @@ save_universe_spec_tool: AgentTool = tool(
         description="Persist a validated research-only universe spec.",
         input_schema={
             "type": "object",
-            "properties": {"universe_spec": _UNIVERSE_SPEC_SCHEMA},
+            "properties": {
+                "universe_spec": _UNIVERSE_SPEC_SCHEMA,
+                "expected_revision": {"type": "integer", "minimum": 0},
+            },
             "required": ["universe_spec"],
         },
         permission=PermissionLevel.RESEARCH_WRITE,

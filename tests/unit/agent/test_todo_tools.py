@@ -43,6 +43,17 @@ def test_todo_tools_share_state_within_session(tmp_path) -> None:
     assert status["todo_state"]["session_id"] == "chat_1"
     assert status["todo_state"]["summary"]["total"] == 2
     assert status["todo_state"]["summary"]["completed"] == 1
+    assert status["todo_state"]["schema_version"] == 2
+    assert status["todo_state"]["revision"] >= 1
+
+
+def test_todo_mutation_tool_schemas_expose_nonnegative_cas(tmp_path) -> None:
+    tools = _tools(tmp_path)
+    for name in (
+        "todo_set_list", "todo_add_item", "todo_update_item", "todo_clear_completed"
+    ):
+        schema = tools[name].spec.input_schema["properties"]["expected_revision"]
+        assert schema == {"type": "integer", "minimum": 0}
 
 
 def test_todo_tools_isolate_different_sessions(tmp_path) -> None:

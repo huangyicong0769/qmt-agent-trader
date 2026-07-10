@@ -45,10 +45,8 @@ def build_agent_registry(
     resolved_settings = settings or get_settings()
     sb = sandbox or CodeSandbox()
     paths = PersistencePaths.from_settings(resolved_settings)
-    if experiment_root.expanduser().resolve() != paths.experiments_root:
-        experiment_root = paths.experiments_root
     store = ExperimentStore(
-        experiment_root,
+        experiment_root.expanduser().resolve(),
         locks_root=paths.locks_root,
         quarantine_root=paths.quarantine_root / "experiments",
     )

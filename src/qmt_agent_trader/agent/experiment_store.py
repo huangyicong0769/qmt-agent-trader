@@ -1,7 +1,7 @@
-"""Experiment store — local JSONL-backed experiment memory.
+"""Experiment store — versioned one-JSON-record-per-file experiment memory.
 
-First version uses JSONL under `data/experiments/`. The directory is within the
-project data root so it stays alongside the data lake.
+Records live under the injected experiment root and share canonical lock and
+quarantine infrastructure with the other mutable-state repositories.
 """
 
 from __future__ import annotations

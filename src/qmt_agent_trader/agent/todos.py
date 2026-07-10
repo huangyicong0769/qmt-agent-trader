@@ -84,6 +84,8 @@ class TodoListRecord(BaseModel):
         ]
         active = self.active_item
         return {
+            "schema_version": self.schema_version,
+            "revision": self.revision,
             "session_id": self.session_id,
             "goal": self.goal,
             "items": [item.model_dump(mode="json") for item in items],

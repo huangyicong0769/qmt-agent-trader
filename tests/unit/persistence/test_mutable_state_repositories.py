@@ -8,6 +8,7 @@ import pytest
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.todos import TodoListStore
+from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.errors import (
     StorageCorruptError,
     StorageError,
@@ -25,8 +26,16 @@ def _add_todo(root: str, session_id: str, title: str) -> None:
     TodoListStore(Path(root)).add_item(session_id, title=title)
 
 
+def _update_todo(root: str, session_id: str, item_id: str, notes: str) -> None:
+    TodoListStore(Path(root)).update_item(session_id, item_id, notes=notes)
+
+
 def _append_artifact(root: str, experiment_id: str, artifact: str) -> None:
     ExperimentStore(Path(root)).add_artifact(experiment_id, artifact)
+
+
+def _append_lesson(root: str, experiment_id: str, lesson: str) -> None:
+    ExperimentStore(Path(root)).add_lesson(experiment_id, lesson)
 
 
 def _save_universe(root: str, payload: dict[str, object]) -> None:
@@ -47,6 +56,20 @@ def test_concurrent_todo_updates_retain_distinct_items(tmp_path: Path) -> None:
     assert store.get("chat_1").revision == initial.revision + 2
 
 
+def test_concurrent_updates_to_distinct_existing_todos_are_both_retained(tmp_path: Path) -> None:
+    root = tmp_path / "todos"
+    store = TodoListStore(root)
+    initial = store.replace_items("chat_1", [{"title": "one"}, {"title": "two"}])
+    with ProcessPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(_update_todo, str(root), "chat_1", item.item_id, note)
+            for item, note in zip(initial.items, ("first", "second"), strict=True)
+        ]
+        for future in futures:
+            future.result()
+    assert [item.notes for item in store.get("chat_1").items] == ["first", "second"]
+
+
 def test_concurrent_experiment_appends_retain_every_artifact(tmp_path: Path) -> None:
     root = tmp_path / "experiments"
     store = ExperimentStore(root)
@@ -59,6 +82,22 @@ def test_concurrent_experiment_appends_retain_every_artifact(tmp_path: Path) -> 
         for future in futures:
             future.result()
     assert set(store.get_experiment(experiment.experiment_id).artifacts) == {"a", "b"}
+
+
+def test_concurrent_experiment_lesson_event_appends_are_retained(tmp_path: Path) -> None:
+    root = tmp_path / "experiments"
+    store = ExperimentStore(root)
+    experiment = store.create_experiment("factor")
+    with ProcessPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(_append_lesson, str(root), experiment.experiment_id, lesson)
+            for lesson in ("event-a", "event-b")
+        ]
+        for future in futures:
+            future.result()
+    assert set(store.get_experiment(experiment.experiment_id).lessons) == {
+        "event-a", "event-b"
+    }
 
 
 def test_corruption_is_diagnostic_and_explicitly_quarantined(tmp_path: Path) -> None:
@@ -188,3 +227,17 @@ def test_fault_before_replace_preserves_previous_record(tmp_path: Path) -> None:
     restored = store.get("chat_1")
     assert restored.revision == original.revision
     assert [item.title for item in restored.items] == ["one"]
+
+
+def test_universe_previous_root_migrates_to_canonical_idempotently(tmp_path: Path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    previous = UniverseRegistry(tmp_path / "universes" / "registry")
+    spec = broad_universe_spec("stock")
+    previous.save(spec)
+    source = previous.path_for(spec.universe_id)
+    canonical = UniverseRegistry.for_lake(lake)
+    migrated = canonical.load_record(spec.universe_id)
+    assert migrated is not None and migrated.spec == spec
+    assert source.exists()
+    again = UniverseRegistry.for_lake(lake).load_record(spec.universe_id)
+    assert again is not None and again.revision == migrated.revision == 1

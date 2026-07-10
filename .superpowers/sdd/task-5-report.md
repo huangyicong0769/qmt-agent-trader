@@ -63,3 +63,31 @@ Additional verified seams include Todo and Chat stale-revision rejection and
 legacy NiceGUI migration under a changed CWD. No new reviewer-specific test
 produced a RED after implementation; this limitation is reported explicitly
 rather than relabeling first-run GREEN tests as TDD RED evidence.
+
+## Second reviewer remediation
+
+NiceGUI now retains the complete canonical `ChatSession` and `ChatMessage`
+objects while presenting UI-friendly wrappers. An unedited API-created session
+round-trips through UI load/save without changing IDs, timestamps, context,
+messages or revision. UI-specific counter/preview values merge only into
+`context.legacy_ui`. Edited saves use the loaded revision as CAS and retain that
+revision only after a successful write; stale saves raise a visible structured
+conflict. Delete failures are surfaced and no longer suppressed.
+
+Universe startup discovers the exact previous root `data/universes/registry`
+under a migration lock, validates each record, atomically creates missing
+canonical records under `data/registries/universes`, and leaves the source in
+place. Repeated discovery is idempotent. Universe save has an explicit
+same-ID last-locked-writer policy unless CAS is supplied.
+
+Todo mutation tool schemas and Universe save schemas now advertise nonnegative
+`expected_revision`. Todo results include schema/revision, and Universe
+save/list/inspect results expose the persisted revision. Explicit experiment
+roots remain explicit; only lock and quarantine infrastructure comes from the
+canonical settings paths.
+
+This correction added tests before the final schema placement correction, which
+produced one genuine failure: CAS was accidentally declared on the validation
+tool instead of the save tool. The lossless/UI/old-root tests were added after
+their implementation and are therefore reported as regression evidence, not
+TDD RED evidence.

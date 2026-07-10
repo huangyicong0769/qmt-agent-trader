@@ -49,6 +49,7 @@ class ChatMessage:
     role: str
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    stored: StoredChatMessage | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ class _PendingMessageStatus:
 class _ChatSession:
     __slots__ = (
         "_repository",
+        "_stored",
         "container",
         "messages",
         "name",
@@ -101,6 +103,7 @@ class _ChatSession:
         self.container = ui.column().classes("w-full overflow-auto flex-1 p-4")
         self.messages: list[ChatMessage] = []
         self._repository = repository or _chat_repository()
+        self._stored: StoredChatSession | None = None
 
     def add_message(self, role: str, content: str, **meta: Any) -> None:
         msg = ChatMessage(role=role, content=content, metadata=dict(meta))
@@ -114,21 +117,44 @@ class _ChatSession:
             self.preview = _trunc(content, 60)
 
     def save(self) -> None:
-        stored = StoredChatSession(
-            session_id=self.sid,
-            title=self.name,
-            messages=[
-                StoredChatMessage(
+        messages = [
+            (
+                m.stored.model_copy(
+                    update={"role": m.role, "content": m.content, "metadata": m.metadata}
+                )
+                if m.stored is not None
+                else StoredChatMessage(
                     session_id=self.sid,
-                    role=m.role,  # type: ignore[arg-type]
+                    role=m.role,
                     content=m.content,
                     metadata=m.metadata,
                 )
-                for m in self.messages
-            ],
-            context={"legacy_ui": {"counter": _ChatSession._counter, "preview": self.preview}},
+            )
+            for m in self.messages
+        ]
+        legacy_ui = {"counter": _ChatSession._counter, "preview": self.preview}
+        if self._stored is None:
+            candidate = StoredChatSession(
+                session_id=self.sid,
+                title=self.name,
+                messages=messages,
+                context={"legacy_ui": legacy_ui},
+            )
+            expected_revision = 0
+        else:
+            context = dict(self._stored.context)
+            context["legacy_ui"] = legacy_ui
+            candidate = self._stored.model_copy(
+                update={"title": self.name, "messages": messages, "context": context}
+            )
+            expected_revision = self._stored.revision
+            if candidate == self._stored:
+                return
+        self._stored = self._repository.save(
+            candidate, expected_revision=expected_revision
         )
-        self._repository.save(stored)
+        for ui_message, stored_message in zip(self.messages, self._stored.messages, strict=True):
+            ui_message.stored = stored_message
 
     def rebuild_ui(self) -> None:
         self.transcript.clear()
@@ -147,6 +173,7 @@ class _ChatSession:
                 sid=sid,
                 repository=repository,
             )
+            s._stored = stored
             legacy = stored.context.get("legacy_ui", {})
             s.preview = str(legacy.get("preview", "")) if isinstance(legacy, dict) else ""
             if isinstance(legacy, dict):
@@ -160,6 +187,7 @@ class _ChatSession:
                         role=message.role,
                         content=message.content,
                         metadata=message.metadata,
+                        stored=message,
                     )
                 )
             sessions.append(s)
@@ -591,12 +619,14 @@ def register() -> None:
             if len(sessions) <= 1:
                 ui.notify("Cannot close the last session.", type="warning")
                 return
-            s = sessions.pop(sid, None)
+            s = sessions.get(sid)
             if s is not None:
                 try:
                     s._repository.delete(s.sid)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    ui.notify(f"删除会话失败：{exc}", type="negative")
+                    return
+                sessions.pop(sid)
                 s.container.clear()
                 s.container.delete()
             if active_sid == sid:

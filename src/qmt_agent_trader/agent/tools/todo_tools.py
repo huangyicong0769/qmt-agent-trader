@@ -81,6 +81,7 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
                 "type": "object",
                 "properties": {
                     "goal": {"type": "string"},
+                    "expected_revision": {"type": "integer", "minimum": 0},
                     "items": {
                         "type": "array",
                         "items": {
@@ -114,6 +115,7 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
                 "properties": {
                     "title": {"type": "string"},
                     "notes": {"type": "string"},
+                    "expected_revision": {"type": "integer", "minimum": 0},
                 },
                 "required": ["title"],
             },
@@ -133,6 +135,7 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
                     "title": {"type": "string"},
                     "notes": {"type": "string"},
                     "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                    "expected_revision": {"type": "integer", "minimum": 0},
                 },
                 "required": ["item_id"],
             },
@@ -154,7 +157,9 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
             "清理当前会话 todo-list 中已完成的任务。",
             {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "expected_revision": {"type": "integer", "minimum": 0},
+                },
             },
             _clear_completed,
         ),

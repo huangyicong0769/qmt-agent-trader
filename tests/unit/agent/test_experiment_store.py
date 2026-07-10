@@ -84,6 +84,23 @@ def test_log_experiment_event_uses_context_id(store: ExperimentStore) -> None:
     assert "[observation] context works" in store.get_experiment("exp_context").lessons
 
 
+def test_registry_preserves_explicit_experiment_root(tmp_path) -> None:
+    explicit = tmp_path / "explicit-experiments"
+    ExperimentStore(explicit).create_experiment(
+        "factor", experiment_id="exp_explicit", tags=["explicit"]
+    )
+    registry = build_agent_registry(
+        data_lake=DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb"),
+        audit_path=tmp_path / "audit.jsonl",
+        experiment_root=explicit,
+        sandbox=CodeSandbox(tmp_path / "generated"),
+    )
+    result = registry.run_tool(
+        "search_experiments", {"tags": ["explicit"]}, ToolContext(run_id="run_explicit")
+    )
+    assert [item["experiment_id"] for item in result["experiments"]] == ["exp_explicit"]
+
+
 def test_get_experiment_tool_calls_returns_real_audit_entries(tmp_path) -> None:
     lake = DataLake(
         root=tmp_path / "lake",
