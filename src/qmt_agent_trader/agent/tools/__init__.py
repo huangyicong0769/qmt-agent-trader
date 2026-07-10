@@ -26,6 +26,7 @@ from qmt_agent_trader.agent.tools.todo_tools import build_todo_tools
 from qmt_agent_trader.agent.tools.universe_tools import build_universe_tools
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.paths import PersistencePaths
 
 # Avoid circular import: import AgentToolRegistry inside build_agent_registry
 
@@ -43,7 +44,14 @@ def build_agent_registry(
 
     resolved_settings = settings or get_settings()
     sb = sandbox or CodeSandbox()
-    store = ExperimentStore(experiment_root)
+    paths = PersistencePaths.from_settings(resolved_settings)
+    if experiment_root.expanduser().resolve() != paths.experiments_root:
+        experiment_root = paths.experiments_root
+    store = ExperimentStore(
+        experiment_root,
+        locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "experiments",
+    )
     audit = AuditLogger(audit_path)
     deps = AgentToolDependencies(
         settings=resolved_settings,

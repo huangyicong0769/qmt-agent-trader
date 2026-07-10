@@ -16,6 +16,7 @@ from qmt_agent_trader.agent.workflows.self_bootstrap import SelfBootstrapWorkflo
 from qmt_agent_trader.agent.workflows.strategy_engineering import StrategyEngineeringWorkflow
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id
+from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.web.event_bus import AgentEvent, AgentEventType, event_bus
 from qmt_agent_trader.web.runtime import get_agent_runtime
 from qmt_agent_trader.web.schemas import WorkflowRunRequest, WorkflowRunResponse
@@ -28,7 +29,9 @@ _workflow_runs: dict[str, WorkflowRunResponse] = {}
 @lru_cache
 def get_experiment_store() -> ExperimentStore:
     settings = get_settings()
-    return ExperimentStore(settings.resolved_data_dir / "experiments")
+    paths = PersistencePaths.from_settings(settings)
+    return ExperimentStore(paths.experiments_root, locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "experiments")
 
 
 @router.post("/factor-discovery", response_model=WorkflowRunResponse)

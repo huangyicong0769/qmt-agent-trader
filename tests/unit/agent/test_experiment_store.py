@@ -11,6 +11,7 @@ from qmt_agent_trader.agent.schemas import ExperimentStatus, ToolContext
 from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.tools.experiment_tools import (
     log_experiment_event_tool,
+    search_experiments_tool,
     set_experiment_store,
 )
 from qmt_agent_trader.data.storage import DataLake
@@ -59,6 +60,15 @@ def test_add_lesson(store: ExperimentStore) -> None:
     store.add_lesson(exp.experiment_id, "failed due to NaN coverage")
     fetched = store.get_experiment(exp.experiment_id)
     assert "failed due to NaN coverage" in fetched.lessons
+
+
+def test_search_tool_reports_degraded_corrupt_records(store: ExperimentStore) -> None:
+    set_experiment_store(store)
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "exp_broken.json").write_text("{broken", encoding="utf-8")
+    result = search_experiments_tool.run({}, ToolContext(run_id="run_diag"))
+    assert result["status"] == "DEGRADED"
+    assert len(result["diagnostics"]) == 1
 
 
 def test_log_experiment_event_uses_context_id(store: ExperimentStore) -> None:

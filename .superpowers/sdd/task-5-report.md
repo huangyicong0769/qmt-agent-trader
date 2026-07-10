@@ -40,3 +40,26 @@ was implemented; they are regression evidence, not claimed as RED evidence.
 
 - Persisted response models add `schema_version` and `revision`; this is additive.
 - No Phase 5 work was started.
+
+## Reviewer remediation
+
+The correction pass migrated the actual NiceGUI chat page from its CWD-relative
+duplicate JSON store to `ChatSessionRepository`. Its legacy payload adapter keeps
+the session ID, title, messages, counter and preview, and lazy migration remains
+locked and idempotent. The UI shows a degraded warning for corrupt records and
+the Chat API exposes storage status/count headers without changing its list body.
+
+Todo, Experiment, Chat and Universe models/repositories now enforce literal schema
+version 2, non-negative revisions, record-key identity, and optional CAS where
+mutations replace mutable state. Universe save uses one locked upsert. Todo and
+Experiment constructors used by tools, orchestration, CLI and workflow routes now
+receive canonical locks/quarantine roots. Arbitrary Universe registry overrides
+are rejected; a wired DataLake determines the canonical registry root.
+
+Experiment and Universe list tools keep their existing result keys while adding
+`status=DEGRADED` and structured diagnostics when corrupt records are skipped.
+
+Additional verified seams include Todo and Chat stale-revision rejection and
+legacy NiceGUI migration under a changed CWD. No new reviewer-specific test
+produced a RED after implementation; this limitation is reported explicitly
+rather than relabeling first-run GREEN tests as TDD RED evidence.

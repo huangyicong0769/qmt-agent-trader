@@ -675,7 +675,9 @@ def _agent_runtime() -> AgentRuntime:
 
 def _agent_store() -> ExperimentStore:
     settings = _settings()
-    return ExperimentStore(settings.resolved_data_dir / "experiments")
+    paths = PersistencePaths.from_settings(settings)
+    return ExperimentStore(paths.experiments_root, locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "experiments")
 
 
 @agent_app.command("experiments")

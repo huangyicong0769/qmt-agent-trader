@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -44,8 +44,8 @@ class TodoItem(BaseModel):
 
 
 class TodoListRecord(BaseModel):
-    schema_version: int = 2
-    revision: int = 0
+    schema_version: Literal[2] = 2
+    revision: int = Field(default=0, ge=0)
     session_id: str
     goal: str | None = None
     items: list[TodoItem] = Field(default_factory=list)
@@ -125,6 +125,7 @@ class TodoListStore:
         items: list[dict[str, Any]],
         *,
         goal: str | None = None,
+        expected_revision: int | None = None,
     ) -> TodoListRecord:
         self._validate_item_count(len(items))
         now = shanghai_now_iso()
@@ -142,7 +143,7 @@ class TodoListStore:
             ],
             updated_at=now,
         )
-        return self._replace(record)
+        return self._replace(record, expected_revision=expected_revision)
 
     def add_item(
         self,
@@ -150,8 +151,13 @@ class TodoListStore:
         *,
         title: str,
         notes: str = "",
+        expected_revision: int | None = None,
     ) -> TodoListRecord:
-        return self._mutate(session_id, lambda record: self._add(record, title, notes))
+        return self._mutate(
+            session_id,
+            lambda record: self._add(record, title, notes),
+            expected_revision=expected_revision,
+        )
 
     def update_item(
         self,
@@ -161,10 +167,12 @@ class TodoListStore:
         status: TodoStatus | str | None = None,
         title: str | None = None,
         notes: str | None = None,
+        expected_revision: int | None = None,
     ) -> TodoListRecord:
         return self._mutate(
             session_id,
             lambda record: self._update(record, item_id, status=status, title=title, notes=notes),
+            expected_revision=expected_revision,
         )
 
     def _update(
@@ -201,17 +209,36 @@ class TodoListStore:
         record.updated_at = shanghai_now_iso()
         return self._normalize_active(record)
 
-    def clear_completed(self, session_id: str) -> TodoListRecord:
-        return self._mutate(session_id, self._clear_completed)
-
-    def _mutate(self, session_id: str, operation: Any) -> TodoListRecord:
-        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
-        return self.repository.mutate(
-            digest, operation, missing=lambda: TodoListRecord(session_id=session_id)
+    def clear_completed(
+        self, session_id: str, *, expected_revision: int | None = None
+    ) -> TodoListRecord:
+        return self._mutate(
+            session_id, self._clear_completed, expected_revision=expected_revision
         )
 
-    def _replace(self, record: TodoListRecord) -> TodoListRecord:
-        return self._mutate(record.session_id, lambda _current: self._normalize_active(record))
+    def _mutate(
+        self,
+        session_id: str,
+        operation: Any,
+        *,
+        expected_revision: int | None = None,
+    ) -> TodoListRecord:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+        return self.repository.mutate(
+            digest,
+            operation,
+            missing=lambda: TodoListRecord(session_id=session_id),
+            expected_revision=expected_revision,
+        )
+
+    def _replace(
+        self, record: TodoListRecord, *, expected_revision: int | None = None
+    ) -> TodoListRecord:
+        return self._mutate(
+            record.session_id,
+            lambda _current: self._normalize_active(record),
+            expected_revision=expected_revision,
+        )
 
     def _add(self, record: TodoListRecord, title: str, notes: str) -> TodoListRecord:
         self._validate_item_count(len(record.items) + 1)

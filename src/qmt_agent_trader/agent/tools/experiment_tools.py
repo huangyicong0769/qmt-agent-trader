@@ -106,6 +106,11 @@ def _search_experiments(input_data: dict[str, Any], context: ToolContext) -> dic
     limit = input_data.get("limit", 20)
     results = store.search_experiments(query=query, tags=tags, limit=limit)
     return {
+        "status": "DEGRADED" if store.last_diagnostics else "OK",
+        "diagnostics": [
+            {"path": str(item.path), "reason": item.error.reason}
+            for item in store.last_diagnostics
+        ],
         "experiments": [
             {
                 "experiment_id": r.experiment_id,

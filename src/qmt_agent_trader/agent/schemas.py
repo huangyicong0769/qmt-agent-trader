@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -86,8 +86,8 @@ class ExperimentStatus(StrEnum):
 
 
 class ExperimentRecord(BaseModel):
-    schema_version: int = 2
-    revision: int = 0
+    schema_version: Literal[2] = 2
+    revision: int = Field(default=0, ge=0)
     experiment_id: str
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(tz=UTC)

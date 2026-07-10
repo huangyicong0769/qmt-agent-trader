@@ -25,6 +25,7 @@ from qmt_agent_trader.agent.tool_result import status_icon
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.core.ids import new_id
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.paths import PersistencePaths
 
 # ── Event wrapper for SSE streaming ──
 
@@ -148,7 +149,9 @@ class AgentOrchestrator:
         rid = run_id or new_id("run")
         sid = session_id or rid
         experiment_id = new_id("exp")
-        ExperimentStore(self.settings.resolved_data_dir / "experiments").create_experiment(
+        paths = PersistencePaths.from_settings(self.settings)
+        ExperimentStore(paths.experiments_root, locks_root=paths.locks_root,
+            quarantine_root=paths.quarantine_root / "experiments").create_experiment(
             "chat_research",
             experiment_id=experiment_id,
             hypothesis={"message": message, "session_id": sid},

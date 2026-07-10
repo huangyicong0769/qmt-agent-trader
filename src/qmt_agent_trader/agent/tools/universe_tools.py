@@ -145,8 +145,11 @@ def _save_universe_spec(input_data: dict[str, Any], _context: ToolContext) -> di
         spec = UniverseSpec.model_validate(raw)
     except ValidationError as exc:
         return _invalid_request("INVALID_UNIVERSE_SPEC", exc)
-    registry = UniverseRegistry(registry_root_from_payload(input_data, lake))
-    path = registry.save(spec)
+    try:
+        registry = UniverseRegistry(registry_root_from_payload(input_data, lake))
+    except ValueError as exc:
+        return _with_universe_evidence_status({"status": "INVALID_REQUEST", "reason": str(exc)})
+    path = registry.save(spec, expected_revision=input_data.get("expected_revision"))
     return _with_universe_evidence_status(
         {
             "status": "saved",
@@ -160,7 +163,10 @@ def _save_universe_spec(input_data: dict[str, Any], _context: ToolContext) -> di
 
 def _list_universes(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
     lake = _get_lake()
-    registry = UniverseRegistry(registry_root_from_payload(input_data, lake))
+    try:
+        registry = UniverseRegistry(registry_root_from_payload(input_data, lake))
+    except ValueError as exc:
+        return _with_universe_evidence_status({"status": "INVALID_REQUEST", "reason": str(exc)})
     specs = registry.list(
         source=_optional_string(input_data.get("source")),
         query=_optional_string(input_data.get("query")),
@@ -169,7 +175,11 @@ def _list_universes(input_data: dict[str, Any], _context: ToolContext) -> dict[s
     )
     return _with_universe_evidence_status(
         {
-            "status": "OK",
+            "status": "DEGRADED" if registry.last_diagnostics else "OK",
+            "diagnostics": [
+                {"path": str(item.path), "reason": item.error.reason}
+                for item in registry.last_diagnostics
+            ],
             "universes": [
                 {
                     "universe_id": spec.universe_id,

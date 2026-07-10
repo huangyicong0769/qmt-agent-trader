@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.repositories.versioned_record import (
@@ -16,8 +16,8 @@ from qmt_agent_trader.universe.models import UniverseSpec
 
 
 class UniverseStoredRecord(BaseModel):
-    schema_version: int = 2
-    revision: int = 0
+    schema_version: Literal[2] = 2
+    revision: int = Field(default=0, ge=0)
     updated_at: str = ""
     spec: UniverseSpec
 
@@ -40,26 +40,31 @@ class UniverseRegistry:
             store_name="universes",
             locks_root=locks_root,
             quarantine_root=quarantine_root,
+            identity=lambda record: record.spec.universe_id,
         )
         self.last_diagnostics: list[RecordDiagnostic] = []
 
     @classmethod
     def for_lake(cls, lake: DataLake) -> UniverseRegistry:
-        return cls(lake.root.parent / "universes" / "registry")
+        data_root = lake.root.parent.resolve()
+        return cls(
+            data_root / "registries" / "universes",
+            locks_root=data_root / "locks",
+            quarantine_root=data_root / "quarantine" / "universes",
+        )
 
-    def save(self, spec: UniverseSpec) -> Path:
+    def save(self, spec: UniverseSpec, *, expected_revision: int | None = None) -> Path:
         if spec.source == "agent_generated":
             spec.research_only = True
             spec.live_trading_allowed = False
             spec.approval_required = True
         path = self.path_for(spec.universe_id)
         record = UniverseStoredRecord(spec=spec)
-        try:
-            self.repository.load(spec.universe_id)
-        except FileNotFoundError:
-            self.repository.create(spec.universe_id, record)
-        else:
-            self.repository.mutate(spec.universe_id, lambda _old: record)
+        self.repository.upsert(
+            spec.universe_id,
+            lambda _old: record,
+            expected_revision=expected_revision,
+        )
         return path
 
     def load(self, universe_id: str) -> UniverseSpec | None:
@@ -99,8 +104,11 @@ class UniverseRegistry:
 
 def registry_root_from_payload(payload: dict[str, Any], lake: DataLake | None) -> Path:
     raw = payload.get("registry_root")
-    if raw:
-        return Path(str(raw))
     if lake is not None:
-        return UniverseRegistry.for_lake(lake).root
-    return Path("data/universes/registry")
+        canonical = UniverseRegistry.for_lake(lake).root
+        if raw and Path(str(raw)).expanduser().resolve() != canonical.resolve():
+            raise ValueError("registry_root override must equal the canonical registry root")
+        return canonical
+    if raw:
+        raise ValueError("registry_root override requires a configured data lake")
+    raise ValueError("universe registry requires a configured data lake")

@@ -14,9 +14,10 @@ from qmt_agent_trader.web.routes import chat
 
 
 @pytest.fixture(autouse=True)
-def isolated_chat_repository(tmp_path, monkeypatch) -> None:
+def isolated_chat_repository(tmp_path, monkeypatch) -> ChatSessionRepository:
     repository = ChatSessionRepository(tmp_path / "sessions")
     monkeypatch.setattr(chat, "get_chat_session_repository", lambda: repository)
+    return repository
 
 
 def test_chat_api_create_and_send_message() -> None:
@@ -172,3 +173,17 @@ def test_session_schema_no_mode_field() -> None:
     assert "routing_history" not in session
     assert "session_id" in session
     assert "messages" in session
+
+
+def test_list_sessions_exposes_degraded_storage_status(
+    isolated_chat_repository: ChatSessionRepository,
+) -> None:
+    path = isolated_chat_repository.records.path_for("chat_broken")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{broken", encoding="utf-8")
+    app = FastAPI()
+    app.include_router(chat.router)
+    response = TestClient(app).get("/sessions")
+    assert response.status_code == 200
+    assert response.headers["X-Storage-Status"] == "DEGRADED"
+    assert response.headers["X-Storage-Diagnostics-Count"] == "1"

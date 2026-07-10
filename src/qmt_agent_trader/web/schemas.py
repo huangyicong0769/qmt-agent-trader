@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 
@@ -13,21 +13,51 @@ from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 class ChatMessage(BaseModel):
     message_id: str = Field(default_factory=lambda: new_id("msg"))
     session_id: str
-    role: Literal["user", "assistant", "system"]
+    role: Literal["user", "assistant", "system", "info", "tool", "done", "error"]
     content: str
     created_at: str = Field(default_factory=shanghai_now_iso)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatSession(BaseModel):
-    schema_version: int = 2
-    revision: int = 0
+    schema_version: Literal[2] = 2
+    revision: int = Field(default=0, ge=0)
     session_id: str = Field(default_factory=lambda: new_id("chat"))
     title: str = "New research chat"
     created_at: str = Field(default_factory=shanghai_now_iso)
     updated_at: str = Field(default_factory=shanghai_now_iso)
     messages: list[ChatMessage] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_ui_session(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "sid" not in value:
+            return value
+        sid = str(value["sid"])
+        messages = []
+        for raw in value.get("messages", []):
+            if not isinstance(raw, dict):
+                continue
+            messages.append(
+                {
+                    "session_id": sid,
+                    "role": raw.get("role", "info"),
+                    "content": str(raw.get("content", "")),
+                    "metadata": raw.get("metadata", {}),
+                }
+            )
+        return {
+            "session_id": sid,
+            "title": str(value.get("name") or "New research chat"),
+            "messages": messages,
+            "context": {
+                "legacy_ui": {
+                    "counter": value.get("counter", 0),
+                    "preview": str(value.get("preview", "")),
+                }
+            },
+        }
 
 
 class AdvancedOptions(BaseModel):

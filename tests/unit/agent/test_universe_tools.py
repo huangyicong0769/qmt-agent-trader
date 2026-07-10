@@ -202,6 +202,15 @@ def _stock_spec(universe_id: str = "u_tool_stock") -> dict[str, object]:
     }
 
 
+def test_list_universes_reports_degraded_corrupt_records(registry, lake: DataLake) -> None:
+    root = lake.root.parent / "registries" / "universes"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "broken.json").write_text("{broken", encoding="utf-8")
+    result = registry.run_tool("list_universes", {}, ToolContext(run_id="run_diag"))
+    assert result["status"] == "DEGRADED"
+    assert len(result["diagnostics"]) == 1
+
+
 def _bar(symbol: str, trade_date: str, *, suspended: bool = False) -> dict[str, object]:
     return {
         "ts_code": symbol,

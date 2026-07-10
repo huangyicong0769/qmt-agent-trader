@@ -12,7 +12,7 @@ import json
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
@@ -61,8 +61,17 @@ async def create_session(request: CreateChatSessionRequest) -> ChatSession:
 
 
 @router.get("/sessions", response_model=list[ChatSession])
-async def list_sessions() -> list[ChatSession]:
-    return get_chat_session_repository().list()
+async def list_sessions(response: Response) -> list[ChatSession]:
+    repository = get_chat_session_repository()
+    sessions = repository.list()
+    response.headers["X-Storage-Status"] = (
+        "DEGRADED" if repository.last_diagnostics else "OK"
+    )
+    if repository.last_diagnostics:
+        response.headers["X-Storage-Diagnostics-Count"] = str(
+            len(repository.last_diagnostics)
+        )
+    return sessions
 
 
 @router.get("/sessions/{session_id}", response_model=ChatSession)

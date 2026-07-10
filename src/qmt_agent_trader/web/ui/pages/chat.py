@@ -12,7 +12,6 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any
 
 from nicegui import ui
@@ -20,10 +19,11 @@ from nicegui import ui
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id
+from qmt_agent_trader.persistence.paths import PersistencePaths
+from qmt_agent_trader.web.chat_repository import ChatSessionRepository
+from qmt_agent_trader.web.schemas import ChatMessage as StoredChatMessage
+from qmt_agent_trader.web.schemas import ChatSession as StoredChatSession
 from qmt_agent_trader.web.ui.layout import shell
-
-SESSIONS_DIR = Path("sessions")
-SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 SUGGESTED_PROMPTS = [
     "帮我发现几个适合A股个股和ETF的低波动高胜率因子，并自动跑初步验证。",
@@ -71,7 +71,7 @@ class _PendingMessageStatus:
 
 class _ChatSession:
     __slots__ = (
-        "_path",
+        "_repository",
         "container",
         "messages",
         "name",
@@ -82,7 +82,13 @@ class _ChatSession:
     )
     _counter = 0
 
-    def __init__(self, name: str = "", sid: str = "") -> None:
+    def __init__(
+        self,
+        name: str = "",
+        sid: str = "",
+        *,
+        repository: ChatSessionRepository | None = None,
+    ) -> None:
         if sid:
             self.sid = sid
         else:
@@ -94,7 +100,7 @@ class _ChatSession:
         self.preview = ""
         self.container = ui.column().classes("w-full overflow-auto flex-1 p-4")
         self.messages: list[ChatMessage] = []
-        self._path = SESSIONS_DIR / f"{self.sid}.json"
+        self._repository = repository or _chat_repository()
 
     def add_message(self, role: str, content: str, **meta: Any) -> None:
         msg = ChatMessage(role=role, content=content, metadata=dict(meta))
@@ -108,19 +114,21 @@ class _ChatSession:
             self.preview = _trunc(content, 60)
 
     def save(self) -> None:
-        data: dict[str, Any] = {
-            "sid": self.sid,
-            "name": self.name,
-            "counter": _ChatSession._counter,
-            "preview": self.preview,
-            "messages": [
-                {"role": m.role, "content": m.content, "metadata": m.metadata}
+        stored = StoredChatSession(
+            session_id=self.sid,
+            title=self.name,
+            messages=[
+                StoredChatMessage(
+                    session_id=self.sid,
+                    role=m.role,  # type: ignore[arg-type]
+                    content=m.content,
+                    metadata=m.metadata,
+                )
                 for m in self.messages
             ],
-        }
-        self._path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            context={"legacy_ui": {"counter": _ChatSession._counter, "preview": self.preview}},
         )
+        self._repository.save(stored)
 
     def rebuild_ui(self) -> None:
         self.transcript.clear()
@@ -128,32 +136,32 @@ class _ChatSession:
             _render_stored_message(self.transcript, msg)
 
     @staticmethod
-    def load_all() -> list[_ChatSession]:
+    def load_all(repository: ChatSessionRepository | None = None) -> list[_ChatSession]:
+        repository = repository or _chat_repository()
         sessions: list[_ChatSession] = []
         max_counter = 0
-        for fpath in sorted(
-            SESSIONS_DIR.glob("s*.json"),
-            key=lambda p: p.stat().st_mtime,
-        ):
-            try:
-                data = json.loads(fpath.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            sid = str(data.get("sid", fpath.stem))
+        for stored in reversed(repository.list()):
+            sid = stored.session_id
             s = _ChatSession(
-                name=str(data.get("name", "")),
+                name=stored.title,
                 sid=sid,
+                repository=repository,
             )
-            s.preview = str(data.get("preview", ""))
-            for mdata in data.get("messages", []):
-                if isinstance(mdata, dict):
-                    s.messages.append(ChatMessage(
-                        role=str(mdata.get("role", "")),
-                        content=str(mdata.get("content", "")),
-                        metadata=mdata.get("metadata", {}) if isinstance(
-                            mdata.get("metadata"), dict
-                        ) else {},
-                    ))
+            legacy = stored.context.get("legacy_ui", {})
+            s.preview = str(legacy.get("preview", "")) if isinstance(legacy, dict) else ""
+            if isinstance(legacy, dict):
+                try:
+                    max_counter = max(max_counter, int(legacy.get("counter", 0)))
+                except (TypeError, ValueError):
+                    pass
+            for message in stored.messages:
+                s.messages.append(
+                    ChatMessage(
+                        role=message.role,
+                        content=message.content,
+                        metadata=message.metadata,
+                    )
+                )
             sessions.append(s)
             try:
                 n = int(sid.lstrip("s"))
@@ -163,6 +171,15 @@ class _ChatSession:
                 pass
         _ChatSession._counter = max_counter
         return sessions
+
+
+def _chat_repository() -> ChatSessionRepository:
+    paths = PersistencePaths.from_settings(get_settings())
+    return ChatSessionRepository(
+        paths.sessions_root,
+        locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "chat_sessions",
+    )
 
 
 def _render_stored_message(transcript: ui.column, msg: ChatMessage) -> None:
@@ -523,7 +540,13 @@ def register() -> None:
     def chat_page() -> None:
         shell("Chat")
 
-        loaded_sessions = _ChatSession.load_all()
+        repository = _chat_repository()
+        loaded_sessions = _ChatSession.load_all(repository)
+        if repository.last_diagnostics:
+            ui.notify(
+                f"会话存储降级：{len(repository.last_diagnostics)} 个损坏记录待隔离",
+                type="warning",
+            )
         sessions: dict[str, _ChatSession] = {}
         active_sid: str = ""
         _refresh_fn: list[Any] = [lambda: None]
@@ -571,7 +594,7 @@ def register() -> None:
             s = sessions.pop(sid, None)
             if s is not None:
                 try:
-                    s._path.unlink(missing_ok=True)
+                    s._repository.delete(s.sid)
                 except Exception:
                     pass
                 s.container.clear()

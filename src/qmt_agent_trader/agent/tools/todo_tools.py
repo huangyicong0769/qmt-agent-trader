@@ -16,10 +16,16 @@ from qmt_agent_trader.agent.tool_result import (
     RecommendationStatus,
 )
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
+from qmt_agent_trader.persistence.paths import PersistencePaths
 
 
 def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
-    store = TodoListStore(deps.settings.resolved_data_dir / "todos")
+    paths = PersistencePaths.from_settings(deps.settings)
+    store = TodoListStore(
+        paths.data_root / "todos",
+        locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "todos",
+    )
 
     def _set_list(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
         items = input_data.get("items", [])
@@ -29,6 +35,7 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
             _session_id(context),
             [item if isinstance(item, dict) else {"title": str(item)} for item in items],
             goal=input_data.get("goal"),
+            expected_revision=input_data.get("expected_revision"),
         )
         return _result(record)
 
@@ -37,6 +44,7 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
             _session_id(context),
             title=str(input_data.get("title", "")),
             notes=str(input_data.get("notes", "")),
+            expected_revision=input_data.get("expected_revision"),
         )
         return _result(record)
 
@@ -47,6 +55,7 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
             status=input_data.get("status"),
             title=_optional_str(input_data.get("title")),
             notes=_optional_str(input_data.get("notes")),
+            expected_revision=input_data.get("expected_revision"),
         )
         return _result(
             record,
@@ -61,7 +70,8 @@ def build_todo_tools(deps: AgentToolDependencies) -> list[AgentTool]:
         _input_data: dict[str, Any],
         context: ToolContext,
     ) -> dict[str, Any]:
-        return _result(store.clear_completed(_session_id(context)))
+        return _result(store.clear_completed(
+            _session_id(context), expected_revision=_input_data.get("expected_revision")))
 
     return [
         _todo_tool(

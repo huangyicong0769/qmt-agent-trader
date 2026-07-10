@@ -32,6 +32,7 @@ class ExperimentStore:
             store_name="experiments",
             locks_root=locks_root,
             quarantine_root=quarantine_root,
+            identity=lambda record: record.experiment_id,
         )
         self.last_diagnostics: list[RecordDiagnostic] = []
 

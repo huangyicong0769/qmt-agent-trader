@@ -41,10 +41,14 @@ class VersionedRecordRepository(Generic[T]):
         store_name: str,
         locks_root: Path | None = None,
         quarantine_root: Path | None = None,
+        identity: Callable[[T], str] | None = None,
+        fault_hook: Callable[[str, Path], None] | None = None,
     ) -> None:
         self.root = root.expanduser().resolve()
         self.model = model
         self.store_name = store_name
+        self.identity = identity
+        self.fault_hook = fault_hook
         locks = (locks_root or self.root.parent / "locks").expanduser().resolve()
         self.quarantine_root = (
             (quarantine_root or self.root.parent / "quarantine" / store_name).expanduser().resolve()
@@ -69,7 +73,9 @@ class VersionedRecordRepository(Generic[T]):
                 if missing is not None:
                     return missing()
                 raise FileNotFoundError(path)
-            return self._load_locked(path, migrate=True)
+            record = self._load_locked(path, migrate=True)
+            self._validate_identity(record_id, record, path)
+            return record
 
     def create(self, record_id: str, record: T) -> T:
         path = self.path_for(record_id)
@@ -81,6 +87,7 @@ class VersionedRecordRepository(Generic[T]):
                     operation="create",
                     reason="record already exists",
                 )
+            self._validate_identity(record_id, record, path)
             return self._write_locked(path, record, revision=1)
 
     def mutate(
@@ -106,7 +113,31 @@ class VersionedRecordRepository(Generic[T]):
                     operation="mutate",
                     reason=f"expected revision {expected_revision}, found {revision}",
                 )
-            return self._write_locked(path, operation(current), revision=revision + 1)
+            next_record = operation(current)
+            self._validate_identity(record_id, next_record, path)
+            return self._write_locked(path, next_record, revision=revision + 1)
+
+    def upsert(
+        self,
+        record_id: str,
+        operation: Callable[[T | None], T],
+        *,
+        expected_revision: int | None = None,
+    ) -> T:
+        path = self.path_for(record_id)
+        with self.lock_manager.resource_lock(path):
+            current = self._load_locked(path, migrate=True) if path.exists() else None
+            revision = int(getattr(current, "revision", 0)) if current is not None else 0
+            if expected_revision is not None and expected_revision != revision:
+                raise StorageRevisionConflictError(
+                    store_name=self.store_name,
+                    path=path,
+                    operation="upsert",
+                    reason=f"expected revision {expected_revision}, found {revision}",
+                )
+            next_record = operation(current)
+            self._validate_identity(record_id, next_record, path)
+            return self._write_locked(path, next_record, revision=revision + 1)
 
     def list_with_diagnostics(self) -> tuple[list[T], list[RecordDiagnostic]]:
         records: list[T] = []
@@ -139,6 +170,14 @@ class VersionedRecordRepository(Generic[T]):
             )
             os.replace(path, target)
             return target
+
+    def delete(self, record_id: str) -> bool:
+        path = self.path_for(record_id)
+        with self.lock_manager.resource_lock(path):
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
 
     def _load_locked(self, path: Path, *, migrate: bool) -> T:
         try:
@@ -176,6 +215,7 @@ class VersionedRecordRepository(Generic[T]):
                     reason="legacy record is invalid",
                     original_error=exc,
                 ) from exc
+            self._validate_identity(path.stem, legacy, path)
             return self._write_locked(path, legacy, revision=1)
         raw_hash = payload.pop("content_hash", None)
         expected = self._hash(payload)
@@ -203,8 +243,17 @@ class VersionedRecordRepository(Generic[T]):
         validated = self.model.model_validate(payload)
         canonical = validated.model_dump(mode="json")
         disk = {**canonical, "content_hash": self._hash(canonical)}
-        self.atomic_store.write_json(path, disk)
+        self.atomic_store.write_json(path, disk, fault_hook=self.fault_hook)
         return self._load_locked(path, migrate=False)
+
+    def _validate_identity(self, record_id: str, record: T, path: Path) -> None:
+        if self.identity is not None and self.identity(record) != record_id:
+            raise StorageValidationError(
+                store_name=self.store_name,
+                path=path,
+                operation="validate_identity",
+                reason="record identity does not match storage key",
+            )
 
     @staticmethod
     def _hash(payload: dict[str, Any]) -> str:

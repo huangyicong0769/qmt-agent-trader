@@ -45,12 +45,14 @@ class AtomicFileStore:
         self, path: Path, value: Any, *, create_only: bool = False,
         validator: Validator | None = None,
         model: type[BaseModel] | None = None,
+        fault_hook: FaultHook | None = None,
     ) -> None:
         value = _model_value(value, model, path, "write_json")
         _validate(value, validator, path, "write_json")
         content = json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2).encode() + b"\n"
         self._write(path, content, create_only=create_only,
-                    validator=lambda raw: _validate_json(raw, validator, model))
+                    validator=lambda raw: _validate_json(raw, validator, model),
+                    fault_hook=fault_hook)
 
     def write_yaml(
         self, path: Path, value: Any, *, create_only: bool = False,
