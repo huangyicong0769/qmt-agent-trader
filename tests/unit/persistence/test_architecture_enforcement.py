@@ -9,3 +9,23 @@ def test_architecture_scan_catches_fixture_and_passes_production(tmp_path: Path)
     assert scan_forbidden_persistence(tmp_path)
     production = Path(__file__).parents[3] / "src/qmt_agent_trader"
     assert scan_forbidden_persistence(production) == []
+
+
+def test_architecture_scan_is_alias_mode_aware_and_fail_closed(tmp_path: Path) -> None:
+    (tmp_path / "modes.py").write_text(
+        "from duckdb import connect as dc\n"
+        "from pathlib import Path\n"
+        'open("a", mode="ab")\n'
+        'Path("b").open(mode="a")\n'
+        'dc("db")\n'
+    )
+    (tmp_path / "syntax.py").write_text("def broken(:\n")
+
+    violations = scan_forbidden_persistence(tmp_path)
+    primitives = {item.primitive for item in violations}
+    assert {
+        'open(..., "a")',
+        'Path.open(..., "a")',
+        "duckdb.connect",
+        "invalid_python",
+    } <= primitives
