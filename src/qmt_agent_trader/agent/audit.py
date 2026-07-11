@@ -199,7 +199,11 @@ _CREDENTIAL_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
 )
-_ASSIGNMENT_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9_.-]*)\s*=")
+_ASSIGNMENT_PATTERN = re.compile(
+    r"(?P<prefix>(?P<key_quote>[\"']?)(?P<name>[A-Za-z][A-Za-z0-9_.-]*)"
+    r"(?P=key_quote)\s*[:=]\s*)"
+    r"(?P<value>\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;}\]]+)"
+)
 
 
 def _scrub_value(value: Any, *, key: str = "") -> Any:
@@ -211,17 +215,33 @@ def _scrub_value(value: Any, *, key: str = "") -> Any:
         }
     if isinstance(value, (list, tuple)):
         return [_scrub_value(item) for item in value]
-    if isinstance(value, str) and _contains_credential(value):
-        return "[scrubbed]"
+    if isinstance(value, str):
+        if any(pattern.search(value) for pattern in _CREDENTIAL_PATTERNS):
+            return "[scrubbed]"
+        return _redact_assignments(value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
 
 
 def _contains_credential(value: str) -> bool:
-    return any(pattern.search(value) for pattern in _CREDENTIAL_PATTERNS) or any(
-        _is_credential_key(match.group(1)) for match in _ASSIGNMENT_PATTERN.finditer(value)
+    return any(pattern.search(value) for pattern in _CREDENTIAL_PATTERNS) or (
+        _redact_assignments(value) != value
     )
+
+
+def _redact_assignments(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if not _is_credential_key(match.group("name")):
+            return match.group(0)
+        assigned = match.group("value")
+        if assigned[:1] in {"\"", "'"} and assigned[-1:] == assigned[:1]:
+            redacted = f"{assigned[0]}[scrubbed]{assigned[0]}"
+        else:
+            redacted = "[scrubbed]"
+        return f"{match.group('prefix')}{redacted}"
+
+    return _ASSIGNMENT_PATTERN.sub(replace, value)
 
 
 def _is_credential_key(key: str) -> bool:

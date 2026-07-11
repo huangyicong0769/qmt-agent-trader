@@ -45,6 +45,9 @@ coordination, metadata, and recovery policy.
   as `providerAPISecret` and `qmtGatewayHMACSecret` cannot bypass suffix checks;
   assignment identifiers use the same classifier while benign assignments and
   token telemetry remain visible.
+  Both `=` and `:` assignments are parsed, including JSON-like quoted keys and
+  values; only the credential value is replaced so surrounding audit text is
+  preserved.
 - Added `ContentAddressedCache`: canonical JSON SHA-256 key, schema/TTL envelope,
   validated atomic writes, hit/miss/expiry/corruption/write-failure metrics, and
   structured warnings. Corruption, invalidation, warning-sink, and write faults
@@ -123,3 +126,5 @@ Review correction: `fix(persistence): preserve audit generations and cache seman
 Final scrub correction: `fix(audit): cover normalized credential key variants`
 
 Acronym scrub correction: `fix(audit): share canonical credential classification`
+
+Assignment scrub correction: `fix(audit): redact colon and quoted assignments`
