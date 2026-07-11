@@ -16,6 +16,7 @@ from qmt_agent_trader.core.ids import shanghai_now_iso
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.errors import (
     StorageCorruptError,
+    StorageError,
     StorageRevisionConflictError,
     StorageValidationError,
 )
@@ -27,7 +28,7 @@ T = TypeVar("T", bound=BaseModel)
 @dataclass(frozen=True)
 class RecordDiagnostic:
     path: Path
-    error: StorageCorruptError | StorageValidationError
+    error: StorageError
 
 
 class VersionedRecordRepository(Generic[T]):

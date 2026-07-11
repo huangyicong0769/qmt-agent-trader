@@ -231,13 +231,17 @@ def test_fault_before_replace_preserves_previous_record(tmp_path: Path) -> None:
 
 def test_universe_previous_root_migrates_to_canonical_idempotently(tmp_path: Path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
-    previous = UniverseRegistry(tmp_path / "universes" / "registry")
     spec = broad_universe_spec("stock")
-    previous.save(spec)
-    source = previous.path_for(spec.universe_id)
+    source = tmp_path / "universes" / "registry" / f"{spec.universe_id}.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        json.dumps(spec.model_dump(mode="json"), ensure_ascii=False), encoding="utf-8"
+    )
+    original_bytes = source.read_bytes()
     canonical = UniverseRegistry.for_lake(lake)
     migrated = canonical.load_record(spec.universe_id)
     assert migrated is not None and migrated.spec == spec
     assert source.exists()
+    assert source.read_bytes() == original_bytes
     again = UniverseRegistry.for_lake(lake).load_record(spec.universe_id)
     assert again is not None and again.revision == migrated.revision == 1

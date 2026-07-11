@@ -53,6 +53,27 @@ def test_ui_stale_save_raises_visible_revision_conflict(tmp_path) -> None:
         ui_session.save()
 
 
+def test_ui_unedited_api_session_without_legacy_context_is_true_noop(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    original = repository.create(
+        StoredChatSession(
+            session_id="chat_api",
+            title="API",
+            context={"api": {"keep": True}},
+            messages=[StoredChatMessage(
+                message_id="msg_api", session_id="chat_api", role="assistant",
+                content="kept", created_at="2026-01-03T01:02:03+08:00")],
+        )
+    )
+    path = repository.records.path_for("chat_api")
+    before = path.read_bytes()
+    _ChatSession.load_all(repository)[0].save()
+    after = path.read_bytes()
+    saved = repository.get("chat_api")
+    assert after == before
+    assert saved == original
+
+
 def test_todo_status_markdown_renders_empty_state() -> None:
     rendered = _todo_status_markdown(
         {"summary": {"total": 0, "completed": 0}, "items": []}

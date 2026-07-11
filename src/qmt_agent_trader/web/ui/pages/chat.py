@@ -72,6 +72,7 @@ class _PendingMessageStatus:
 
 class _ChatSession:
     __slots__ = (
+        "_initial_preview",
         "_repository",
         "_stored",
         "container",
@@ -104,6 +105,7 @@ class _ChatSession:
         self.messages: list[ChatMessage] = []
         self._repository = repository or _chat_repository()
         self._stored: StoredChatSession | None = None
+        self._initial_preview = ""
 
     def add_message(self, role: str, content: str, **meta: Any) -> None:
         msg = ChatMessage(role=role, content=content, metadata=dict(meta))
@@ -132,8 +134,8 @@ class _ChatSession:
             )
             for m in self.messages
         ]
-        legacy_ui = {"counter": _ChatSession._counter, "preview": self.preview}
         if self._stored is None:
+            legacy_ui = {"counter": _ChatSession._counter, "preview": self.preview}
             candidate = StoredChatSession(
                 session_id=self.sid,
                 title=self.name,
@@ -143,7 +145,11 @@ class _ChatSession:
             expected_revision = 0
         else:
             context = dict(self._stored.context)
-            context["legacy_ui"] = legacy_ui
+            if self.preview != self._initial_preview:
+                current_ui = context.get("legacy_ui", {})
+                legacy_ui = dict(current_ui) if isinstance(current_ui, dict) else {}
+                legacy_ui["preview"] = self.preview
+                context["legacy_ui"] = legacy_ui
             candidate = self._stored.model_copy(
                 update={"title": self.name, "messages": messages, "context": context}
             )
@@ -153,6 +159,7 @@ class _ChatSession:
         self._stored = self._repository.save(
             candidate, expected_revision=expected_revision
         )
+        self._initial_preview = self.preview
         for ui_message, stored_message in zip(self.messages, self._stored.messages, strict=True):
             ui_message.stored = stored_message
 
@@ -176,6 +183,7 @@ class _ChatSession:
             s._stored = stored
             legacy = stored.context.get("legacy_ui", {})
             s.preview = str(legacy.get("preview", "")) if isinstance(legacy, dict) else ""
+            s._initial_preview = s.preview
             if isinstance(legacy, dict):
                 try:
                     max_counter = max(max_counter, int(legacy.get("counter", 0)))

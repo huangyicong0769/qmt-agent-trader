@@ -166,7 +166,12 @@ def _save_universe_spec(input_data: dict[str, Any], _context: ToolContext) -> di
 def _list_universes(input_data: dict[str, Any], _context: ToolContext) -> dict[str, Any]:
     lake = _get_lake()
     try:
-        registry = UniverseRegistry(registry_root_from_payload(input_data, lake))
+        root = registry_root_from_payload(input_data, lake)
+        registry = (
+            UniverseRegistry.for_lake(lake)
+            if lake is not None and root == UniverseRegistry.for_lake(lake).root
+            else UniverseRegistry(root)
+        )
     except ValueError as exc:
         return _with_universe_evidence_status({"status": "INVALID_REQUEST", "reason": str(exc)})
     specs = registry.list(

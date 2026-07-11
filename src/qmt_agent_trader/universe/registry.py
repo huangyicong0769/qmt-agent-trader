@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.errors import (
+    StorageCorruptError,
+    StorageError,
+    StorageValidationError,
+)
 from qmt_agent_trader.persistence.repositories.versioned_record import (
     RecordDiagnostic,
     VersionedRecordRepository,
@@ -43,6 +49,7 @@ class UniverseRegistry:
             identity=lambda record: record.spec.universe_id,
         )
         self.last_diagnostics: list[RecordDiagnostic] = []
+        self._previous_root_diagnostics: list[RecordDiagnostic] = []
 
     @classmethod
     def for_lake(cls, lake: DataLake) -> UniverseRegistry:
@@ -60,15 +67,49 @@ class UniverseRegistry:
             return
         migration_resource = self.root.parent / ".universe-root-migration"
         with self.repository.lock_manager.resource_lock(migration_resource):
-            legacy = UniverseRegistry(
+            legacy_repository = VersionedRecordRepository(
                 previous_root,
+                UniverseStoredRecord,
+                store_name="universes_previous_root",
                 locks_root=self.repository.lock_manager.locks_root,
                 quarantine_root=self.repository.quarantine_root / "legacy-root",
+                identity=lambda record: record.spec.universe_id,
             )
-            specs, diagnostics = legacy.repository.list_with_diagnostics()
-            if diagnostics:
-                self.last_diagnostics.extend(diagnostics)
-            for record in specs:
+            records: list[UniverseStoredRecord] = []
+            diagnostics: list[RecordDiagnostic] = []
+            for path in sorted(previous_root.glob("*.json")):
+                try:
+                    raw = path.read_bytes()
+                    payload = json.loads(raw)
+                    if not isinstance(payload, dict):
+                        raise ValueError("universe record root must be an object")
+                    if "schema_version" in payload:
+                        record = legacy_repository._load_locked(path, migrate=False)
+                    else:
+                        record = UniverseStoredRecord.model_validate(payload)
+                    if record.spec.universe_id != path.stem:
+                        raise ValueError("universe id does not match previous storage key")
+                    records.append(record)
+                except StorageError as exc:
+                    diagnostics.append(RecordDiagnostic(path, exc))
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    ValidationError,
+                    ValueError,
+                ) as exc:
+                    error_type = (
+                        StorageCorruptError
+                        if isinstance(exc, (OSError, UnicodeDecodeError, json.JSONDecodeError))
+                        else StorageValidationError
+                    )
+                    diagnostics.append(RecordDiagnostic(path, error_type(
+                        store_name="universes_previous_root", path=path,
+                        operation="discover", reason="previous universe record is invalid",
+                        original_error=exc)))
+            self._previous_root_diagnostics = diagnostics
+            for record in records:
                 if self.load(record.spec.universe_id) is None:
                     self.repository.create(record.spec.universe_id, record)
 
@@ -106,7 +147,11 @@ class UniverseRegistry:
         asset_type: str | None = None,
         mode: str | None = None,
     ) -> list[UniverseSpec]:
-        records, self.last_diagnostics = self.repository.list_with_diagnostics()
+        records, canonical_diagnostics = self.repository.list_with_diagnostics()
+        self.last_diagnostics = [
+            *self._previous_root_diagnostics,
+            *canonical_diagnostics,
+        ]
         specs: list[UniverseSpec] = []
         for record in records:
             spec = record.spec
@@ -130,7 +175,7 @@ class UniverseRegistry:
 def registry_root_from_payload(payload: dict[str, Any], lake: DataLake | None) -> Path:
     raw = payload.get("registry_root")
     if lake is not None:
-        canonical = UniverseRegistry.for_lake(lake).root
+        canonical = lake.root.parent.resolve() / "registries" / "universes"
         if raw and Path(str(raw)).expanduser().resolve() != canonical.resolve():
             raise ValueError("registry_root override must equal the canonical registry root")
         return canonical

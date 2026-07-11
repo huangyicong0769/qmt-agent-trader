@@ -91,3 +91,20 @@ produced one genuine failure: CAS was accidentally declared on the validation
 tool instead of the save tool. The lossless/UI/old-root tests were added after
 their implementation and are therefore reported as regression evidence, not
 TDD RED evidence.
+
+## Final exact correction
+
+Three exact tests were written first and all failed: an unedited API session
+without `legacy_ui` was rewritten by the UI, raw previous-root Universe bytes
+were rewritten during discovery, and previous-root corruption disappeared from
+the public list result. After correction all three pass.
+
+UI load now tracks its initial UI-only state separately. An unedited session does
+not merge `legacy_ui`, invoke the repository, change bytes, advance revision, or
+alter any canonical session/message field. Universe discovery parses legacy raw
+JSON without invoking migration writes, copies validated records atomically to
+the canonical root, leaves source bytes identical, and retains previous-root
+diagnostics alongside canonical diagnostics until explicit resolution.
+
+Final focused verification: Chat UI plus mutable repositories `27 passed`;
+Universe tools `8 passed`; scoped Ruff, mypy and `git diff --check` passed.

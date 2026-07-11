@@ -215,6 +215,15 @@ def test_list_universes_reports_degraded_corrupt_records(registry, lake: DataLak
     assert len(result["diagnostics"]) == 1
 
 
+def test_list_universes_reports_previous_root_corruption(registry, lake: DataLake) -> None:
+    old_root = lake.root.parent / "universes" / "registry"
+    old_root.mkdir(parents=True, exist_ok=True)
+    (old_root / "legacy-broken.json").write_text("{broken", encoding="utf-8")
+    result = registry.run_tool("list_universes", {}, ToolContext(run_id="legacy_diag"))
+    assert result["status"] == "DEGRADED"
+    assert any("legacy-broken.json" in item["path"] for item in result["diagnostics"])
+
+
 def test_save_universe_schema_exposes_nonnegative_cas() -> None:
     assert save_universe_spec_tool.spec.input_schema["properties"]["expected_revision"] == {
         "type": "integer",
