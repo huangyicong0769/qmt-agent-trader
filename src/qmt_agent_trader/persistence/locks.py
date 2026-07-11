@@ -42,24 +42,49 @@ class LockManager:
                 operation="acquire_resource_lock",
                 reason="lock order inversion: resource lock requested after database write lock",
             )
-        with self._lock(self.lock_path_for_resource(resource_id), "resource") as lock:
-            yield lock
+        with self._backup_gate("resource"):
+            with self._lock(self.lock_path_for_resource(resource_id), "resource") as lock:
+                yield lock
 
     @contextmanager
     def database_write_lock(self, database_path: Path) -> Iterator[FileLock]:
         canonical = str(database_path.expanduser().resolve())
         digest = hashlib.sha256(canonical.encode()).hexdigest()
-        with self._lock(self.locks_root / f"database-{digest}.lock", "database") as lock:
+        with self._backup_gate("database"):
+            with self._lock(self.locks_root / f"database-{digest}.lock", "database") as lock:
+                yield lock
+
+    @contextmanager
+    def backup_barrier(self) -> Iterator[FileLock]:
+        """Exclude all cooperating filesystem and database writers."""
+        if "backup" in self.active_lock_kinds:
+            raise StorageConflictError(
+                store_name="locks",
+                path=self.locks_root / "backup-barrier.lock",
+                operation="acquire_backup_barrier",
+                reason="backup barrier is already active in this context",
+            )
+        with self._lock(self.locks_root / "backup-barrier.lock", "backup") as lock:
             yield lock
 
     @contextmanager
-    def _lock(self, path: Path, kind: str) -> Iterator[FileLock]:
+    def _backup_gate(self, error_kind: str) -> Iterator[FileLock | None]:
+        if "backup_gate" in self.active_lock_kinds:
+            yield None
+            return
+        with self._lock(
+            self.locks_root / "backup-barrier.lock", "backup_gate", error_kind=error_kind
+        ) as lock:
+            yield lock
+
+    @contextmanager
+    def _lock(self, path: Path, kind: str, *, error_kind: str | None = None) -> Iterator[FileLock]:
         path.parent.mkdir(parents=True, exist_ok=True)
         lock = FileLock(str(path), timeout=self.timeout_seconds)
         try:
             lock.acquire()
         except Timeout as exc:
-            operation = f"acquire_{kind}_lock"
+            operation = f"acquire_{error_kind or kind}_lock"
             raise StorageLockTimeoutError(
                 store_name="locks",
                 path=path,

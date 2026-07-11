@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from qmt_agent_trader.core.config import Settings
-from qmt_agent_trader.persistence.errors import StorageValidationError
+from qmt_agent_trader.persistence.errors import StorageBackupError, StorageValidationError
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
 
@@ -60,6 +62,48 @@ def test_backup_excludes_cache_temp_and_locks_and_verifies_hashes(
     assert "sessions/s.json" in paths
     assert not any("cache" in item or item.endswith(".tmp") or "locks" in item for item in paths)
     assert operations.verify_backup(receipt.path).healthy
+
+
+def test_backup_waits_for_active_writer_barrier(operations: StorageOperations) -> None:
+    record = operations.paths.sessions_root / "s.json"
+    record.parent.mkdir(parents=True)
+    record.write_text("before")
+    acquired = threading.Event()
+
+    def writer() -> None:
+        with operations.locks.resource_lock(record):
+            acquired.set()
+            time.sleep(0.15)
+            record.write_text("after")
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    acquired.wait(timeout=1)
+    started = time.monotonic()
+    receipt = operations.backup()
+    elapsed = time.monotonic() - started
+    thread.join()
+
+    assert elapsed >= 0.1
+    backed_up = receipt.path / "files" / "sessions/s.json"
+    assert backed_up.read_text() == "after"
+
+
+def test_backup_failure_has_no_success_marker(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = operations.paths.sessions_root / "s.json"
+    record.parent.mkdir(parents=True)
+    record.write_text("official")
+    monkeypatch.setattr(
+        "qmt_agent_trader.persistence.operations.shutil.copy2",
+        lambda *_: (_ for _ in ()).throw(OSError("injected")),
+    )
+
+    with pytest.raises(StorageBackupError):
+        operations.backup()
+
+    assert not list(operations.paths.backup_root.rglob("SUCCESS.json"))
 
 
 def test_quarantine_rejects_traversal_and_moves_invalid_record(

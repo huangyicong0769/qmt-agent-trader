@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -156,10 +155,7 @@ class StorageOperations:
         try:
             staging.mkdir(parents=True, exist_ok=False)
             files: list[dict[str, Any]] = []
-            resources = sorted(str(root) for root in self._official_roots(include_quarantine=True))
-            with ExitStack() as stack:
-                for resource in resources:
-                    stack.enter_context(self.locks.resource_lock(f"backup:{resource}"))
+            with self.locks.backup_barrier():
                 for source in self._iter_backup_files():
                     relative = source.relative_to(self.paths.project_root)
                     target = staging / "files" / relative
