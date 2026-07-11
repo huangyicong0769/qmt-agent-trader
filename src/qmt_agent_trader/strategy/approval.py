@@ -14,6 +14,7 @@ from qmt_agent_trader.persistence.artifacts import (
     ArtifactStore,
     artifact_store_for_root,
 )
+from qmt_agent_trader.persistence.errors import StorageConflictError, StorageValidationError
 
 ALLOWED_TRANSITIONS: dict[ApprovalStatus, set[ApprovalStatus]] = {
     ApprovalStatus.DRAFT: {
@@ -63,6 +64,18 @@ def write_approval_file(
     content = yaml.safe_dump(
         approval.model_dump(mode="json"), sort_keys=False, allow_unicode=True
     ).encode("utf-8")
+    if store.path_for(filename).exists():
+        existing = read_approval_file(store.path_for(filename), artifact_store=store)
+        requested = approval.model_dump(mode="json", exclude={"approved_at"})
+        persisted = existing.model_dump(mode="json", exclude={"approved_at"})
+        if requested != persisted:
+            raise StorageConflictError(
+                store_name="approvals",
+                path=store.path_for(filename),
+                operation="resume",
+                reason="existing immutable approval differs from requested approval",
+            )
+        return store.path_for(filename)
     receipt = store.create(
         filename,
         content,
@@ -76,9 +89,40 @@ def write_approval_file(
     return receipt.path
 
 
-def read_approval_file(path: Path) -> StrategyApproval:
-    store = artifact_store_for_root(path.parent)
-    content = store.read_verified(_approval_artifact_id(path.name))
+def read_approval_file(
+    path: Path,
+    *,
+    artifact_store: ArtifactStore | None = None,
+) -> StrategyApproval:
+    store = artifact_store or artifact_store_for_root(path.parent)
+    artifact_id = _approval_artifact_id(path.name)
+    if store.manifest_path_for(artifact_id).exists():
+        raw = store.read_verified(artifact_id, expected_relative_path=path.name)
+    else:
+        raw = path.read_bytes()
+    try:
+        approval = StrategyApproval.model_validate(yaml.safe_load(raw))
+    except Exception as exc:
+        raise StorageValidationError(
+            store_name="approvals",
+            path=path,
+            operation="adopt_legacy",
+            reason="legacy approval is invalid",
+            original_error=exc,
+        ) from exc
+    store.adopt(
+        path.name,
+        metadata=ArtifactMetadata(
+            artifact_id=artifact_id,
+            artifact_type="strategy_approval",
+            producer="strategy.approval.legacy_adoption",
+            related_strategy_id=approval.strategy_id,
+        ),
+    )
+    content = store.read_verified(
+        artifact_id,
+        expected_relative_path=path.name,
+    )
     return StrategyApproval.model_validate(yaml.safe_load(content))
 
 

@@ -1,5 +1,8 @@
 import json
 
+import pytest
+
+from qmt_agent_trader.persistence.errors import StorageValidationError
 from qmt_agent_trader.services.research_report_service import (
     compare_research_reports,
     evaluate_research_gate,
@@ -56,6 +59,30 @@ def test_compare_research_reports_returns_compact_summaries(tmp_path) -> None:
     assert compared["runs"][0]["approval_status"] == "NOT_REQUESTED"
     assert compared["runs"][0]["review_gate"]["status"] == "FAILED"
     assert compared["infrastructure_requests"] == ["add borrow/liquidity diagnostics"]
+
+
+def test_compare_adopts_legacy_report_and_blocks_tampered_governed_report(tmp_path) -> None:
+    reports_dir = tmp_path / "reports" / "research"
+    reports_dir.mkdir(parents=True)
+    legacy_path = reports_dir / "research_legacy.json"
+    original = json.dumps(
+        {
+            "run_id": "research_legacy",
+            "artifact_type": "legacy_research",
+            "title": "legacy",
+            "research_only": True,
+        }
+    ).encode()
+    legacy_path.write_bytes(original)
+
+    compared = compare_research_reports(reports_dir)
+    assert compared["status"] == "compared"
+    assert legacy_path.read_bytes() == original
+    assert len(list((reports_dir / ".manifests").glob("*.json"))) == 1
+
+    legacy_path.write_bytes(b'{"run_id":"research_legacy","tampered":true}')
+    with pytest.raises(StorageValidationError, match="hash_mismatch"):
+        compare_research_reports(reports_dir)
 
 
 def test_evaluate_research_gate_passes_complete_sensitivity_evidence() -> None:

@@ -96,7 +96,10 @@ def compare_research_reports(reports_dir: Path, *, limit: int = 10) -> dict[str,
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
-    runs = [_summarize_record(_load_json_object(path), path) for path in paths[:limit]]
+    runs = [
+        _summarize_record(_load_governed_report(path, reports_dir), path)
+        for path in paths[:limit]
+    ]
     return {
         "status": "compared" if runs else "empty",
         "runs": runs,
@@ -106,6 +109,30 @@ def compare_research_reports(reports_dir: Path, *, limit: int = 10) -> dict[str,
 
 def _load_json_object(path: Path) -> dict[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"research report is not a JSON object: {path}")
+    return cast(dict[str, object], value)
+
+
+def _load_governed_report(path: Path, reports_dir: Path) -> dict[str, object]:
+    store = artifact_store_for_root(reports_dir)
+    run_id = path.stem
+    if store.manifest_path_for(run_id).exists():
+        raw = store.read_verified(run_id, expected_relative_path=path.name)
+        value = json.loads(raw)
+    else:
+        value = _load_json_object(path)
+        if str(value.get("run_id")) != run_id:
+            raise ValueError("legacy research report run_id does not match filename")
+        store.adopt(
+            path.name,
+            metadata=ArtifactMetadata(
+                artifact_id=run_id,
+                artifact_type=str(value.get("artifact_type") or "legacy_research_report"),
+                producer="services.research_report_service.legacy_adoption",
+                related_run_id=run_id,
+            ),
+        )
     if not isinstance(value, dict):
         raise ValueError(f"research report is not a JSON object: {path}")
     return cast(dict[str, object], value)

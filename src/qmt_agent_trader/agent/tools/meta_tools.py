@@ -8,6 +8,8 @@ directly into the formal registry.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
@@ -25,6 +27,11 @@ _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
 _sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("meta_tool_sandbox", default=None)
 _store_var: ContextVar[ExperimentStore | None] = ContextVar("meta_tool_store", default=None)
+
+
+def _safe_generated_segment(value: str) -> str:
+    segment = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return segment or hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore) -> None:
@@ -168,9 +175,16 @@ def run(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
 
-    rel_path = f"tools/{safe_name}/{version}/tool.py"
+    run_id = context.run_id
+    run_segment = _safe_generated_segment(run_id)
+    rel_path = f"tools/{safe_name}/{version}/{run_segment}/tool.py"
     try:
-        code_path = sb.write_candidate_file(rel_path, code)
+        code_path = sb.write_candidate_file(
+            rel_path,
+            code,
+            artifact_id=f"tool:{safe_name}:{version}:{run_id}:implementation",
+            related_run_id=run_id,
+        )
         return {"code_path": str(code_path), "tests_path": "", "status": "generated"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
@@ -228,9 +242,16 @@ def test_audit_trail():
     if sb is None:
         return {"status": "error", "message": "sandbox not wired"}
 
-    rel_path = f"tools/{safe_name}/{version}/test_tool.py"
+    run_id = context.run_id
+    run_segment = _safe_generated_segment(run_id)
+    rel_path = f"tools/{safe_name}/{version}/{run_segment}/test_tool.py"
     try:
-        tests_path = sb.write_candidate_file(rel_path, test_code)
+        tests_path = sb.write_candidate_file(
+            rel_path,
+            test_code,
+            artifact_id=f"tool:{safe_name}:{version}:{run_id}:tests",
+            related_run_id=run_id,
+        )
         return {"tests_path": str(tests_path)}
     except Exception as exc:
         return {"tests_path": "", "error": str(exc)}

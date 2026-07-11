@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import date, datetime
@@ -208,17 +209,20 @@ def _generate_strategy_code(input_data: dict[str, Any], context: ToolContext) ->
         return {"status": "error", "message": "sandbox not wired"}
 
     try:
+        run_segment = _safe_generated_segment(context.run_id)
+        version_segment = _safe_generated_segment(spec.version)
+        run_root = f"strategies/drafts/{strategy_id}/{version_segment}/{run_segment}"
         code_path = sb.write_candidate_file(
-            f"strategies/drafts/{strategy_id}/strategy.py",
+            f"{run_root}/strategy.py",
             strategy_code,
-            artifact_id=f"strategy:{strategy_id}:implementation",
+            artifact_id=f"strategy:{strategy_id}:{spec.version}:{context.run_id}:implementation",
             related_run_id=context.run_id,
             related_strategy_id=strategy_id,
         )
         tests_path = sb.write_candidate_file(
-            f"strategies/drafts/{strategy_id}/test_strategy.py",
+            f"{run_root}/test_strategy.py",
             test_code,
-            artifact_id=f"strategy:{strategy_id}:tests",
+            artifact_id=f"strategy:{strategy_id}:{spec.version}:{context.run_id}:tests",
             related_run_id=context.run_id,
             related_strategy_id=strategy_id,
         )
@@ -264,7 +268,12 @@ def _list_strategy_candidates(input_data: dict[str, Any], context: ToolContext) 
     root = sb.generated_root / "strategies"
     candidates: list[dict[str, Any]] = []
     for path in sorted(root.glob("**/strategy.py")):
-        strategy_id = path.parent.name
+        relative_parts = path.relative_to(root).parts
+        strategy_id = (
+            relative_parts[1]
+            if len(relative_parts) >= 3 and relative_parts[0] == "drafts"
+            else path.parent.name
+        )
         tests_path = path.with_name("test_strategy.py")
         if query and query not in strategy_id and query not in str(path):
             continue
@@ -1199,6 +1208,11 @@ def _bind_tool(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+def _safe_generated_segment(value: str) -> str:
+    segment = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return segment or hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 def _factor_legs_from_selected(
     selected_factors: Any,
     constraints: dict[str, Any],
@@ -1401,10 +1415,34 @@ def _load_run_artifact(run_id: str) -> dict[str, Any] | None:
         path = root / f"{run_id}.json"
         if not path.exists():
             continue
+        store = artifact_store_for_root(root)
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
+            if store.manifest_path_for(run_id).exists():
+                raw = store.read_verified(run_id, expected_relative_path=path.name)
+                payload = json.loads(raw)
+            else:
+                payload = json.loads(path.read_bytes())
+                if not isinstance(payload, dict) or str(payload.get("run_id")) != run_id:
+                    return None
+                store.adopt(
+                    path.name,
+                    metadata=ArtifactMetadata(
+                        artifact_id=run_id,
+                        artifact_type=str(payload.get("artifact_type") or "legacy_run_report"),
+                        producer="agent.tools.strategy_tools.legacy_report_adoption",
+                        related_run_id=run_id,
+                        related_strategy_id=str(payload.get("strategy_id"))
+                        if payload.get("strategy_id")
+                        else None,
+                    ),
+                )
+        except Exception as exc:
+            return {
+                "run_id": run_id,
+                "status": "BLOCKED",
+                "reason": "ARTIFACT_VERIFICATION_FAILED",
+                "warnings": [str(exc)],
+            }
         return payload if isinstance(payload, dict) else None
     return None
 

@@ -46,8 +46,13 @@ def build_agent_registry(
     from qmt_agent_trader.agent.tool_registry import AgentToolRegistry as _ATR
 
     resolved_settings = settings or get_settings()
-    sb = sandbox or CodeSandbox(lock_manager=data_lake.lock_manager)
     paths = PersistencePaths.from_settings(resolved_settings)
+    sb = sandbox or CodeSandbox(
+        generated_root=(
+            paths.project_root / "src" / "qmt_agent_trader" / "agent" / "generated"
+        ),
+        lock_manager=data_lake.lock_manager,
+    )
     atomic_store = AtomicFileStore(data_lake.lock_manager)
     store = ExperimentStore(
         experiment_root.expanduser().resolve(),

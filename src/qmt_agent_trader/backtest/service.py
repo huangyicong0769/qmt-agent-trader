@@ -126,8 +126,33 @@ def compare_backtest_reports(reports_dir: Path, *, limit: int = 10) -> dict[str,
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
-    runs = [json.loads(path.read_text(encoding="utf-8")) for path in paths[:limit]]
+    runs = [_load_governed_backtest_report(path, reports_dir) for path in paths[:limit]]
     return {"status": "compared", "runs": runs}
+
+
+def _load_governed_backtest_report(path: Path, reports_dir: Path) -> dict[str, object]:
+    store = artifact_store_for_root(reports_dir)
+    run_id = path.stem
+    if store.manifest_path_for(run_id).exists():
+        raw = store.read_verified(run_id, expected_relative_path=path.name)
+    else:
+        raw = path.read_bytes()
+        value = json.loads(raw)
+        if not isinstance(value, dict) or str(value.get("run_id")) != run_id:
+            raise ValueError("legacy backtest report run_id does not match filename")
+        store.adopt(
+            path.name,
+            metadata=ArtifactMetadata(
+                artifact_id=run_id,
+                artifact_type="legacy_backtest_report",
+                producer="backtest.service.legacy_adoption",
+                related_run_id=run_id,
+            ),
+        )
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("backtest report is not a JSON object")
+    return value
 
 
 def _choose_signal_date(symbol_bars: pd.DataFrame, signal_date: str | None) -> str:

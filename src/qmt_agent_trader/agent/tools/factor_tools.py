@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import re
@@ -203,24 +204,26 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
         return {"status": "error", "message": "sandbox not wired"}
 
     try:
+        run_segment = _safe_generated_segment(context.run_id)
+        run_root = f"factors/drafts/{factor_id}/{run_segment}"
         code_path = sb.write_candidate_file(
-            f"factors/drafts/{factor_id}/factor.py",
+            f"{run_root}/factor.py",
             factor_code,
-            artifact_id=f"factor:{factor_id}:implementation",
+            artifact_id=f"factor:{factor_id}:{context.run_id}:implementation",
             related_run_id=context.run_id,
             related_factor_id=factor_id,
         )
         tests_path = sb.write_candidate_file(
-            f"factors/drafts/{factor_id}/test_factor.py",
+            f"{run_root}/test_factor.py",
             test_code,
-            artifact_id=f"factor:{factor_id}:tests",
+            artifact_id=f"factor:{factor_id}:{context.run_id}:tests",
             related_run_id=context.run_id,
             related_factor_id=factor_id,
         )
         spec_path = sb.write_candidate_file(
-            f"factors/drafts/{factor_id}/factor_spec.json",
+            f"{run_root}/factor_spec.json",
             spec_code,
-            artifact_id=f"factor:{factor_id}:spec",
+            artifact_id=f"factor:{factor_id}:{context.run_id}:spec",
             related_run_id=context.run_id,
             related_factor_id=factor_id,
         )
@@ -892,19 +895,26 @@ def _resolve_factor_code_path(
     factor_id: str | None,
     sandbox: CodeSandbox,
 ) -> tuple[Path, bool]:
-    if factor_id:
-        candidate = sandbox.generated_root / "factors" / "drafts" / factor_id / "factor.py"
-        if candidate.exists():
-            return candidate, not code_path_raw or str(candidate) != code_path_raw
     code_path = Path(code_path_raw)
     if code_path.exists():
         return code_path, False
+    if factor_id:
+        root = sandbox.generated_root / "factors" / "drafts" / factor_id
+        candidates = sorted(root.glob("**/factor.py"), key=lambda item: item.stat().st_mtime)
+        if candidates:
+            candidate = candidates[-1]
+            return candidate, not code_path_raw or str(candidate) != code_path_raw
     match = re.search(r"(factor_[A-Za-z0-9_]+)", code_path_raw)
     if match:
         candidate = sandbox.generated_root / "factors" / "drafts" / match.group(1) / "factor.py"
         if candidate.exists():
             return candidate, True
     return code_path, False
+
+
+def _safe_generated_segment(value: str) -> str:
+    segment = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return segment or hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _load_factor_spec(spec_path_raw: str, sb: CodeSandbox) -> dict[str, Any]:

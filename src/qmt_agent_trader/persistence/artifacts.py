@@ -154,10 +154,62 @@ class ArtifactStore:
                 raise
         return ArtifactReceipt(path=path, manifest_path=manifest_path, manifest=manifest)
 
+    def adopt(
+        self,
+        relative_path: str | Path,
+        *,
+        metadata: ArtifactMetadata,
+    ) -> ArtifactReceipt:
+        """Create a manifest for pre-existing immutable bytes without rewriting them."""
+        path = self.path_for(relative_path)
+        manifest_path = self.manifest_path_for(metadata.artifact_id)
+        relative = path.relative_to(self.root).as_posix()
+        resource = f"artifact-store:{self.root}"
+        with self.lock_manager.resource_lock(resource):
+            if not path.is_file():
+                raise StorageValidationError(
+                    store_name="artifacts",
+                    path=path,
+                    operation="adopt",
+                    reason="legacy artifact is missing or not a file",
+                )
+            content = path.read_bytes()
+            if manifest_path.exists():
+                manifest = self._validated_manifest(
+                    metadata.artifact_id,
+                    expected_relative_path=relative,
+                )
+                if hashlib.sha256(content).hexdigest() != manifest.content_hash:
+                    raise StorageValidationError(
+                        store_name="artifacts",
+                        path=path,
+                        operation="adopt",
+                        reason="hash_mismatch",
+                    )
+                return ArtifactReceipt(
+                    path=path,
+                    manifest_path=manifest_path,
+                    manifest=manifest,
+                )
+            manifest = ArtifactManifest(
+                **metadata.model_dump(),
+                created_at=self.now(),
+                content_hash=hashlib.sha256(content).hexdigest(),
+                byte_length=len(content),
+                relative_path=relative,
+            )
+            self.atomic_store.write_json(
+                manifest_path,
+                manifest,
+                create_only=True,
+                model=ArtifactManifest,
+            )
+            return ArtifactReceipt(path=path, manifest_path=manifest_path, manifest=manifest)
+
     def load_manifest(self, artifact_id: str) -> ArtifactManifest:
         path = self.manifest_path_for(artifact_id)
         try:
-            return ArtifactManifest.model_validate_json(path.read_text(encoding="utf-8"))
+            manifest = ArtifactManifest.model_validate_json(path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise StorageValidationError(
                 store_name="artifacts",
@@ -166,9 +218,25 @@ class ArtifactStore:
                 reason="manifest is missing or invalid",
                 original_error=exc,
             ) from exc
+        if manifest.artifact_id != artifact_id:
+            raise StorageValidationError(
+                store_name="artifacts",
+                path=path,
+                operation="load_manifest",
+                reason="manifest identity does not match requested artifact_id",
+            )
+        return manifest
 
-    def verify(self, artifact_id: str) -> ArtifactVerification:
-        manifest = self.load_manifest(artifact_id)
+    def verify(
+        self,
+        artifact_id: str,
+        *,
+        expected_relative_path: str | Path | None = None,
+    ) -> ArtifactVerification:
+        manifest = self._validated_manifest(
+            artifact_id,
+            expected_relative_path=expected_relative_path,
+        )
         path = self.path_for(manifest.relative_path)
         manifest_path = self.manifest_path_for(artifact_id)
         if not path.is_file():
@@ -188,8 +256,16 @@ class ArtifactStore:
             manifest_path=manifest_path,
         )
 
-    def read_verified(self, artifact_id: str) -> bytes:
-        verification = self.verify(artifact_id)
+    def read_verified(
+        self,
+        artifact_id: str,
+        *,
+        expected_relative_path: str | Path | None = None,
+    ) -> bytes:
+        verification = self.verify(
+            artifact_id,
+            expected_relative_path=expected_relative_path,
+        )
         if not verification.verified:
             raise StorageValidationError(
                 store_name="artifacts",
@@ -198,6 +274,24 @@ class ArtifactStore:
                 reason=verification.code.lower(),
             )
         return verification.path.read_bytes()
+
+    def _validated_manifest(
+        self,
+        artifact_id: str,
+        *,
+        expected_relative_path: str | Path | None,
+    ) -> ArtifactManifest:
+        manifest = self.load_manifest(artifact_id)
+        if expected_relative_path is not None:
+            expected = self.path_for(expected_relative_path).relative_to(self.root).as_posix()
+            if manifest.relative_path != expected:
+                raise StorageValidationError(
+                    store_name="artifacts",
+                    path=self.manifest_path_for(artifact_id),
+                    operation="verify_manifest_binding",
+                    reason="manifest relative path does not match requested file",
+                )
+        return manifest
 
     def diagnose(self) -> list[ArtifactDiagnostic]:
         diagnostics: list[ArtifactDiagnostic] = []

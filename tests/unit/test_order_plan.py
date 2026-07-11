@@ -93,3 +93,53 @@ def test_order_plan_events_append_without_mutating_original_plan(tmp_path) -> No
     assert path.read_bytes() == original
     assert [event.event_type for event in events] == ["RISK_CHECKED", "PAPER_ACCEPTED"]
     assert all(event.order_plan_id == plan.order_plan_id for event in events)
+
+
+def test_load_adopts_existing_legacy_order_plan_without_changing_bytes(tmp_path) -> None:
+    plan = make_plan()
+    path = tmp_path / f"{plan.order_plan_id}.json"
+    original = plan.model_dump_json(indent=2).encode("utf-8")
+    path.write_bytes(original)
+
+    loaded = load_order_plan(plan.order_plan_id, tmp_path)
+
+    assert loaded.order_plan_id == plan.order_plan_id
+    assert path.read_bytes() == original
+    assert len(list((tmp_path / ".manifests").glob("*.json"))) == 1
+
+
+def test_invalid_legacy_order_plan_is_structured_and_not_adopted(tmp_path) -> None:
+    path = tmp_path / "op_broken.json"
+    path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(StorageValidationError, match="legacy order plan is invalid"):
+        load_order_plan("op_broken", tmp_path)
+
+    assert not (tmp_path / ".manifests").exists()
+
+
+def test_order_plan_events_have_schema_identity_and_locked_concurrent_reads(tmp_path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    plan = make_plan()
+    save_order_plan(plan, tmp_path)
+
+    def append(index: int) -> None:
+        append_order_plan_event(
+            plan.order_plan_id,
+            directory=tmp_path,
+            event_type="RISK_CHECKED",
+            actor="test",
+            details={"index": index},
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(append, range(12)))
+        snapshots = list(
+            executor.map(lambda _: load_order_plan_events(plan.order_plan_id, tmp_path), range(4))
+        )
+
+    assert all(len(snapshot) == 12 for snapshot in snapshots)
+    events = snapshots[0]
+    assert all(event.schema_version == 1 and event.event_id for event in events)
+    assert {event.details["index"] for event in events} == set(range(12))

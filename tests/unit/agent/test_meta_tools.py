@@ -6,7 +6,7 @@ import pytest
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.sandbox import CodeSandbox
-from qmt_agent_trader.agent.schemas import ExperimentStatus
+from qmt_agent_trader.agent.schemas import ExperimentStatus, ToolContext
 from qmt_agent_trader.agent.tools import build_agent_registry
 from qmt_agent_trader.agent.workflows.self_bootstrap import SelfBootstrapWorkflow
 from qmt_agent_trader.data.storage import DataLake
@@ -95,3 +95,17 @@ def test_bootstrap_handles_empty_failures(registry, store):
         ExperimentStatus.COMPLETED,
         ExperimentStatus.REVIEW_REQUIRED,
     )
+
+
+def test_meta_tool_generation_keeps_run_versions(registry) -> None:
+    spec = {"name": "candidate_helper"}
+    first = registry.run_tool(
+        "generate_tool_code", {"tool_spec": spec}, ToolContext(run_id="meta_one")
+    )
+    second = registry.run_tool(
+        "generate_tool_code", {"tool_spec": spec}, ToolContext(run_id="meta_two")
+    )
+
+    assert first["status"] == second["status"] == "generated"
+    assert first["code_path"] != second["code_path"]
+    assert "meta_one" in first["code_path"] and "meta_two" in second["code_path"]

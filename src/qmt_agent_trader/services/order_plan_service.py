@@ -10,13 +10,14 @@ from pydantic import BaseModel, Field
 
 from qmt_agent_trader.broker.order import Order
 from qmt_agent_trader.broker.order_plan import OrderPlan, OrderPlanApproval, RiskChecks
-from qmt_agent_trader.core.ids import shanghai_now_iso
+from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus, OrderType, Side
 from qmt_agent_trader.persistence.artifacts import (
     ArtifactMetadata,
     ArtifactStore,
     artifact_store_for_root,
 )
+from qmt_agent_trader.persistence.errors import StorageValidationError
 
 
 def build_sample_paper_order_plan(strategy_id: str) -> OrderPlan:
@@ -42,6 +43,8 @@ def build_sample_paper_order_plan(strategy_id: str) -> OrderPlan:
 
 
 class OrderPlanEvent(BaseModel):
+    schema_version: int = 1
+    event_id: str = Field(default_factory=lambda: new_id("ope"))
     order_plan_id: str
     event_type: str
     actor: str
@@ -84,12 +87,38 @@ def load_order_plan(
         selected_directory = directory
         order_plan_id = identifier
     store = artifact_store or artifact_store_for_root(selected_directory)
+    relative_path = f"{order_plan_id}.json"
+    artifact_path = store.path_for(relative_path)
+    if not artifact_path.exists():
+        raise ValueError(f"order plan not found: {identifier}")
+    if store.manifest_path_for(order_plan_id).exists():
+        raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
+    else:
+        raw = artifact_path.read_bytes()
     try:
-        content = store.read_verified(order_plan_id)
+        plan = OrderPlan.model_validate_json(raw)
     except Exception as exc:
-        if not store.path_for(f"{order_plan_id}.json").exists():
-            raise ValueError(f"order plan not found: {identifier}") from exc
+        if not store.manifest_path_for(order_plan_id).exists():
+            raise StorageValidationError(
+                store_name="order_plans",
+                path=artifact_path,
+                operation="adopt_legacy",
+                reason="legacy order plan is invalid",
+                original_error=exc,
+            ) from exc
         raise
+    if plan.order_plan_id != order_plan_id:
+        raise ValueError("order plan id does not match repository path")
+    store.adopt(
+        relative_path,
+        metadata=ArtifactMetadata(
+            artifact_id=order_plan_id,
+            artifact_type="order_plan",
+            producer="services.order_plan_service.legacy_adoption",
+            related_strategy_id=plan.strategy_id,
+        ),
+    )
+    content = store.read_verified(order_plan_id, expected_relative_path=relative_path)
     return OrderPlan.model_validate_json(content)
 
 
@@ -103,9 +132,12 @@ def append_order_plan_event(
     artifact_store: ArtifactStore | None = None,
 ) -> OrderPlanEvent:
     store = artifact_store or artifact_store_for_root(directory)
-    verification = store.verify(order_plan_id)
+    verification = store.verify(
+        order_plan_id,
+        expected_relative_path=f"{order_plan_id}.json",
+    )
     if not verification.verified:
-        store.read_verified(order_plan_id)
+        store.read_verified(order_plan_id, expected_relative_path=f"{order_plan_id}.json")
     event = OrderPlanEvent(
         order_plan_id=order_plan_id,
         event_type=event_type,
@@ -125,12 +157,18 @@ def load_order_plan_events(
 ) -> list[OrderPlanEvent]:
     store = artifact_store or artifact_store_for_root(directory)
     path = _event_path(store, order_plan_id)
-    if not path.exists():
-        return []
-    events: list[OrderPlanEvent] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        events.append(OrderPlanEvent.model_validate(json.loads(line)))
-    return events
+    with store.lock_manager.resource_lock(path):
+        if not path.exists():
+            return []
+        raw = path.read_bytes()
+        complete = raw if raw.endswith(b"\n") else raw.rsplit(b"\n", 1)[0]
+        events: list[OrderPlanEvent] = []
+        for line in complete.splitlines():
+            try:
+                events.append(OrderPlanEvent.model_validate(json.loads(line)))
+            except Exception as exc:
+                raise ValueError("invalid order plan event record") from exc
+        return events
 
 
 def _event_path(store: ArtifactStore, order_plan_id: str) -> Path:

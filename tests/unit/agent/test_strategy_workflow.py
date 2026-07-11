@@ -386,6 +386,32 @@ def test_agent_can_list_legacy_flat_strategy_candidates(registry, tmp_path):
     assert listed["strategies"][0]["tests_path"].endswith("test_strat_legacy.py")
 
 
+def test_same_strategy_identity_keeps_two_run_versions_and_lists_both(registry) -> None:
+    spec = registry.run_tool(
+        "create_strategy_spec",
+        {"strategy_idea": "versioned momentum", "selected_factors": ["momentum_20d"]},
+        ToolContext(run_id="spec-run"),
+    )["strategy_spec"]
+    first = registry.run_tool(
+        "generate_strategy_code", {"strategy_spec": spec}, ToolContext(run_id="run_one")
+    )
+    second = registry.run_tool(
+        "generate_strategy_code", {"strategy_spec": spec}, ToolContext(run_id="run_two")
+    )
+    listed = registry.run_tool(
+        "list_strategy_candidates",
+        {"query": spec["strategy_id"]},
+        ToolContext(run_id="list-run"),
+    )
+
+    assert first["status"] == second["status"] == "generated"
+    assert first["code_path"] != second["code_path"]
+    assert {item["code_path"] for item in listed["strategies"]} >= {
+        first["code_path"],
+        second["code_path"],
+    }
+
+
 def _write_multi_factor_bars(lake: DataLake) -> None:
     rows = []
     start = date(2024, 1, 1)

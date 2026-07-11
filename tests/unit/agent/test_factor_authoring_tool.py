@@ -221,3 +221,26 @@ def test_agent_authored_factor_rejects_dangerous_code(registry, python_function:
     assert result["status"] == "STATIC_CHECK_FAILED"
     assert result["issues"]
     assert "code_path" not in result
+
+
+def test_same_factor_identity_can_generate_two_immutable_run_versions(registry) -> None:
+    spec = {"factor_id": "factor_regenerated", "name": "regenerated", "formula": "close"}
+    python_function = (
+        "def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:\n"
+        "    return pd.Series(data['close'], index=data.index, name='factor_value')"
+    )
+    first = registry.run_tool(
+        "generate_factor_code",
+        {"factor_spec": spec, "python_function": python_function},
+        ToolContext(run_id="run_one"),
+    )
+    second = registry.run_tool(
+        "generate_factor_code",
+        {"factor_spec": spec, "python_function": python_function},
+        ToolContext(run_id="run_two"),
+    )
+
+    assert first["status"] == second["status"] == "generated"
+    assert first["code_path"] != second["code_path"]
+    assert Path(first["code_path"]).exists() and Path(second["code_path"]).exists()
+    assert "run_one" in first["code_path"] and "run_two" in second["code_path"]

@@ -39,12 +39,22 @@ class AgentRuntime:
         from qmt_agent_trader.agent.tools import build_agent_registry
 
         if self._agent_registry is None:
+            paths = PersistencePaths.from_settings(self.settings)
             self._agent_registry = build_agent_registry(
                 data_lake=self.lake,
                 audit_path=self.settings.resolved_log_dir / "audit" / "agent_tool_calls.jsonl",
                 experiment_root=self.settings.resolved_data_dir / "experiments",
                 settings=self.settings,
-                sandbox=CodeSandbox(),
+                sandbox=CodeSandbox(
+                    generated_root=(
+                        paths.project_root
+                        / "src"
+                        / "qmt_agent_trader"
+                        / "agent"
+                        / "generated"
+                    ),
+                    lock_manager=self.lake.lock_manager,
+                ),
             )
         return self._agent_registry
 

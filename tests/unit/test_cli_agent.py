@@ -7,9 +7,11 @@ import pandas as pd
 from typer.testing import CliRunner
 
 from qmt_agent_trader.cli.main import app
+from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.providers.tushare.quota import new_usage_record
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.strategy.approval import read_approval_file
 from qmt_agent_trader.strategy.models import SavedStrategy, StrategySource, StrategySpec
 
 
@@ -119,6 +121,59 @@ def test_strategy_approve_rejects_non_review_required_candidate(monkeypatch) -> 
 
     assert result.exit_code != 0
     assert "REVIEW_REQUIRED" in result.output
+
+
+def test_strategy_approve_resumes_after_registry_attach_failure(monkeypatch, tmp_path) -> None:
+    saved = SavedStrategy(
+        strategy_id="strat_resume",
+        name="resume",
+        version="0.1.0",
+        source=StrategySource.AGENT_GENERATED,
+        status=ApprovalStatus.REVIEW_REQUIRED,
+        spec=StrategySpec(strategy_id="strat_resume", name="resume"),
+        implementation_ref="file:strategy.py",
+    )
+
+    class FakeRegistry:
+        attach_calls = 0
+        status_updates = 0
+
+        def get_strategy(self, strategy_id: str) -> SavedStrategy | None:
+            return saved if strategy_id == saved.strategy_id else None
+
+        def attach_approval(self, strategy_id: str, approval_file: str) -> SavedStrategy:
+            self.attach_calls += 1
+            if self.attach_calls == 1:
+                raise RuntimeError("injected registry attach failure")
+            return saved
+
+        def update_status(self, strategy_id: str, status, *, trusted: bool = False):
+            assert trusted is True
+            self.status_updates += 1
+            return saved
+
+    registry = FakeRegistry()
+    settings = Settings(
+        project_root=tmp_path,
+        qmt_gateway_api_key=None,
+        qmt_gateway_hmac_secret=None,
+        deepseek_api_key=None,
+    )
+    monkeypatch.setattr("qmt_agent_trader.cli.main._strategy_registry", lambda: registry)
+    monkeypatch.setattr("qmt_agent_trader.cli.main._settings", lambda: settings)
+
+    runner = CliRunner()
+    first = runner.invoke(app, ["strategy", "approve", "--strategy-id", "strat_resume"])
+    approval_path = tmp_path / "approvals/strat_resume_0.1.0.approval.yaml"
+    first_approval = read_approval_file(approval_path)
+    second = runner.invoke(app, ["strategy", "approve", "--strategy-id", "strat_resume"])
+    resumed_approval = read_approval_file(approval_path)
+
+    assert first.exit_code != 0
+    assert second.exit_code == 0
+    assert registry.attach_calls == 2 and registry.status_updates == 1
+    assert resumed_approval.approved_at == first_approval.approved_at
+    assert resumed_approval.approved_by == "human"
 
 
 def test_repair_tushare_ledger_is_read_only_without_explicit_quarantine(

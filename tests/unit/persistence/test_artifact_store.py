@@ -128,6 +128,38 @@ def test_existing_manifest_identity_blocks_publication_even_when_content_is_miss
     assert not store.path_for("reports/run_1.json").exists()
 
 
+def test_adopt_legacy_file_preserves_exact_bytes_and_is_idempotent(store: ArtifactStore) -> None:
+    legacy = store.path_for("reports/legacy.json")
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    original = b'{"legacy": true}\n'
+    legacy.write_bytes(original)
+
+    first = store.adopt("reports/legacy.json", metadata=_metadata("legacy"))
+    second = store.adopt("reports/legacy.json", metadata=_metadata("legacy"))
+
+    assert first.manifest.content_hash == second.manifest.content_hash
+    assert legacy.read_bytes() == original
+    assert store.read_verified("legacy", expected_relative_path="reports/legacy.json") == original
+
+
+def test_verify_rejects_manifest_identity_or_relative_path_substitution(
+    store: ArtifactStore,
+) -> None:
+    store.create("reports/run_1.json", b"one", metadata=_metadata("run_1"))
+    manifest_path = store.manifest_path_for("run_1")
+    payload = __import__("json").loads(manifest_path.read_text(encoding="utf-8"))
+    payload["artifact_id"] = "attacker"
+    manifest_path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StorageValidationError, match="identity"):
+        store.verify("run_1", expected_relative_path="reports/run_1.json")
+
+    manifest_path.unlink()
+    store.adopt("reports/run_1.json", metadata=_metadata("run_1"))
+    with pytest.raises(StorageValidationError, match="relative path"):
+        store.verify("run_1", expected_relative_path="reports/other.json")
+
+
 def test_diagnostics_report_orphan_missing_content_and_hash_mismatch(
     store: ArtifactStore,
 ) -> None:

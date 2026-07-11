@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from qmt_agent_trader.agent.permissions import PermissionLevel, ToolCallMode
@@ -37,6 +39,28 @@ def test_runtime_exposes_one_agent_callable_surface_for_web_and_llm(tmp_path) ->
     assert "run_remote_data_update" not in agent_tool_names
     assert "run_shell_command" not in agent_tool_names
     assert "propose_tool_registration" not in agent_tool_names
+
+
+def test_default_runtime_generates_under_injected_project_root(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    result = runtime.run_tool(
+        "generate_factor_code",
+        {
+            "factor_spec": {
+                "factor_id": "factor_settings_root",
+                "name": "settings root",
+                "formula": "close",
+            },
+            "python_function": (
+                "def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:\n"
+                "    return pd.Series(data['close'], index=data.index, name='factor_value')"
+            ),
+        },
+        ToolContext(run_id="settings-run"),
+    )
+
+    expected = tmp_path / "src/qmt_agent_trader/agent/generated"
+    assert Path(result["code_path"]).is_relative_to(expected)
 
 
 def test_default_prompt_keeps_local_quant_workflows_on_native_tools() -> None:
