@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from qmt_agent_trader.core.config import Settings
@@ -119,6 +120,36 @@ def test_quarantine_rejects_traversal_and_moves_invalid_record(
 
     assert not record.exists()
     assert receipt.path.exists() and receipt.manifest_path.exists()
+
+
+def test_quarantine_rejects_healthy_parquet(operations: StorageOperations) -> None:
+    record = operations.paths.lake_root / "raw/healthy.parquet"
+    record.parent.mkdir(parents=True)
+    pd.DataFrame({"value": [1]}).to_parquet(record)
+
+    with pytest.raises(StorageValidationError, match="valid"):
+        operations.quarantine("lake_raw", "healthy.parquet")
+
+    assert record.exists()
+
+
+def test_quarantine_manifest_failure_rolls_source_back(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = operations.paths.sessions_root / "bad.json"
+    record.parent.mkdir(parents=True)
+    original = b"{broken"
+    record.write_bytes(original)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("manifest injection")
+
+    monkeypatch.setattr(operations.atomic, "write_json", fail)
+    with pytest.raises(OSError, match="manifest injection"):
+        operations.quarantine("sessions", "bad.json")
+
+    assert record.read_bytes() == original
+    assert not list((operations.paths.quarantine_root / "sessions").glob("*.quarantine"))
 
 
 def test_health_payload_is_structured_and_secret_safe(operations: StorageOperations) -> None:

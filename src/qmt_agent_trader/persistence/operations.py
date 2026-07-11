@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -251,47 +252,25 @@ class StorageOperations:
         return result
 
     def quarantine(self, store: str, record: str) -> QuarantineReceipt:
-        roots = {
-            "sessions": self.paths.sessions_root,
-            "experiments": self.paths.experiments_root,
-            "registries": self.paths.registries_root,
-            "artifacts": self.paths.artifact_root,
-            "lake": self.paths.lake_root,
-        }
-        if store not in roots:
+        try:
+            definition = self.catalog.by_name(store)
+        except KeyError:
             raise StorageValidationError(
                 store_name="quarantine",
                 path=self.paths.quarantine_root,
                 operation="resolve",
                 reason="unknown store",
-            )
+            ) from None
         raw = Path(record)
-        source = (roots[store] / raw).resolve()
-        if (
-            raw.is_absolute()
-            or roots[store].resolve() not in source.parents
-            or not source.is_file()
-        ):
+        root = definition.path.parent if definition.path.is_file() else definition.path
+        source = (root / raw).resolve()
+        if raw.is_absolute() or root.resolve() not in source.parents or not source.is_file():
             raise StorageValidationError(
                 store_name="quarantine",
                 path=source,
                 operation="resolve",
                 reason="record path is unsafe or missing",
             )
-        if source.suffix in {".json", ".yaml", ".yml"}:
-            try:
-                json.loads(source.read_text()) if source.suffix == ".json" else yaml.safe_load(
-                    source.read_text()
-                )
-            except Exception:
-                pass
-            else:
-                raise StorageValidationError(
-                    store_name="quarantine",
-                    path=source,
-                    operation="quarantine",
-                    reason="authoritative record is valid; quarantine is corruption-only",
-                )
         target_root = self.paths.quarantine_root / store
         target = (
             target_root
@@ -299,23 +278,36 @@ class StorageOperations:
         )
         manifest_path = target.with_suffix(target.suffix + ".json")
         with self.locks.resource_lock(source):
+            if _record_is_valid(source, definition.kind, definition.governed, root, self.locks):
+                raise StorageValidationError(
+                    store_name="quarantine",
+                    path=source,
+                    operation="quarantine",
+                    reason="authoritative record is valid; quarantine is corruption-only",
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             digest, size = _hash(source), source.stat().st_size
             os.replace(source, target)
-            self.atomic.write_json(
-                manifest_path,
-                {
-                    "schema_version": 1,
-                    "store": store,
-                    "original_path": str(source),
-                    "quarantine_path": str(target),
-                    "sha256": digest,
-                    "size": size,
-                    "reason": "explicit operator quarantine",
-                    "quarantined_at": datetime.now(tz=UTC).isoformat(),
-                },
-                create_only=True,
-            )
+            try:
+                self.atomic.write_json(
+                    manifest_path,
+                    {
+                        "schema_version": 1,
+                        "store": store,
+                        "original_path": str(source),
+                        "quarantine_path": str(target),
+                        "sha256": digest,
+                        "size": size,
+                        "reason": "explicit operator quarantine",
+                        "quarantined_at": datetime.now(tz=UTC).isoformat(),
+                    },
+                    create_only=True,
+                )
+            except Exception:
+                if target.exists() and not source.exists():
+                    os.replace(target, source)
+                manifest_path.unlink(missing_ok=True)
+                raise
         return QuarantineReceipt(target, manifest_path)
 
     def health_payload(
@@ -419,6 +411,33 @@ def _lock_is_active(path: Path) -> bool:
     else:
         lock.release()
         return False
+
+
+def _record_is_valid(path: Path, kind: str, governed: bool, root: Path, locks: LockManager) -> bool:
+    try:
+        if governed:
+            diagnostics = artifact_store_for_root(root, lock_manager=locks).diagnose()
+            relative = path.relative_to(root).as_posix()
+            return not any(item.relative_path == relative for item in diagnostics)
+        if kind == "parquet":
+            parquet = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
+            for index in range(parquet.num_row_groups):
+                parquet.read_row_group(index)  # type: ignore[no-untyped-call]
+        elif kind == "json":
+            json.loads(path.read_text(encoding="utf-8"))
+        elif kind == "jsonl":
+            raw = path.read_bytes()
+            if raw and not raw.endswith(b"\n"):
+                return False
+            for line in raw.splitlines():
+                json.loads(line)
+        elif kind == "code":
+            ast.parse(path.read_text(encoding="utf-8"))
+        else:
+            yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return True
 
 
 def as_json(value: Any) -> Any:
