@@ -91,3 +91,47 @@ Only existing `streamable_http_client` deprecation warnings were emitted.
 
 - `8f099ec feat(persistence): govern immutable trading artifacts`
 - Documentation/report commit: recorded separately after this report update.
+
+## Review remediation
+
+The rejected review was addressed in correction commit
+`e2e4d6c fix(persistence): preserve and verify governed artifacts`:
+
+- Existing order-plan JSON and approval YAML are validated and adopted under the
+  artifact lock without rewriting bytes, paths, ids, or human approval fields.
+  Adoption is idempotent; malformed legacy governance files raise structured
+  storage validation errors and receive no manifest.
+- Manifest reads bind the requested artifact id to the manifest payload and bind
+  the expected repository/file path to `relative_path`, preventing manifest
+  substitution.
+- Research/backtest compare and research-report search consumers adopt valid
+  legacy reports and verify governed hashes. Tampered governed reports are
+  rejected or represented as blocked evidence with an explicit verification
+  reason.
+- Generated factor, strategy, and meta-tool code now includes logical version
+  plus `ToolContext.run_id` in artifact identity and physical path. Two runs of
+  the same logical candidate are both retained and discoverable.
+- Runtime and registry composition explicitly derive the generated root from the
+  injected Settings/PersistencePaths project root; injected executions no longer
+  fall back to global settings.
+- Approval CLI reruns recover after a simulated failure between artifact publish
+  and registry attachment. The verified original approval is reused, then attach
+  and trusted status update complete; signer and timestamp are unchanged.
+- Order-plan events now carry `schema_version` and `event_id`; append and reads
+  share the same resource lock, malformed complete records fail closed, and only
+  an incomplete final tail is ignored.
+
+Review correction evidence:
+
+```text
+Legacy/binding/event/approval slice: 22 passed, then corrupt-file additions: 12 passed
+Core/domain/CLI/runtime/sandbox: 58 passed
+Run-version/custom-root focused: 4 passed
+Governed report compare/adoption: 2 passed
+Version/search/contracts focused: 8 passed
+Affected strategy candidate workflows: 5 passed
+Meta/report/contracts: 10 passed
+Ruff: All checks passed
+mypy: Success, 198 source files
+git diff --check: clean
+```
