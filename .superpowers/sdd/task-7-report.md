@@ -23,6 +23,14 @@ caught cache inclusion in backup, two real architecture violations, and invalid
 Rich-wrapped JSON. Each was corrected before the focused suite reached 9/9; the
 CLI plus existing CLI regression suite reached 11/11.
 
+The rejection remediation added RED/GREEN coverage for the logical store
+catalog, locked quarantine validation and rollback, hostile backup manifests,
+failed final publication, coordinator DuckDB snapshots, manifest identity
+substitution, alias/mode-aware fail-closed architecture scanning, catalog lock
+mapping, central secret-safe Agent storage payloads, every CLI outcome, and
+destructive migration approval. The final focused persistence/Agent/CLI run was
+151 passed.
+
 ## Scope and limitations
 
 Backup v1 is a verified local copy, not off-device disaster recovery. It excludes
@@ -32,12 +40,22 @@ quarantine does not replace the specialized Tushare ledger recovery workflow.
 
 ## Final verification
 
-`make check` completed successfully: Ruff passed, mypy reported no issues across
-200 source files, and all 614 tests passed (76 existing dependency/deprecation
-warnings). `git diff --check` was also clean.
+Fresh rejection-remediation `make check` completed successfully: Ruff passed,
+mypy reported no issues across 201 source files, and all 627 tests passed with
+76 existing dependency/deprecation warnings. `git diff --check` was clean.
 
 ## Commits
 
 - `748419f feat(storage): add local operations and persistence enforcement`
 - `ce372d1 feat(cli): expose storage operations commands`
 - `aef4db6 fix(storage): enforce backup writer barrier`
+- `11530eb fix(storage): drive operations from logical store catalog`
+- `1926966 fix(storage): make quarantine validation locked and failure-safe`
+- `ffea285 fix(storage): harden persistence architecture scanner`
+- `23ebf9a fix(agent): surface secret-safe storage health payloads`
+- `531c519 fix(storage): publish strictly verified backup snapshots`
+- `f6955f1 fix(storage): map lock diagnostics to catalog resources`
+- `36f2cd2 fix(storage): bind artifact manifests to identity filenames`
+- `7c98e4f fix(cli): cover storage command outcomes consistently`
+- `f98f180 test(storage): enforce destructive migration approval`
+- `9948ce4 fix(agent): type storage health payload boundary`

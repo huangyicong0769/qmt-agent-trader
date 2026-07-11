@@ -92,16 +92,21 @@ The baseline was produced from current code using searches for `write_text`, `wr
 
 ## Phase 6 operations reconciliation
 
-`PersistencePaths` is now the executable inventory boundary. `qmt-agent storage
-inventory` emits one structured entry for every canonical field other than the
-project container itself, including type, physical path, owner, truth role,
-schema version, mutability, lock policy, backup policy, and current presence.
+`StoreCatalog.canonical(PersistencePaths)` is now the single executable inventory
+boundary. `qmt-agent storage inventory` emits one structured entry per real
+logical store: DuckDB, raw/silver/gold/metadata lake layers, factor/strategy
+registries, todos, experiments, sessions, canonical and legacy universes,
+approvals, order plans/events, reports, audit streams, and governed generated
+code. Cache, temp, locks, backups, and quarantine are excluded by construction.
+Each entry includes type, exact path, owner, truth role, schema version,
+mutability, lock resource, backup policy, and current presence.
 `StorageOperations` owns verify, migration delegation, local backup verification,
 lock diagnostics, and explicit quarantine; existing `data validate` and Tushare
 repair commands remain intact.
 
 An AST architecture test rejects new `Path.write_text`, `DataFrame.to_parquet`,
-direct `duckdb.connect`, and append-mode built-in `open` calls. The narrow
+direct or aliased `duckdb.connect`, and positional/keyword append-mode built-in
+or `Path.open` calls. Invalid or unreadable production Python fails closed. The narrow
 allowlist covers only `AtomicFileStore.write_parquet` and
 `DatabaseCoordinator._open_connection`, the infrastructure owners documented
 above. Core tool-proposal and process-payload writes were migrated to
