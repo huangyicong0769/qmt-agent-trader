@@ -14,6 +14,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 
+from qmt_agent_trader.agent.audit import scrub_sensitive
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
 from qmt_agent_trader.agent.permissions import ToolCallMode
@@ -109,12 +110,18 @@ def _storage_operations() -> StorageOperations:
 
 @storage_app.command("inventory")
 def storage_inventory() -> None:
-    print_json([as_json(item) for item in _storage_operations().inventory()])
+    try:
+        print_json([as_json(item) for item in _storage_operations().inventory()])
+    except StorageError as exc:
+        _raise_storage_cli_error(exc)
 
 
 @storage_app.command("verify")
 def storage_verify(deep: bool = typer.Option(False, "--deep")) -> None:
-    result = _storage_operations().verify(deep=deep)
+    try:
+        result = _storage_operations().verify(deep=deep)
+    except StorageError as exc:
+        _raise_storage_cli_error(exc)
     print_json(as_json(result))
     if not result.healthy:
         raise typer.Exit(code=1)
@@ -125,8 +132,7 @@ def storage_migrate(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
     try:
         applied = _storage_operations().migrate(dry_run=dry_run)
     except StorageError as exc:
-        print_json({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})
-        raise typer.Exit(code=1) from exc
+        _raise_storage_cli_error(exc)
     print_json({"status": "ok", "dry_run": dry_run, "migrations": applied})
 
 
@@ -135,14 +141,16 @@ def storage_backup() -> None:
     try:
         receipt = _storage_operations().backup()
     except StorageError as exc:
-        print_json({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})
-        raise typer.Exit(code=1) from exc
+        _raise_storage_cli_error(exc)
     print_json({"status": "ok", **as_json(receipt)})
 
 
 @storage_app.command("locks")
 def storage_locks() -> None:
-    print_json(_storage_operations().locks_report())
+    try:
+        print_json(_storage_operations().locks_report())
+    except StorageError as exc:
+        _raise_storage_cli_error(exc)
 
 
 @storage_app.command("quarantine")
@@ -150,9 +158,15 @@ def storage_quarantine(store: str, record: str) -> None:
     try:
         receipt = _storage_operations().quarantine(store, record)
     except StorageError as exc:
-        print_json({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})
-        raise typer.Exit(code=1) from exc
+        _raise_storage_cli_error(exc)
     print_json({"status": "quarantined", **as_json(receipt)})
+
+
+def _raise_storage_cli_error(exc: StorageError) -> None:
+    print_json(
+        scrub_sensitive({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})
+    )
+    raise typer.Exit(code=1) from exc
 
 
 def _artifact_store(root: Path) -> ArtifactStore:
