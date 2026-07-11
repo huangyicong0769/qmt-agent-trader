@@ -28,6 +28,15 @@ _ALLOWLIST = {
     "persistence/artifacts.py": {"noncanonical_lock_root"},
 }
 
+_GOVERNED_ARTIFACT_CALLS = {
+    "append_order_plan_event",
+    "load_order_plan",
+    "load_order_plan_events",
+    "read_approval_file",
+    "save_order_plan",
+    "write_approval_file",
+}
+
 
 def scan_forbidden_persistence(root: Path) -> list[PersistenceViolation]:
     violations: list[PersistenceViolation] = []
@@ -75,6 +84,12 @@ def _primitive(
     if not isinstance(node, ast.Call):
         return None
     function = node.func
+    if (
+        isinstance(function, ast.Name)
+        and function.id in _GOVERNED_ARTIFACT_CALLS
+        and not any(keyword.arg == "artifact_store" for keyword in node.keywords)
+    ):
+        return "governed_artifact_without_store"
     if (
         isinstance(function, ast.Name)
         and function.id == "artifact_store_for_root"

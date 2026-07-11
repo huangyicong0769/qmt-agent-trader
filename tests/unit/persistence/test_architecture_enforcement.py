@@ -65,3 +65,15 @@ def test_architecture_scan_rejects_artifact_store_without_manager(tmp_path: Path
         item.primitive == "artifact_store_without_canonical_manager"
         for item in scan_forbidden_persistence(tmp_path)
     )
+
+
+def test_architecture_scan_rejects_governed_artifact_fallback_calls(tmp_path: Path) -> None:
+    (tmp_path / "order_plan.py").write_text(
+        "from qmt_agent_trader.services.order_plan_service import load_order_plan\n"
+        "load_order_plan(plan_id, root)\n"
+    )
+
+    assert any(
+        item.primitive == "governed_artifact_without_store"
+        for item in scan_forbidden_persistence(tmp_path)
+    )

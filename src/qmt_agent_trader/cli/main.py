@@ -966,6 +966,8 @@ def trade_generate_plan(strategy_id: Annotated[str, typer.Option("--strategy-id"
 @trade_app.command("risk-check")
 def trade_risk_check(plan: Annotated[str, typer.Option("--plan")]) -> None:
     order_plan = _load_plan_or_error(plan)
+    plans_root = PersistencePaths.from_settings(_settings()).order_plans_root
+    artifact_store = _artifact_store(plans_root)
     result = run_order_plan_risk_checks(order_plan)
     payload = {
         "plan": plan,
@@ -976,10 +978,11 @@ def trade_risk_check(plan: Annotated[str, typer.Option("--plan")]) -> None:
     _audit_logger("trade").append("trade.risk_check", "cli", payload)
     append_order_plan_event(
         order_plan.order_plan_id,
-        directory=PersistencePaths.from_settings(_settings()).order_plans_root,
+        directory=plans_root,
         event_type="RISK_CHECKED",
         actor="cli",
         details={"status": result.status.value},
+        artifact_store=artifact_store,
     )
     print_json(payload)
 
@@ -988,7 +991,12 @@ def trade_risk_check(plan: Annotated[str, typer.Option("--plan")]) -> None:
 def trade_paper(plan: Annotated[str, typer.Option("--plan")]) -> None:
     order_plan = _load_plan_or_error(plan)
     plans_root = PersistencePaths.from_settings(_settings()).order_plans_root
-    event_history = load_order_plan_events(order_plan.order_plan_id, plans_root)
+    artifact_store = _artifact_store(plans_root)
+    event_history = load_order_plan_events(
+        order_plan.order_plan_id,
+        plans_root,
+        artifact_store=artifact_store,
+    )
     result = run_order_plan_risk_checks(order_plan)
     if result.status != RiskStatus.PASSED:
         raise typer.BadParameter("risk checks failed")
@@ -1012,6 +1020,7 @@ def trade_paper(plan: Annotated[str, typer.Option("--plan")]) -> None:
         event_type="PAPER_ACCEPTED",
         actor="cli",
         details={"live": False, "idempotency_key": order_plan.idempotency_key},
+        artifact_store=artifact_store,
     )
     print_json(payload)
 
@@ -1102,10 +1111,12 @@ def print_json(payload: object) -> None:
 
 
 def _load_plan_or_error(identifier: str) -> OrderPlan:
+    plans_root = PersistencePaths.from_settings(_settings()).order_plans_root
     try:
         return load_order_plan(
             identifier,
-            PersistencePaths.from_settings(_settings()).order_plans_root,
+            plans_root,
+            artifact_store=_artifact_store(plans_root),
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
