@@ -107,6 +107,13 @@ mutability, lock resource, backup policy, and current presence.
 lock diagnostics, and explicit quarantine; existing `data validate` and Tushare
 repair commands remain intact.
 
+Every production mutation owner uses the canonical `PersistencePaths.locks_root`
+gate. Default ArtifactStore construction, DataLake Parquet publication, audit
+appenders, generated-code/proposal writes, report writers, and DuckDB writes all
+cooperate with the exclusive backup barrier. Architecture enforcement rejects
+new CWD persistence roots and private `.locks`/`.artifact-locks` managers outside
+the narrow configuration-owner allowlist.
+
 An AST architecture test rejects new `Path.write_text`, `DataFrame.to_parquet`,
 direct or aliased `duckdb.connect`, and positional/keyword append-mode built-in
 or `Path.open` calls. Invalid or unreadable production Python fails closed. The narrow

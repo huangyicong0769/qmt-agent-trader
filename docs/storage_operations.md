@@ -37,6 +37,19 @@ remain included through their exact composition roots. A
 contained-path, size, and hash verification. A failure raises
 `StorageBackupError` and removes staging and incomplete final data.
 
+All canonical filesystem and database writers enter the same mutation gate at
+`PersistencePaths.locks_root`; this includes governed artifacts, audit streams,
+generated code, and incremental and nonincremental Parquet publication. Backup
+holds the exclusive gate across enumeration and copy. Writers therefore wait for
+the local backup duration; long backups trade write latency for a single
+consistent generation. Readers remain available subject to DuckDB checkpoint
+coordination.
+
+After byte/hash verification, backup re-runs deep storage health against rebased
+snapshot paths. Copied DuckDB migrations/schema, Parquet pages, structured
+documents, JSONL streams, and governed manifest bindings must all be healthy
+before the success marker can be published.
+
 Recovery is deliberately manual in v1:
 
 1. Stop writers and inspect `storage locks`; do not delete a live lock.

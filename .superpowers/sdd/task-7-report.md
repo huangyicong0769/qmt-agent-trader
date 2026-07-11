@@ -38,6 +38,16 @@ and one shared recursively scrubbed health mapper. Focused Ruff and mypy passed,
 and the final related persistence/Agent/CLI run was 156 passed with one unrelated
 deprecation warning.
 
+The final cross-phase review unified production ArtifactStore, audit, generated
+proposal/payload, DataLake Parquet, report, code, and DuckDB mutation locks under
+the canonical backup gate. Concurrent report creation and nonincremental Parquet
+replacement tests prove backup captures one generation without nested deadlock.
+Verification now reports immutable pending/checksum migration state and re-runs
+deep storage health on rebased backup snapshots before SUCCESS. CLI, strategy,
+and web report paths are CWD-independent; the web reader verifies governed bytes
+and logs explicit exclusions. The final focused static run covered 202 source
+files and 223 related tests.
+
 ## Scope and limitations
 
 Backup v1 is a verified local copy, not off-device disaster recovery. It excludes
@@ -50,6 +60,10 @@ quarantine does not replace the specialized Tushare ledger recovery workflow.
 Fresh rejection-remediation `make check` completed successfully: Ruff passed,
 mypy reported no issues across 201 source files, and all 627 tests passed with
 76 existing dependency/deprecation warnings. `git diff --check` was clean.
+
+Fresh final cross-phase `make check` also completed successfully after canonical
+writer/barrier and report-root repair: Ruff passed, mypy reported no issues
+across 202 source files, and all 638 tests passed with 76 existing warnings.
 
 ## Commits
 
@@ -68,3 +82,7 @@ mypy reported no issues across 201 source files, and all 627 tests passed with
 - `9948ce4 fix(agent): type storage health payload boundary`
 - `6cce7cd fix(storage): align catalog roots policies and health mapping`
 - `b310f91 fix(storage): detect aliased DuckDB module connects`
+- `8a56f50 fix(storage): enforce canonical backup barrier on writers`
+- `245968d fix(reports): use canonical governed report roots`
+- `377bd2b fix(storage): verify migration and backup snapshot health`
+- `e410f01 test(reports): inject canonical project root in evidence tests`
