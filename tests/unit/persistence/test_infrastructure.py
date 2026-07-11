@@ -417,7 +417,31 @@ def test_migration_dry_run_has_no_storage_side_effects(tmp_path: Path) -> None:
     assert existing_database.stat().st_mtime_ns == before
     with existing_coordinator.read_connection("verify_no_table") as connection:
         tables = connection.execute("SHOW TABLES").fetchall()
-    assert ("storage_schema_migrations",) not in tables
+        assert ("storage_schema_migrations",) not in tables
+
+
+def test_destructive_migration_requires_explicit_approval_for_plan_and_apply(
+    tmp_path: Path,
+) -> None:
+    coordinator = DatabaseCoordinator(
+        tmp_path / "control.duckdb", LockManager(tmp_path / "locks")
+    )
+    registry = MigrationRegistry(coordinator)
+    migration = Migration(
+        "drop-001",
+        "core",
+        1,
+        "destructive fixture",
+        lambda connection: connection.execute("CREATE TABLE approved(value INTEGER)"),
+        implementation="destructive-v1",
+        destructive=True,
+    )
+
+    with pytest.raises(StorageConflictError, match="explicit approval"):
+        registry.apply([migration], dry_run=True)
+    with pytest.raises(StorageConflictError, match="explicit approval"):
+        registry.apply([migration])
+    assert registry.apply([migration], allow_destructive=True) == ["drop-001"]
 
 
 def test_migration_dry_run_propagates_unrelated_catalog_errors(
