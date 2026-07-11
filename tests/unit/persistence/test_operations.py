@@ -9,7 +9,9 @@ import pandas as pd
 import pytest
 
 from qmt_agent_trader.core.config import Settings
+from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import StorageBackupError, StorageValidationError
+from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
 
@@ -105,6 +107,74 @@ def test_backup_failure_has_no_success_marker(
         operations.backup()
 
     assert not list(operations.paths.backup_root.rglob("SUCCESS.json"))
+
+
+def test_backup_verifier_rejects_manifest_traversal_and_extra_files(
+    operations: StorageOperations,
+) -> None:
+    root = operations.paths.backup_root / "hostile"
+    (root / "files").mkdir(parents=True)
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "files": [{"source": "../escape", "sha256": "x", "size": 1}]}
+        )
+    )
+    (root / "files/extra").write_text("extra")
+
+    result = operations.verify_backup(root)
+
+    assert not result.healthy
+    assert any(item.code in {"INVALID_MANIFEST", "EXTRA_FILE"} for item in result.diagnostics)
+
+
+def test_backup_success_publish_failure_removes_final_directory(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = operations.paths.sessions_root / "s.json"
+    record.parent.mkdir(parents=True)
+    record.write_text("official")
+    original_write = operations.atomic.write_json
+
+    def fail_success(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "SUCCESS.json":
+            raise OSError("success marker injection")
+        original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(operations.atomic, "write_json", fail_success)
+    with pytest.raises(StorageBackupError):
+        operations.backup()
+
+    assert not [
+        path for path in operations.paths.backup_root.iterdir() if not path.name.startswith(".")
+    ]
+
+
+def test_backup_uses_coordinator_checkpoint_snapshot(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with operations.database.write_transaction("seed") as connection:
+        connection.execute("CREATE TABLE snapshot_value(value INTEGER)")
+        connection.execute("INSERT INTO snapshot_value VALUES (7)")
+    called = False
+    original = operations.database.checkpoint_copy
+
+    def checkpoint_copy(target: Path) -> None:
+        nonlocal called
+        called = True
+        original(target)
+
+    monkeypatch.setattr(operations.database, "checkpoint_copy", checkpoint_copy)
+    receipt = operations.backup()
+
+    assert called
+    copied = (
+        receipt.path
+        / "files"
+        / operations.paths.control_db_path.relative_to(operations.paths.project_root)
+    )
+    coordinator = DatabaseCoordinator(copied, LockManager(operations.paths.locks_root / "read"))
+    with coordinator.read_connection("verify snapshot", read_only=True) as connection:
+        assert connection.execute("SELECT value FROM snapshot_value").fetchone() == (7,)
 
 
 def test_quarantine_rejects_traversal_and_moves_invalid_record(

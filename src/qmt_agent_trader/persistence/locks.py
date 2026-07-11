@@ -69,7 +69,7 @@ class LockManager:
 
     @contextmanager
     def _backup_gate(self, error_kind: str) -> Iterator[FileLock | None]:
-        if "backup_gate" in self.active_lock_kinds:
+        if "backup_gate" in self.active_lock_kinds or "backup" in self.active_lock_kinds:
             yield None
             return
         with self._lock(

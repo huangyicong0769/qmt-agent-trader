@@ -173,7 +173,10 @@ class StorageOperations:
                     relative = source.relative_to(self.paths.project_root)
                     target = staging / "files" / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target)
+                    if source == self.paths.control_db_path:
+                        self.database.checkpoint_copy(target)
+                    else:
+                        shutil.copy2(source, target)
                     files.append(
                         {
                             "source": relative.as_posix(),
@@ -188,7 +191,7 @@ class StorageOperations:
                 "scope": "local_consistent_v1",
             }
             self.atomic.write_json(staging / "manifest.json", manifest)
-            verification = self.verify_backup(staging)
+            verification = self._verify_backup(staging, require_success=False)
             if not verification.healthy:
                 raise ValueError("backup hash verification failed")
             os.replace(staging, final)
@@ -200,6 +203,8 @@ class StorageOperations:
             return BackupReceipt(final, final / "manifest.json")
         except Exception as exc:
             shutil.rmtree(staging, ignore_errors=True)
+            if final.exists() and not (final / "SUCCESS.json").exists():
+                shutil.rmtree(final, ignore_errors=True)
             raise StorageBackupError(
                 store_name="backups",
                 path=final,
@@ -211,12 +216,33 @@ class StorageOperations:
             ) from exc
 
     def verify_backup(self, root: Path) -> VerificationResult:
+        return self._verify_backup(root, require_success=True)
+
+    def _verify_backup(self, root: Path, *, require_success: bool) -> VerificationResult:
         diagnostics: list[StorageDiagnostic] = []
         try:
-            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            manifest_path = root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("schema_version") != 1 or not isinstance(manifest.get("files"), list):
+                raise ValueError("unsupported backup manifest schema")
+            files_root = (root / "files").resolve()
+            expected: set[Path] = set()
+            sources: set[str] = set()
             for item in manifest["files"]:
-                path = root / "files" / item["source"]
-                if not path.is_file() or _hash(path) != item["sha256"]:
+                source = item.get("source")
+                if not isinstance(source, str) or source in sources:
+                    raise ValueError("invalid or duplicate backup source")
+                sources.add(source)
+                raw = Path(source)
+                path = (files_root / raw).resolve()
+                if raw.is_absolute() or files_root not in path.parents:
+                    raise ValueError("backup source path escapes files root")
+                expected.add(path)
+                if (
+                    not path.is_file()
+                    or path.stat().st_size != item.get("size")
+                    or _hash(path) != item.get("sha256")
+                ):
                     diagnostics.append(
                         StorageDiagnostic(
                             "backup",
@@ -225,6 +251,15 @@ class StorageOperations:
                             path,
                         )
                     )
+            actual = {path.resolve() for path in files_root.rglob("*") if path.is_file()}
+            for extra in sorted(actual - expected):
+                diagnostics.append(
+                    StorageDiagnostic("backup", "EXTRA_FILE", "unmanifested backup file", extra)
+                )
+            if require_success:
+                success = json.loads((root / "SUCCESS.json").read_text(encoding="utf-8"))
+                if success.get("manifest_sha256") != _hash(manifest_path):
+                    raise ValueError("success marker is not bound to manifest")
         except Exception as exc:
             diagnostics.append(
                 StorageDiagnostic(

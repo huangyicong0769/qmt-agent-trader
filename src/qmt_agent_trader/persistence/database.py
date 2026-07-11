@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -98,6 +99,13 @@ class DatabaseCoordinator:
         with self.write_transaction("initialize") as connection:
             if initializer is not None:
                 initializer(connection)
+
+    def checkpoint_copy(self, target: Path) -> None:
+        """Checkpoint and copy a stable DuckDB file while writers are excluded."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self.write_connection("checkpoint_backup") as connection:
+            connection.execute("CHECKPOINT")
+            shutil.copy2(self.database_path, target)
 
     def current_schema_version(self, component: str | None = None) -> int:
         try:
