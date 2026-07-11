@@ -28,6 +28,9 @@ coordination, metadata, and recovery policy.
 - Audit rows carry `schema_version=2`; legacy unversioned rows remain readable.
 - Shared canonical `LockManager` plus `AtomicFileStore` serialize multi-process
   append and rotation. Each row is encoded once and emitted by one `os.write`.
+- Generic `AtomicFileStore.append_jsonl` retains its compact-byte contract;
+  `AuditJsonlStore` explicitly selects legacy spaced JSON formatting required by
+  existing Agent audit consumers without changing locking or write count.
 - Rotation size check, monotonic numbered-generation rename, and boundary append
   share one resource lock. Retention defaults to unlimited, and readers/verifier
   traverse every generation in order before the active file.
@@ -128,3 +131,5 @@ Final scrub correction: `fix(audit): cover normalized credential key variants`
 Acronym scrub correction: `fix(audit): share canonical credential classification`
 
 Assignment scrub correction: `fix(audit): redact colon and quoted assignments`
+
+JSONL formatting correction: `fix(persistence): preserve generic JSONL encoding`

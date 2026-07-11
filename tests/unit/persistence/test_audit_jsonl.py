@@ -186,6 +186,7 @@ def test_public_loggers_preserve_contract_scrub_secrets_and_ignore_cwd(
         warnings=["Bearer abc.def.ghi"],
     )
     row = json.loads(agent_path.read_text())
+    assert '"status": "ok"' in agent_path.read_text()
     assert row["schema_version"] == 2
     assert row["error_message"] == "[scrubbed]"
     assert row["output_data"] == {

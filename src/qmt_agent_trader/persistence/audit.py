@@ -76,6 +76,7 @@ class AuditJsonlStore:
             versioned,
             rotation_bytes=self.rotation_bytes,
             fsync=self.fsync,
+            compact=False,
         )
 
     def verify(self) -> AuditVerification:

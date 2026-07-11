@@ -99,7 +99,7 @@ class AtomicFileStore:
     def append_jsonl(
         self, path: Path, record: Any, *, fsync: bool = True
     ) -> None:
-        encoded = json.dumps(record, ensure_ascii=True).encode() + b"\n"
+        encoded = _encode_jsonl(record, compact=True)
         if b"\n" in encoded[:-1]:
             raise StorageValidationError(
                 store_name="atomic_files", path=path, operation="append_jsonl",
@@ -115,8 +115,9 @@ class AtomicFileStore:
         *,
         rotation_bytes: int | None = None,
         fsync: bool = True,
+        compact: bool = True,
     ) -> None:
-        encoded = json.dumps(record, ensure_ascii=True).encode() + b"\n"
+        encoded = _encode_jsonl(record, compact=compact)
         with self.lock_manager.resource_lock(path):
             if (
                 rotation_bytes is not None
@@ -259,6 +260,11 @@ def _model_value(
 
 def _temp_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+
+
+def _encode_jsonl(record: Any, *, compact: bool) -> bytes:
+    separators = (",", ":") if compact else None
+    return json.dumps(record, ensure_ascii=True, separators=separators).encode() + b"\n"
 
 
 def _next_jsonl_generation(path: Path) -> Path:
