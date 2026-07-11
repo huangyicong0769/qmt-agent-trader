@@ -135,3 +135,33 @@ Ruff: All checks passed
 mypy: Success, 198 source files
 git diff --check: clean
 ```
+
+## Second rereview remediation
+
+Correction commit `8453114 fix(persistence): make artifact adoption race safe`
+closes the remaining rereview findings:
+
+- `ArtifactStore.adopt` now rereads, optionally matches expected bytes, validates,
+  hashes, and manifests the exact same byte string while holding the artifact-root
+  lock. It returns those adopted bytes; order, approval, research, backtest, and
+  research-search callers parse only that locked result. A stale expectation is a
+  structured retryable conflict rather than a manifest for changed content.
+- Approval adoption validates that parsed `strategy_id` and `strategy_version`
+  reconstruct the exact expected filename before any manifest is published.
+- Generated meta tests use `importlib` with the supplied `code_path`, so tests
+  execute the exact run-version implementation instead of an obsolete package
+  path.
+- `OrderPlanEvent.schema_version` is `Literal[1]`; unknown versions fail model
+  validation.
+- Factor, strategy, and meta run directories use one shared slug plus stable hash
+  encoder. Distinct ids such as `a/b` and `a?b` cannot collapse to one path.
+
+Second rereview evidence:
+
+```text
+Five targeted REDs initially failed; all five pass after correction.
+Artifact/order/approval/research/backtest/meta/search: 42 passed
+Ruff: All checks passed
+mypy: Success, 198 source files
+git diff --check: clean
+```
