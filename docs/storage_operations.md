@@ -29,7 +29,10 @@ approved API call and are not exposed by this CLI.
 Backup v1 is local only. The service takes the global backup barrier, checkpoints
 DuckDB through `DatabaseCoordinator`, copies every cataloged official store,
 hashes every copy, and verifies staging before publishing it.
-Cache, temporary files, active lock files, and prior backups are excluded. A
+Cache, temporary files, active lock files, and prior backups are excluded. The
+configured `reports/cache` and transient `reports/tool_payloads` transport
+are also excluded; governed backtest/research reports and agent-generated code
+remain included through their exact composition roots. A
 `SUCCESS.json` marker bound to the manifest hash is written only after exact-set,
 contained-path, size, and hash verification. A failure raises
 `StorageBackupError` and removes staging and incomplete final data.

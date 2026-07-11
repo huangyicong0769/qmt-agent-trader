@@ -31,6 +31,13 @@ mapping, central secret-safe Agent storage payloads, every CLI outcome, and
 destructive migration approval. The final focused persistence/Agent/CLI run was
 151 passed.
 
+The final review fixes added exact production generated-code composition paths,
+separate governed backtest/research roots, explicit cache/tool-payload exclusion,
+policy-identical legacy verification/quarantine, DuckDB module-alias scanning,
+and one shared recursively scrubbed health mapper. Focused Ruff and mypy passed,
+and the final related persistence/Agent/CLI run was 156 passed with one unrelated
+deprecation warning.
+
 ## Scope and limitations
 
 Backup v1 is a verified local copy, not off-device disaster recovery. It excludes
@@ -59,3 +66,5 @@ mypy reported no issues across 201 source files, and all 627 tests passed with
 - `7c98e4f fix(cli): cover storage command outcomes consistently`
 - `f98f180 test(storage): enforce destructive migration approval`
 - `9948ce4 fix(agent): type storage health payload boundary`
+- `6cce7cd fix(storage): align catalog roots policies and health mapping`
+- `b310f91 fix(storage): detect aliased DuckDB module connects`

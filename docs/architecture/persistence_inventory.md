@@ -96,8 +96,11 @@ The baseline was produced from current code using searches for `write_text`, `wr
 boundary. `qmt-agent storage inventory` emits one structured entry per real
 logical store: DuckDB, raw/silver/gold/metadata lake layers, factor/strategy
 registries, todos, experiments, sessions, canonical and legacy universes,
-approvals, order plans/events, reports, audit streams, and governed generated
-code. Cache, temp, locks, backups, and quarantine are excluded by construction.
+approvals, order plans/events, separate governed `reports/backtests` and
+`reports/research`, audit streams, and governed generated code at the production
+composition root `src/qmt_agent_trader/agent/generated`. Configured
+`reports/cache`, `reports/tool_payloads`, temp, locks, backups, and quarantine are
+excluded by construction.
 Each entry includes type, exact path, owner, truth role, schema version,
 mutability, lock resource, backup policy, and current presence.
 `StorageOperations` owns verify, migration delegation, local backup verification,
