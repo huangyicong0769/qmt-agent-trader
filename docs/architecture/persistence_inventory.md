@@ -89,3 +89,20 @@ The following direct production boundaries must later call shared storage APIs: 
 ## Evidence method
 
 The baseline was produced from current code using searches for `write_text`, `write_bytes`, append-mode `open`, `to_parquet`, `duckdb.connect`, DuckDB DDL/DML, `os.replace`, and all callers of the registry/store constructors and lake writers. No persistence behavior in this document is inferred from the refactor proposal alone.
+
+## Phase 6 operations reconciliation
+
+`PersistencePaths` is now the executable inventory boundary. `qmt-agent storage
+inventory` emits one structured entry for every canonical field other than the
+project container itself, including type, physical path, owner, truth role,
+schema version, mutability, lock policy, backup policy, and current presence.
+`StorageOperations` owns verify, migration delegation, local backup verification,
+lock diagnostics, and explicit quarantine; existing `data validate` and Tushare
+repair commands remain intact.
+
+An AST architecture test rejects new `Path.write_text`, `DataFrame.to_parquet`,
+direct `duckdb.connect`, and append-mode built-in `open` calls. The narrow
+allowlist covers only `AtomicFileStore.write_parquet` and
+`DatabaseCoordinator._open_connection`, the infrastructure owners documented
+above. Core tool-proposal and process-payload writes were migrated to
+`AtomicFileStore` rather than exempted.

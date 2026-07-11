@@ -54,6 +54,16 @@ This decision does not declare DuckDB permanently optimal for control state. A S
 
 The existing tables remain `tushare_usage_events_v1`, `tushare_usage_state_v1`, and `tushare_usage_migrations_v1`. The refactor preserves request-id conflict handling, redacted parameters, transaction rollback, legacy Parquet import, pending-archive resume, corruption quarantine and SHA-256 sidecar, history-reset warnings, structured `TushareUsageLedgerCorruptError`, and the repair command contract. Its `.tushare.lock` behavior is folded into—not run alongside—the global coordinator only after equivalent tests exist.
 
+### Trigger for reconsidering SQLite or a control service
+
+Phase 6 does not change persistence technology. A new ADR is required if measured
+evidence shows that the canonical lock order and DuckDB coordinator cannot meet
+documented writer concurrency, lock-wait, crash-recovery, or cross-host
+requirements. That ADR must include production workload measurements, migration
+and rollback of every governed table, recovery equivalence for the Tushare
+ledger, and an operational owner. Mere preference, hypothetical scale, or adding
+cloud/distributed support without a deployed requirement is not a trigger.
+
 ## Consequences and risks
 
 - Database writes become serial and may queue; the coordinator therefore needs bounded waits and metrics.
