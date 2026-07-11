@@ -5,6 +5,7 @@ from pathlib import Path
 
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools.strategy_tools import generate_research_report_tool
+from qmt_agent_trader.core.config import Settings
 
 
 def test_research_report_does_not_promote_failed_or_unverified_candidates(
@@ -12,6 +13,10 @@ def test_research_report_does_not_promote_failed_or_unverified_candidates(
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.tools.strategy_tools.get_settings",
+        lambda: Settings(project_root=tmp_path),
+    )
     reports = tmp_path / "reports" / "research"
     reports.mkdir(parents=True)
     (reports / "run_failed.json").write_text(
@@ -63,6 +68,10 @@ def test_research_report_returns_structured_evidence_summary(
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.tools.strategy_tools.get_settings",
+        lambda: Settings(project_root=tmp_path),
+    )
     reports = tmp_path / "reports" / "research"
     reports.mkdir(parents=True)
     (reports / "run_strategy.json").write_text(
