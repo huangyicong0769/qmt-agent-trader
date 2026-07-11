@@ -202,6 +202,19 @@ def test_diagnostics_report_orphan_missing_content_and_hash_mismatch(
     assert ("HASH_MISMATCH", "reports/tampered.json") in diagnostics
 
 
+def test_diagnostics_reject_manifest_filename_identity_substitution(
+    store: ArtifactStore,
+) -> None:
+    receipt = store.create("reports/good.json", b"good", metadata=_metadata("good"))
+    substituted = receipt.manifest_path.with_name("attacker.json")
+    receipt.manifest_path.rename(substituted)
+
+    diagnostics = {(item.code, item.relative_path) for item in store.diagnose()}
+
+    assert ("INVALID_MANIFEST", substituted.relative_to(store.root).as_posix()) in diagnostics
+    assert ("ORPHAN_ARTIFACT", "reports/good.json") in diagnostics
+
+
 def test_concurrent_create_has_exactly_one_winner(store: ArtifactStore) -> None:
     def create(content: bytes) -> str:
         try:

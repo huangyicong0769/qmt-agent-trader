@@ -327,6 +327,10 @@ class ArtifactStore:
         for path in sorted(manifest_root.glob("*.json")):
             try:
                 manifest = ArtifactManifest.model_validate_json(path.read_text(encoding="utf-8"))
+                if self.manifest_path_for(manifest.artifact_id) != path:
+                    raise ValueError("manifest filename does not bind artifact_id")
+                if manifest.relative_path in referenced_paths:
+                    raise ValueError("multiple manifests bind the same artifact path")
                 artifact_path = self.path_for(manifest.relative_path)
             except Exception as exc:
                 diagnostics.append(
