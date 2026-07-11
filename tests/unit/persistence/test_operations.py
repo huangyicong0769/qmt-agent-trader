@@ -8,9 +8,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.core.config import Settings
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import StorageBackupError, StorageValidationError
+from qmt_agent_trader.persistence.health import storage_health_payload
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
@@ -44,6 +47,52 @@ def test_verify_is_read_only_and_deep_detects_corrupt_parquet(
     assert before == after
     assert not result.healthy
     assert any(d.code == "PARQUET_CORRUPT" for d in result.diagnostics)
+
+
+def test_transient_report_cache_and_tool_payload_are_excluded_but_governed_reports_are_included(
+    operations: StorageOperations,
+) -> None:
+    cache = operations.paths.cache_root / "valid.json"
+    payload = operations.paths.reports_root / "tool_payloads/call.json"
+    cache.parent.mkdir(parents=True)
+    payload.parent.mkdir(parents=True)
+    cache.write_text('{"cache": true}')
+    payload.write_text('{"transport": true}')
+    report_root = operations.paths.reports_root / "research"
+    artifact_store_for_root(report_root).create(
+        "research_run.json",
+        b'{"governed": true}',
+        metadata=ArtifactMetadata(
+            artifact_id="research-run",
+            artifact_type="research_report",
+            producer="test",
+        ),
+    )
+
+    assert operations.verify(deep=True).healthy
+    receipt = operations.backup()
+    manifest = json.loads(receipt.manifest_path.read_text())
+    sources = {item["source"] for item in manifest["files"]}
+    assert "reports/research/research_run.json" in sources
+    assert not any("reports/cache" in item or "reports/tool_payloads" in item for item in sources)
+
+
+def test_composed_generated_code_root_is_verified_and_backed_up(
+    operations: StorageOperations,
+) -> None:
+    generated = operations.paths.project_root / "src/qmt_agent_trader/agent/generated"
+    sandbox = CodeSandbox(generated_root=generated, lock_manager=operations.locks)
+    sandbox.write_candidate_file(
+        "factors/factor.py", "# governed candidate", artifact_id="factor-candidate"
+    )
+
+    assert operations.catalog.by_name("generated_code").path == sandbox.generated_root
+    assert operations.verify(deep=True).healthy
+    manifest = json.loads(operations.backup().manifest_path.read_text())
+    assert any(
+        item["source"] == "src/qmt_agent_trader/agent/generated/factors/factor.py"
+        for item in manifest["files"]
+    )
 
 
 def test_backup_excludes_cache_temp_and_locks_and_verifies_hashes(
@@ -222,8 +271,47 @@ def test_quarantine_manifest_failure_rolls_source_back(
     assert not list((operations.paths.quarantine_root / "sessions").glob("*.quarantine"))
 
 
-def test_health_payload_is_structured_and_secret_safe(operations: StorageOperations) -> None:
-    payload = operations.health_payload(component="cache", reason="degraded token=secret")
+def test_quarantine_respects_allow_valid_legacy_artifact_policy(
+    operations: StorageOperations,
+) -> None:
+    legacy = operations.paths.approvals_root / "legacy.approval.yaml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("status: APPROVED\n")
+
+    with pytest.raises(StorageValidationError, match="valid"):
+        operations.quarantine("approvals", legacy.name)
+
+    assert legacy.exists()
+
+
+def test_quarantine_accepts_manifest_hash_corrupt_artifact(
+    operations: StorageOperations,
+) -> None:
+    root = operations.paths.approvals_root
+    store = artifact_store_for_root(root, lock_manager=operations.locks)
+    receipt = store.create(
+        "bad.approval.yaml",
+        b"status: APPROVED\n",
+        metadata=ArtifactMetadata(
+            artifact_id="bad-approval", artifact_type="approval", producer="test"
+        ),
+    )
+    receipt.path.write_text("status: TAMPERED\n")
+
+    quarantined = operations.quarantine("approvals", "bad.approval.yaml")
+
+    assert quarantined.path.exists()
+    assert not receipt.path.exists()
+
+
+def test_shared_health_payload_recursively_scrubs_all_diagnostics() -> None:
+    payload = storage_health_payload(
+        component="cache",
+        status="degraded",
+        reason="degraded token=secret",
+        warnings=["password=warning-secret"],
+        repair_action="retry api_key=repair-secret",
+    )
     assert set(payload) == {
         "storage_status",
         "storage_component",
@@ -231,7 +319,7 @@ def test_health_payload_is_structured_and_secret_safe(operations: StorageOperati
         "storage_warnings",
         "storage_repair_action",
     }
-    assert "secret" not in payload["storage_reason"]
+    assert "secret" not in json.dumps(payload).lower()
 
 
 def test_locks_report_maps_catalog_resources_and_marks_unknown(

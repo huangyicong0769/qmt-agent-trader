@@ -6,7 +6,6 @@ import ast
 import hashlib
 import json
 import os
-import re
 import shutil
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
@@ -139,6 +138,7 @@ class StorageOperations:
                     if (
                         artifact_diagnostic.code == "ORPHAN_ARTIFACT"
                         and store.legacy_policy == "allow_valid_legacy"
+                        and _parse_valid_legacy_artifact(root / artifact_diagnostic.relative_path)
                     ):
                         continue
                     diagnostics.append(
@@ -327,7 +327,14 @@ class StorageOperations:
         )
         manifest_path = target.with_suffix(target.suffix + ".json")
         with self.locks.resource_lock(source):
-            if _record_is_valid(source, definition.kind, definition.governed, root, self.locks):
+            if _record_is_valid(
+                source,
+                definition.kind,
+                definition.governed,
+                definition.legacy_policy,
+                root,
+                self.locks,
+            ):
                 raise StorageValidationError(
                     store_name="quarantine",
                     path=source,
@@ -358,23 +365,6 @@ class StorageOperations:
                 manifest_path.unlink(missing_ok=True)
                 raise
         return QuarantineReceipt(target, manifest_path)
-
-    def health_payload(
-        self,
-        *,
-        component: str,
-        reason: str = "",
-        warnings: list[str] | None = None,
-        repair_action: str | None = None,
-    ) -> dict[str, Any]:
-        safe_reason = re.sub(r"(?i)(token|secret|password|key)\s*=\s*\S+", r"\1=[REDACTED]", reason)
-        return {
-            "storage_status": "degraded" if reason or warnings else "ok",
-            "storage_component": component,
-            "storage_reason": safe_reason,
-            "storage_warnings": warnings or [],
-            "storage_repair_action": repair_action,
-        }
 
     def _iter_backup_files(self) -> Iterator[Path]:
         seen: set[Path] = set()
@@ -462,12 +452,26 @@ def _lock_is_active(path: Path) -> bool:
         return False
 
 
-def _record_is_valid(path: Path, kind: str, governed: bool, root: Path, locks: LockManager) -> bool:
+def _record_is_valid(
+    path: Path,
+    kind: str,
+    governed: bool,
+    legacy_policy: str,
+    root: Path,
+    locks: LockManager,
+) -> bool:
     try:
         if governed:
             diagnostics = artifact_store_for_root(root, lock_manager=locks).diagnose()
             relative = path.relative_to(root).as_posix()
-            return not any(item.relative_path == relative for item in diagnostics)
+            matching = [item for item in diagnostics if item.relative_path == relative]
+            if not matching:
+                return True
+            if legacy_policy == "allow_valid_legacy" and all(
+                item.code == "ORPHAN_ARTIFACT" for item in matching
+            ):
+                return _parse_valid_legacy_artifact(path)
+            return False
         if kind == "parquet":
             parquet = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
             for index in range(parquet.num_row_groups):
@@ -484,6 +488,21 @@ def _record_is_valid(path: Path, kind: str, governed: bool, root: Path, locks: L
             ast.parse(path.read_text(encoding="utf-8"))
         else:
             yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return True
+
+
+def _parse_valid_legacy_artifact(path: Path) -> bool:
+    try:
+        if path.suffix == ".json":
+            json.loads(path.read_text(encoding="utf-8"))
+        elif path.suffix in {".yaml", ".yml"}:
+            yaml.safe_load(path.read_text(encoding="utf-8"))
+        elif path.suffix == ".py":
+            ast.parse(path.read_text(encoding="utf-8"))
+        else:
+            return bool(path.read_text(encoding="utf-8").strip())
     except Exception:
         return False
     return True

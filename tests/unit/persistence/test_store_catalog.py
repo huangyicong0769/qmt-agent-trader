@@ -24,7 +24,8 @@ def test_catalog_names_every_real_store_and_excludes_operational_roots(tmp_path:
         "legacy_universes",
         "approvals",
         "order_plans",
-        "reports",
+        "backtest_reports",
+        "research_reports",
         "audit",
         "generated_code",
     }
@@ -32,6 +33,11 @@ def test_catalog_names_every_real_store_and_excludes_operational_roots(tmp_path:
     assert by_name["factor_registry"].path == paths.data_root / "factors/registry.json"
     assert by_name["universes"].path == paths.registries_root / "universes"
     assert by_name["legacy_universes"].path == paths.data_root / "universes/registry"
+    assert by_name["generated_code"].path == (
+        paths.project_root / "src/qmt_agent_trader/agent/generated"
+    )
+    assert by_name["backtest_reports"].path == paths.reports_root / "backtests"
+    assert by_name["research_reports"].path == paths.reports_root / "research"
     excluded = {paths.cache_root, paths.locks_root, paths.backup_root, paths.quarantine_root}
     assert not excluded & {store.path for store in catalog.stores}
     assert all(store.owner and store.lock_resource and store.backup for store in catalog.stores)
