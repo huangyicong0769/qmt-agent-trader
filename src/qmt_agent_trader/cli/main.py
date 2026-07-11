@@ -624,7 +624,7 @@ def backtest_run(
     try:
         summary = run_backtest_report(
             _data_lake(),
-            reports_dir=Path("reports/backtests"),
+            reports_dir=PersistencePaths.from_settings(_settings()).reports_root / "backtests",
             symbol=symbol,
             signal_date=signal_date,
             quantity=quantity,
@@ -640,7 +640,12 @@ def backtest_run(
 
 @backtest_app.command("compare")
 def backtest_compare(runs: str = "latest-10") -> None:
-    print_json(compare_backtest_reports(Path("reports/backtests"), limit=_parse_latest_limit(runs)))
+    print_json(
+        compare_backtest_reports(
+            PersistencePaths.from_settings(_settings()).reports_root / "backtests",
+            limit=_parse_latest_limit(runs),
+        )
+    )
 
 
 @agent_app.command("discover-factors")

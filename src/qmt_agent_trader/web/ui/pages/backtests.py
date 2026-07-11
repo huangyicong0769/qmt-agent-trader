@@ -8,15 +8,19 @@ diagnostic checks, trade blotter, and sensitivity analysis.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from nicegui import ui
 
+from qmt_agent_trader.core.config import get_settings
+from qmt_agent_trader.persistence.artifacts import ArtifactManifest, artifact_store_for_root
+from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.web.ui.layout import shell
 
-REPORTS_ROOT = Path("reports")
+logger = logging.getLogger(__name__)
 
 
 # ── Data model ──
@@ -41,17 +45,27 @@ class ReportMeta:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def _load_reports() -> list[ReportMeta]:
+def _load_reports(reports_root: Path | None = None) -> list[ReportMeta]:
+    root = reports_root or PersistencePaths.from_settings(get_settings()).reports_root
     results: list[ReportMeta] = []
     for glob_pattern in ("backtests/bt_*.json", "research/research_*.json"):
         for p in sorted(
-            REPORTS_ROOT.glob(glob_pattern),
+            root.glob(glob_pattern),
             key=lambda x: x.stat().st_mtime,
             reverse=True,
         ):
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
+                store = artifact_store_for_root(p.parent)
+                manifests = [
+                    ArtifactManifest.model_validate_json(item.read_text(encoding="utf-8"))
+                    for item in (p.parent / ".manifests").glob("*.json")
+                ]
+                manifest = next(item for item in manifests if item.relative_path == p.name)
+                data = json.loads(
+                    store.read_verified(manifest.artifact_id, expected_relative_path=p.name)
+                )
+            except Exception as exc:
+                logger.warning("governed report excluded: %s (%s)", p, type(exc).__name__)
                 continue
             results.append(_parse_report(p, data))
     return results

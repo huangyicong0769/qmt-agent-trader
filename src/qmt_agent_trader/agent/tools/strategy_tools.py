@@ -33,6 +33,7 @@ from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
+from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
@@ -680,7 +681,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             lake,
             _strategy_registry(),
             config,
-            reports_dir=Path("reports/research"),
+            reports_dir=PersistencePaths.from_settings(get_settings()).reports_root / "research",
         )
     except ValueError as exc:
         blocked = _blocked_backtest_from_value_error(
@@ -1025,7 +1026,11 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
     sections = input_data.get("include_sections", ["summary", "metrics"])
 
     sb = _get_sandbox()
-    reports_root = sb.generated_root / "reports" if sb else Path("reports/research")
+    reports_root = (
+        sb.generated_root / "reports"
+        if sb
+        else PersistencePaths.from_settings(get_settings()).reports_root / "research"
+    )
     report_id = new_id("report")
 
     store = _get_store()
@@ -1405,7 +1410,8 @@ def _map_strategy_factor(strategy_id: str) -> str | None:
 
 
 def _load_run_artifact(run_id: str) -> dict[str, Any] | None:
-    for root in (Path("reports/research"), Path("reports/backtests")):
+    paths = PersistencePaths.from_settings(get_settings())
+    for root in (paths.reports_root / "research", paths.reports_root / "backtests"):
         path = root / f"{run_id}.json"
         if not path.exists():
             continue
@@ -1660,7 +1666,11 @@ def _factor_registry_root(lake: DataLake) -> Path:
 
 def _strategy_registry() -> StrategyRegistry:
     lake = _get_lake()
-    root = lake.root.parent / "strategies" if lake is not None else Path("data/strategies")
+    root = (
+        lake.root.parent / "strategies"
+        if lake is not None
+        else PersistencePaths.from_settings(get_settings()).data_root / "strategies"
+    )
     if lake is None:
         return StrategyRegistry(root)
     return StrategyRegistry(
