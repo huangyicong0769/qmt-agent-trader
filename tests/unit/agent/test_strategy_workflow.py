@@ -350,6 +350,8 @@ def test_generate_research_report_includes_evidence_limitations_and_gaps(registr
     )
 
     text = Path(result["report_path"]).read_text(encoding="utf-8")
+    assert Path(result["manifest_path"]).exists()
+    assert result["storage_status"]["status"] == "VERIFIED"
     assert "## Evidence Status" in text
     assert "## Effective Candidates / 有效候选" in text
     assert "## Failed Candidates / 失败候选" in text

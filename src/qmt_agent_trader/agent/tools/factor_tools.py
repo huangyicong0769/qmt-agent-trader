@@ -203,14 +203,26 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
         return {"status": "error", "message": "sandbox not wired"}
 
     try:
-        code_path = sb.write_candidate_file(f"factors/drafts/{factor_id}/factor.py", factor_code)
+        code_path = sb.write_candidate_file(
+            f"factors/drafts/{factor_id}/factor.py",
+            factor_code,
+            artifact_id=f"factor:{factor_id}:implementation",
+            related_run_id=context.run_id,
+            related_factor_id=factor_id,
+        )
         tests_path = sb.write_candidate_file(
             f"factors/drafts/{factor_id}/test_factor.py",
             test_code,
+            artifact_id=f"factor:{factor_id}:tests",
+            related_run_id=context.run_id,
+            related_factor_id=factor_id,
         )
         spec_path = sb.write_candidate_file(
             f"factors/drafts/{factor_id}/factor_spec.json",
             spec_code,
+            artifact_id=f"factor:{factor_id}:spec",
+            related_run_id=context.run_id,
+            related_factor_id=factor_id,
         )
         sample_result = _run_factor_sample_test(code_path, spec_data)
         real_schema_result = _run_factor_real_schema_test(spec_data)

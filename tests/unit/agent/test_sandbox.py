@@ -17,6 +17,26 @@ def test_write_inside_sandbox(sandbox: CodeSandbox) -> None:
     path = sandbox.write_candidate_file("factors/my_factor.py", "# safe code")
     assert path.exists()
     assert "generated" in str(path)
+    assert len(list((sandbox.generated_root / ".manifests").glob("*.json"))) == 1
+
+
+def test_generated_code_is_create_only_by_candidate_identity(sandbox: CodeSandbox) -> None:
+    path = sandbox.write_candidate_file(
+        "factors/drafts/factor_1/factor.py",
+        "# immutable candidate v1",
+        artifact_id="factor_1:factor.py",
+        related_factor_id="factor_1",
+    )
+
+    with pytest.raises(Exception, match="already exists"):
+        sandbox.write_candidate_file(
+            "factors/drafts/factor_1/factor.py",
+            "# silently replaced v2",
+            artifact_id="factor_1:factor.py",
+            related_factor_id="factor_1",
+        )
+
+    assert path.read_text(encoding="utf-8") == "# immutable candidate v1"
 
 
 def test_write_dotenv_rejected(sandbox: CodeSandbox) -> None:

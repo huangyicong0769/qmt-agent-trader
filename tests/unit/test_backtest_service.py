@@ -83,6 +83,7 @@ def test_run_backtest_report_persists_report(tmp_path) -> None:
     compared = compare_backtest_reports(reports_dir, limit=1)
 
     assert summary.report_path is not None
+    assert len(list((reports_dir / ".manifests").glob("*.json"))) == 1
     assert compared["status"] == "compared"
     assert len(compared["runs"]) == 1
     report = compared["runs"][0]

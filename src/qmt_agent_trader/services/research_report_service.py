@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 
 
 def save_research_report(
@@ -21,8 +22,6 @@ def save_research_report(
 ) -> dict[str, object]:
     """Persist an immutable research artifact and return a compact receipt."""
     run_id = new_id("research")
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"{run_id}.json"
     record = {
         "run_id": run_id,
         "created_at": shanghai_now_iso(),
@@ -44,7 +43,20 @@ def save_research_report(
         "agent_notes": agent_notes,
         "infrastructure_requests": _normalize_requests(infrastructure_requests),
     }
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    content = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
+    receipt = artifact_store_for_root(reports_dir).create(
+        f"{run_id}.json",
+        content,
+        metadata=ArtifactMetadata(
+            artifact_id=run_id,
+            artifact_type=artifact_type,
+            producer="services.research_report_service.save_research_report",
+            related_run_id=run_id,
+            related_strategy_id=_metadata_id(metadata, "strategy_id"),
+            related_factor_id=_metadata_id(metadata, "factor_id", "factor_name"),
+        ),
+    )
+    path = receipt.path
     return {
         "status": "saved",
         "run_id": run_id,
@@ -56,7 +68,23 @@ def save_research_report(
         "summary": record["summary"],
         "review_gate": record["review_gate"],
         "infrastructure_requests": record["infrastructure_requests"],
+        "storage_status": {
+            "status": "VERIFIED",
+            "component": "artifact_store",
+            "reason": None,
+            "warnings": [],
+            "repair_action": None,
+        },
     }
+
+
+def _metadata_id(metadata: dict[str, object] | None, *keys: str) -> str | None:
+    values = metadata or {}
+    for key in keys:
+        value = values.get(key)
+        if value is not None and str(value):
+            return str(value)
+    return None
 
 
 def compare_research_reports(reports_dir: Path, *, limit: int = 10) -> dict[str, object]:

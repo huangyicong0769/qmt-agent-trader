@@ -34,6 +34,9 @@ def test_save_research_report_marks_artifact_as_research_only(tmp_path) -> None:
     assert record["decision_boundary"]["can_approve_strategy"] is False
     assert record["summary"]["scenario_count"] == 2
     assert record["review_gate"]["status"] == "INSUFFICIENT_EVIDENCE"
+    assert receipt["storage_status"]["component"] == "artifact_store"
+    assert receipt["storage_status"]["status"] == "VERIFIED"
+    assert len(list((reports_dir / ".manifests").glob("*.json"))) == 1
 
 
 def test_compare_research_reports_returns_compact_summaries(tmp_path) -> None:

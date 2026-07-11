@@ -23,6 +23,7 @@ from qmt_agent_trader.data.providers.tushare.registry import default_tushare_reg
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 from qmt_agent_trader.strategy.models import FactorLeg, StrategySpec
@@ -253,12 +254,19 @@ def run_strategy_backtest(
         "diagnostics": diagnostics,
         "payload": result_dict,
     }
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    report_path = reports_dir / f"{run_id}.json"
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
+    receipt = artifact_store_for_root(reports_dir, lock_manager=lake.lock_manager).create(
+        f"{run_id}.json",
+        json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+        metadata=ArtifactMetadata(
+            artifact_id=run_id,
+            artifact_type="strategy_backtest_report",
+            producer="strategy.execution_adapter.run_strategy_backtest",
+            related_run_id=run_id,
+            related_strategy_id=config.strategy_id,
+            related_factor_id=factor_ids[0] if len(factor_ids) == 1 else None,
+        ),
     )
+    report_path = receipt.path
     return StrategyBacktestResult(
         run_id=run_id,
         strategy_id=config.strategy_id,

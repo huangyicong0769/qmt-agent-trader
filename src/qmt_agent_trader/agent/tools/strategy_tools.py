@@ -30,6 +30,7 @@ from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
 from qmt_agent_trader.strategy.execution_adapter import (
@@ -210,10 +211,16 @@ def _generate_strategy_code(input_data: dict[str, Any], context: ToolContext) ->
         code_path = sb.write_candidate_file(
             f"strategies/drafts/{strategy_id}/strategy.py",
             strategy_code,
+            artifact_id=f"strategy:{strategy_id}:implementation",
+            related_run_id=context.run_id,
+            related_strategy_id=strategy_id,
         )
         tests_path = sb.write_candidate_file(
             f"strategies/drafts/{strategy_id}/test_strategy.py",
             test_code,
+            artifact_id=f"strategy:{strategy_id}:tests",
+            related_run_id=context.run_id,
+            related_strategy_id=strategy_id,
         )
         return {
             "code_path": str(code_path),
@@ -1011,8 +1018,7 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
 
     sb = _get_sandbox()
     reports_root = sb.generated_root / "reports" if sb else Path("reports/research")
-    reports_root.mkdir(parents=True, exist_ok=True)
-    report_path = reports_root / f"{exp_id}.md"
+    report_id = new_id("report")
 
     store = _get_store()
     experiment_meta = {}
@@ -1102,11 +1108,42 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
             lines.append(f"- {lesson}")
         lines.append("")
 
-    report_path.write_text("\n".join(lines), encoding="utf-8")
+    content = "\n".join(lines)
+    if sb is not None:
+        receipt = sb.artifact_store.create(
+            f"reports/{exp_id}/{report_id}.md",
+            content.encode("utf-8"),
+            metadata=ArtifactMetadata(
+                artifact_id=report_id,
+                artifact_type="research_markdown_report",
+                producer="agent.tools.strategy_tools.generate_research_report",
+                related_run_id=str(run_ids[0]) if run_ids else context.run_id,
+            ),
+        )
+    else:
+        receipt = artifact_store_for_root(reports_root).create(
+            f"{exp_id}/{report_id}.md",
+            content.encode("utf-8"),
+            metadata=ArtifactMetadata(
+                artifact_id=report_id,
+                artifact_type="research_markdown_report",
+                producer="agent.tools.strategy_tools.generate_research_report",
+                related_run_id=str(run_ids[0]) if run_ids else context.run_id,
+            ),
+        )
+    report_path = receipt.path
     return {
         "report_path": str(report_path),
+        "manifest_path": str(receipt.manifest_path),
         "summary": lines[0],
         "evidence_summary": evidence_summary,
+        "storage_status": {
+            "status": "VERIFIED",
+            "component": "artifact_store",
+            "reason": None,
+            "warnings": [],
+            "repair_action": None,
+        },
     }
 
 

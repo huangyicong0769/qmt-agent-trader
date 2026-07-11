@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 
 from qmt_agent_trader.core.ids import shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
+from qmt_agent_trader.persistence.artifacts import (
+    ArtifactMetadata,
+    ArtifactStore,
+    artifact_store_for_root,
+)
 
 ALLOWED_TRANSITIONS: dict[ApprovalStatus, set[ApprovalStatus]] = {
     ApprovalStatus.DRAFT: {
@@ -47,15 +52,35 @@ def transition_status(current: ApprovalStatus, target: ApprovalStatus) -> Approv
     return target
 
 
-def write_approval_file(approval: StrategyApproval, directory: Path) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{approval.strategy_id}_{approval.strategy_version}.approval.yaml"
-    path.write_text(
-        yaml.safe_dump(approval.model_dump(mode="json"), sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
+def write_approval_file(
+    approval: StrategyApproval,
+    directory: Path,
+    *,
+    artifact_store: ArtifactStore | None = None,
+) -> Path:
+    filename = f"{approval.strategy_id}_{approval.strategy_version}.approval.yaml"
+    store = artifact_store or artifact_store_for_root(directory)
+    content = yaml.safe_dump(
+        approval.model_dump(mode="json"), sort_keys=False, allow_unicode=True
+    ).encode("utf-8")
+    receipt = store.create(
+        filename,
+        content,
+        metadata=ArtifactMetadata(
+            artifact_id=_approval_artifact_id(filename),
+            artifact_type="strategy_approval",
+            producer="strategy.approval.write_approval_file",
+            related_strategy_id=approval.strategy_id,
+        ),
     )
-    return path
+    return receipt.path
 
 
 def read_approval_file(path: Path) -> StrategyApproval:
-    return StrategyApproval.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    store = artifact_store_for_root(path.parent)
+    content = store.read_verified(_approval_artifact_id(path.name))
+    return StrategyApproval.model_validate(yaml.safe_load(content))
+
+
+def _approval_artifact_id(filename: str) -> str:
+    return f"approval:{filename}"

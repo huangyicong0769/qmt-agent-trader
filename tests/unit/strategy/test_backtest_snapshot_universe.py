@@ -76,6 +76,15 @@ def test_snapshot_backtest_uses_one_fixed_resolved_symbol_set(
     assert result["universe_spec_fingerprint"]
 
     report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
+    manifests = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (Path(result["report_path"]).parent / ".manifests").glob("*.json")
+    ]
+    assert any(
+        manifest["relative_path"] == Path(result["report_path"]).name
+        and manifest["related_run_id"] == result["run_id"]
+        for manifest in manifests
+    )
     assert report["config"]["universe_mode"] == "snapshot"
     assert report["config"]["symbols"] == ["000001.SZ", "000002.SZ"]
     assert report["config"]["symbols_by_date"] is None

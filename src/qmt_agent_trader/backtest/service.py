@@ -13,6 +13,7 @@ from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import Side
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 
 
@@ -94,9 +95,17 @@ def run_backtest_report(
         quantity=quantity,
     )
     report = _build_report(summary, config_path=config_path)
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    report_path = reports_dir / f"{summary.run_id}.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    receipt = artifact_store_for_root(reports_dir).create(
+        f"{summary.run_id}.json",
+        json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+        metadata=ArtifactMetadata(
+            artifact_id=summary.run_id,
+            artifact_type="backtest_report",
+            producer="backtest.service.run_backtest_report",
+            related_run_id=summary.run_id,
+        ),
+    )
+    report_path = receipt.path
     return BacktestRunSummary(
         run_id=summary.run_id,
         symbol=summary.symbol,

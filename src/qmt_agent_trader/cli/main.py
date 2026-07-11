@@ -57,14 +57,17 @@ from qmt_agent_trader.data.providers.tushare.quota import (
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.table_builder import DataTableBuilder
 from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_factor
+from qmt_agent_trader.persistence.artifacts import ArtifactStore, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
+    append_order_plan_event,
     build_sample_paper_order_plan,
     load_order_plan,
+    load_order_plan_events,
     save_order_plan,
 )
 from qmt_agent_trader.strategy.approval import StrategyApproval, write_approval_file
@@ -91,6 +94,18 @@ app.add_typer(trade_app, name="trade")
 
 def _settings() -> Settings:
     return get_settings()
+
+
+def _artifact_store(root: Path) -> ArtifactStore:
+    settings = _settings()
+    paths = PersistencePaths.from_settings(settings)
+    return artifact_store_for_root(
+        root,
+        lock_manager=LockManager(
+            paths.locks_root,
+            timeout_seconds=settings.remote_data_lock_timeout_seconds,
+        ),
+    )
 
 
 def _strategy_registry() -> StrategyRegistry:
@@ -828,7 +843,12 @@ def strategy_approve(
         paper_trading_allowed=True,
         notes="First approval for paper trading only.",
     )
-    path = write_approval_file(approval, Path("approvals"))
+    paths = PersistencePaths.from_settings(_settings())
+    path = write_approval_file(
+        approval,
+        paths.approvals_root,
+        artifact_store=_artifact_store(paths.approvals_root),
+    )
     registry.attach_approval(strategy_id, str(path))
     registry.update_status(strategy_id, ApprovalStatus.APPROVED, trusted=True)
     print_json({"status": "APPROVED", "paper_only": paper_only, "path": str(path)})
@@ -857,7 +877,12 @@ def broker_asset() -> None:
 @trade_app.command("generate-plan")
 def trade_generate_plan(strategy_id: Annotated[str, typer.Option("--strategy-id")]) -> None:
     plan = build_sample_paper_order_plan(strategy_id)
-    path = save_order_plan(plan, Path("order_plans"))
+    paths = PersistencePaths.from_settings(_settings())
+    path = save_order_plan(
+        plan,
+        paths.order_plans_root,
+        artifact_store=_artifact_store(paths.order_plans_root),
+    )
     print_json({"status": "generated", "path": str(path), "plan_hash": plan.plan_hash})
 
 
@@ -872,12 +897,21 @@ def trade_risk_check(plan: Annotated[str, typer.Option("--plan")]) -> None:
         "checks": [check.model_dump(mode="json") for check in result.checks],
     }
     _audit_logger("trade").append("trade.risk_check", "cli", payload)
+    append_order_plan_event(
+        order_plan.order_plan_id,
+        directory=PersistencePaths.from_settings(_settings()).order_plans_root,
+        event_type="RISK_CHECKED",
+        actor="cli",
+        details={"status": result.status.value},
+    )
     print_json(payload)
 
 
 @trade_app.command("paper")
 def trade_paper(plan: Annotated[str, typer.Option("--plan")]) -> None:
     order_plan = _load_plan_or_error(plan)
+    plans_root = PersistencePaths.from_settings(_settings()).order_plans_root
+    event_history = load_order_plan_events(order_plan.order_plan_id, plans_root)
     result = run_order_plan_risk_checks(order_plan)
     if result.status != RiskStatus.PASSED:
         raise typer.BadParameter("risk checks failed")
@@ -892,8 +926,16 @@ def trade_paper(plan: Annotated[str, typer.Option("--plan")]) -> None:
         "live": False,
         "idempotency_key": order_plan.idempotency_key,
         "plan_hash": order_plan.plan_hash,
+        "event_history_count": len(event_history),
     }
     _audit_logger("trade").append("trade.paper", "cli", payload)
+    append_order_plan_event(
+        order_plan.order_plan_id,
+        directory=plans_root,
+        event_type="PAPER_ACCEPTED",
+        actor="cli",
+        details={"live": False, "idempotency_key": order_plan.idempotency_key},
+    )
     print_json(payload)
 
 
@@ -984,7 +1026,10 @@ def print_json(payload: object) -> None:
 
 def _load_plan_or_error(identifier: str) -> OrderPlan:
     try:
-        return load_order_plan(identifier)
+        return load_order_plan(
+            identifier,
+            PersistencePaths.from_settings(_settings()).order_plans_root,
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 

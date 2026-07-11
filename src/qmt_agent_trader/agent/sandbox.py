@@ -16,6 +16,8 @@ from pathlib import Path
 from qmt_agent_trader.agent.errors import SandboxPathError, SandboxSecurityError
 from qmt_agent_trader.agent.schemas import SandboxTestResult
 from qmt_agent_trader.core.config import get_settings
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
+from qmt_agent_trader.persistence.locks import LockManager
 
 # ── Forbidden patterns ───────────────────────────────────────────────────────
 
@@ -79,7 +81,12 @@ _ALLOWED_IMPORT_PREFIXES: tuple[str, ...] = (
 class CodeSandbox:
     """Path-limited, statically-scanned code sandbox for LLM-generated files."""
 
-    def __init__(self, generated_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        generated_root: Path | None = None,
+        *,
+        lock_manager: LockManager | None = None,
+    ) -> None:
         if generated_root is None:
             settings = get_settings()
             generated_root = (
@@ -91,6 +98,10 @@ class CodeSandbox:
             )
         self.generated_root = generated_root.resolve()
         self.generated_root.mkdir(parents=True, exist_ok=True)
+        self.artifact_store = artifact_store_for_root(
+            self.generated_root,
+            lock_manager=lock_manager,
+        )
 
         global _ALLOWED_WRITE_ROOTS
         if not _ALLOWED_WRITE_ROOTS:
@@ -111,7 +122,16 @@ class CodeSandbox:
             )
         return candidate
 
-    def write_candidate_file(self, relative_path: str, content: str) -> Path:
+    def write_candidate_file(
+        self,
+        relative_path: str,
+        content: str,
+        *,
+        artifact_id: str | None = None,
+        related_run_id: str | None = None,
+        related_strategy_id: str | None = None,
+        related_factor_id: str | None = None,
+    ) -> Path:
         """Scan, then write a candidate file. Raises on scan failure."""
         # Path-name check
         name = Path(str(relative_path)).name.lower()
@@ -125,9 +145,19 @@ class CodeSandbox:
                 "static scan failed:\n" + "\n".join(f"  - {i}" for i in issues)
             )
         target = self.validate_path(relative_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return target
+        receipt = self.artifact_store.create(
+            target.relative_to(self.generated_root),
+            content.encode("utf-8"),
+            metadata=ArtifactMetadata(
+                artifact_id=artifact_id or f"generated:{relative_path}",
+                artifact_type="generated_code",
+                producer="agent.sandbox.CodeSandbox.write_candidate_file",
+                related_run_id=related_run_id,
+                related_strategy_id=related_strategy_id,
+                related_factor_id=related_factor_id,
+            ),
+        )
+        return receipt.path
 
     # ── Static analysis ───────────────────────────────────────────────────
 
