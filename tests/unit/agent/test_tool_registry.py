@@ -18,6 +18,7 @@ from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_registry import AgentToolRegistry, ToolDefinition, ToolRegistry
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.errors import PermissionDeniedError
+from qmt_agent_trader.persistence.errors import StorageCorruptError
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -127,8 +128,7 @@ def test_run_tool_writes_started_audit_for_llm_calls(tmp_path) -> None:
     )
 
     entries = [
-        json.loads(line)
-        for line in audit.log_path.read_text(encoding="utf-8").strip().split("\n")
+        json.loads(line) for line in audit.log_path.read_text(encoding="utf-8").strip().split("\n")
     ]
     assert [entry["status"] for entry in entries] == [
         "started",
@@ -152,9 +152,7 @@ def test_run_forbidden_tool_raises() -> None:
 
 def test_run_approval_required_by_llm_raises() -> None:
     reg = AgentToolRegistry()
-    reg.register(
-        _echo_tool("needs_human", permission=PermissionLevel.APPROVAL_REQUIRED)
-    )
+    reg.register(_echo_tool("needs_human", permission=PermissionLevel.APPROVAL_REQUIRED))
     with pytest.raises(PermissionDeniedError):
         reg.run_tool(
             "needs_human",
@@ -183,6 +181,27 @@ def test_run_tool_error_is_audited(tmp_path) -> None:
     with pytest.raises(ToolExecutionError):
         reg.run_tool("fragile", {}, ToolContext(run_id="r5"))
     assert audit.log_path.exists()
+
+
+def test_storage_error_returns_secret_safe_structured_health(tmp_path) -> None:
+    reg = AgentToolRegistry(audit_logger=AuditLogger(tmp_path / "audit.jsonl"))
+
+    def fail(_data: dict, _context: ToolContext) -> dict:
+        raise StorageCorruptError(
+            store_name="sessions",
+            operation="read",
+            reason="token=super-secret corrupt bytes",
+            recoverable=True,
+            suggested_repair="run repair password=also-secret",
+        )
+
+    reg.register(tool(ToolSpec(name="storage_fail", description="x"), fn=fail))
+    result = reg.run_tool("storage_fail", {}, ToolContext(run_id="storage-run"))
+
+    assert result["storage_status"] == "corrupt"
+    assert result["storage_component"] == "sessions"
+    assert "secret" not in json.dumps(result).lower()
+    assert result["execution_status"] == "ERROR"
 
 
 def test_run_tool_timeout_returns_structured_result_and_audits(tmp_path) -> None:
@@ -339,10 +358,13 @@ def test_agent_registry_legacy_bridge_uses_context_factory() -> None:
     reg.register(
         tool(
             ToolSpec(name="echo_context", description="Echo context"),
-            fn=lambda data, context: seen_contexts.append(context) or {
-                "run_id": context.run_id,
-                "experiment_id": context.experiment_id,
-            },
+            fn=lambda data, context: (
+                seen_contexts.append(context)
+                or {
+                    "run_id": context.run_id,
+                    "experiment_id": context.experiment_id,
+                }
+            ),
         )
     )
 

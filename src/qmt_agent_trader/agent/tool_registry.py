@@ -17,7 +17,7 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
-from qmt_agent_trader.agent.audit import AuditLogger
+from qmt_agent_trader.agent.audit import AuditLogger, scrub_sensitive
 from qmt_agent_trader.agent.errors import ToolDuplicateError, ToolExecutionError, ToolNotFoundError
 from qmt_agent_trader.agent.llm_client import DeepSeekTool
 from qmt_agent_trader.agent.permissions import (
@@ -40,6 +40,12 @@ from qmt_agent_trader.agent.tool_result import (
 )
 from qmt_agent_trader.agent.tools.base import AgentTool
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.errors import (
+    StorageConflictError,
+    StorageCorruptError,
+    StorageError,
+    StorageLockTimeoutError,
+)
 from qmt_agent_trader.persistence.locks import LockManager
 
 _PROCESS_PAYLOAD_SPILL_BYTES = 1_000_000
@@ -243,6 +249,9 @@ class AgentToolRegistry:
                 "duration_ms": int(time.monotonic() * 1000) - start_ms,
                 "kill_attempted": False,
             }
+        except StorageError as exc:
+            execution_status = ExecutionStatus.ERROR
+            result = _storage_error_payload(exc)
         except Exception as exc:
             execution_status = (
                 ExecutionStatus.PERMISSION_DENIED
@@ -387,6 +396,29 @@ class AgentToolRegistry:
                 )
             except Exception:
                 pass  # audit failure must not break tool execution
+
+
+def _storage_error_payload(exc: StorageError) -> dict[str, Any]:
+    if isinstance(exc, StorageCorruptError):
+        status = "corrupt"
+    elif isinstance(exc, StorageLockTimeoutError):
+        status = "locked"
+    elif isinstance(exc, StorageConflictError):
+        status = "conflict"
+    else:
+        status = "degraded"
+    payload = {
+        "status": "STORAGE_ERROR",
+        "storage_status": status,
+        "storage_component": exc.store_name,
+        "storage_reason": exc.reason,
+        "storage_warnings": [],
+        "storage_repair_action": exc.suggested_repair,
+    }
+    scrubbed = scrub_sensitive(payload)
+    if not isinstance(scrubbed, dict):  # pragma: no cover - fixed root shape
+        raise TypeError("storage error payload must remain an object")
+    return scrubbed
 
 
 def _llm_input_schema(schema: dict[str, Any]) -> dict[str, Any]:

@@ -170,6 +170,11 @@ class AuditLogger:
         return datetime.datetime.now(tz=datetime.UTC).isoformat()
 
 
+def scrub_sensitive(value: Any) -> Any:
+    """Apply the audit subsystem's recursive credential scrub to public diagnostics."""
+    return _scrub_value(value)
+
+
 _SAFE_TELEMETRY_NAMES = frozenset(
     {
         "completiontokens",
@@ -235,7 +240,7 @@ def _redact_assignments(value: str) -> str:
         if not _is_credential_key(match.group("name")):
             return match.group(0)
         assigned = match.group("value")
-        if assigned[:1] in {"\"", "'"} and assigned[-1:] == assigned[:1]:
+        if assigned[:1] in {'"', "'"} and assigned[-1:] == assigned[:1]:
             redacted = f"{assigned[0]}[scrubbed]{assigned[0]}"
         else:
             redacted = "[scrubbed]"
