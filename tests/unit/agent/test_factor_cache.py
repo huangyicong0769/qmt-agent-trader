@@ -1,22 +1,32 @@
 from __future__ import annotations
 
 from qmt_agent_trader.agent.tools import cache
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.cache import ContentAddressedCache
+from qmt_agent_trader.persistence.locks import LockManager
 
 
-def test_cached_validation_without_freshness_fields_is_ignored(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(cache, "CACHE_ROOT", tmp_path)
+def _store(tmp_path):
+    return ContentAddressedCache(
+        tmp_path / "cache", AtomicFileStore(LockManager(tmp_path / "locks"))
+    )
+
+
+def test_cached_validation_without_freshness_fields_is_ignored(tmp_path) -> None:
+    store = _store(tmp_path)
     cache.put_cached_validation(
         "factor_a",
         "20240101",
         "20240131",
         {"status": "validated", "name": "factor_a"},
+        store,
     )
 
-    assert cache.get_cached_validation("factor_a", "20240101", "20240131") is None
+    assert cache.get_cached_validation("factor_a", "20240101", "20240131", store) is None
 
 
-def test_cached_validation_with_freshness_fields_is_returned(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(cache, "CACHE_ROOT", tmp_path)
+def test_cached_validation_with_freshness_fields_is_returned(tmp_path) -> None:
+    store = _store(tmp_path)
     result = {
         "status": "validated",
         "name": "factor_a",
@@ -24,8 +34,8 @@ def test_cached_validation_with_freshness_fields_is_returned(tmp_path, monkeypat
         "actual_data_end": "20240131",
         "data_freshness": "covers_requested_end",
     }
-    cache.put_cached_validation("factor_a", "20240101", "20240131", result)
+    cache.put_cached_validation("factor_a", "20240101", "20240131", result, store)
 
-    cached = cache.get_cached_validation("factor_a", "20240101", "20240131")
+    cached = cache.get_cached_validation("factor_a", "20240101", "20240131", store)
 
     assert cached == result

@@ -8,6 +8,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.audit import AuditJsonlStore
+from qmt_agent_trader.persistence.locks import LockManager
+
 
 @dataclass
 class AuditEntry:
@@ -39,7 +43,17 @@ class AuditEntry:
 @dataclass
 class AuditLogger:
     log_path: Path
+    atomic_store: AtomicFileStore | None = None
+    fsync: bool = True
+    rotation_bytes: int | None = None
     _entry_cache: list[AuditEntry] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.log_path = self.log_path.expanduser().resolve()
+        store = self.atomic_store or AtomicFileStore(LockManager(self.log_path.parent / ".locks"))
+        self._store = AuditJsonlStore(
+            self.log_path, store, fsync=self.fsync, rotation_bytes=self.rotation_bytes
+        )
 
     def append(
         self,
@@ -95,17 +109,14 @@ class AuditLogger:
         self._flush_one(entry)
 
     def _flush_one(self, entry: AuditEntry) -> None:
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(self._entry_dict(entry), ensure_ascii=False, default=str)
-        with open(self.log_path, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        self._store.append(self._entry_dict(entry))
 
     def flush(self) -> None:
         pass  # each append already flushes
 
     @staticmethod
     def _entry_dict(entry: AuditEntry) -> dict[str, object]:
-        return {
+        value = {
             "timestamp": entry.timestamp,
             "run_id": entry.run_id,
             "session_id": entry.session_id,
@@ -130,6 +141,10 @@ class AuditLogger:
             "next_repair_tool": entry.next_repair_tool,
             "output_data": entry.output_data,
         }
+        scrubbed = _scrub_value(value)
+        if not isinstance(scrubbed, dict):  # pragma: no cover - root shape is fixed above
+            raise TypeError("audit entry must remain an object after secret scrubbing")
+        return scrubbed
 
     @staticmethod
     def _safe_hash(data: object) -> str:
@@ -156,3 +171,23 @@ class AuditLogger:
         import datetime
 
         return datetime.datetime.now(tz=datetime.UTC).isoformat()
+
+
+_SECRET_KEYS = ("api_key", "apikey", "secret", "token", "password", "authorization")
+_SECRET_FRAGMENTS = ("sk-", "hmac", "secret", "token", "bearer ")
+
+
+def _scrub_value(value: Any, *, key: str = "") -> Any:
+    if any(fragment in key.lower() for fragment in _SECRET_KEYS):
+        return "[scrubbed]"
+    if isinstance(value, dict):
+        return {
+            str(item_key): _scrub_value(item, key=str(item_key)) for item_key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub_value(item) for item in value]
+    if isinstance(value, str) and any(fragment in value.lower() for fragment in _SECRET_FRAGMENTS):
+        return "[scrubbed]"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)

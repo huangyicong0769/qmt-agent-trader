@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     project_root: Path = Field(default_factory=lambda: Path.cwd())
     data_dir: Path = Path("data")
     log_dir: Path = Path("logs")
+    audit_fsync: bool = True
+    audit_rotation_bytes: int | None = None
+    cache_ttl_seconds: int = 86400
 
     tushare_token: SecretStr | None = None
     tushare_quota_profile_source: str = "official_table"

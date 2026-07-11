@@ -9,6 +9,7 @@ from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.cache import ContentAddressedCache
 
 
 @dataclass(frozen=True)
@@ -18,3 +19,4 @@ class AgentToolDependencies:
     sandbox: CodeSandbox
     experiment_store: ExperimentStore
     audit_logger: AuditLogger
+    cache: ContentAddressedCache | None = None

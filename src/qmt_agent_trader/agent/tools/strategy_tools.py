@@ -31,6 +31,7 @@ from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.cache import ContentAddressedCache
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
@@ -55,6 +56,9 @@ _lake: DataLake | None = None
 _sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("strategy_tool_sandbox", default=None)
 _store_var: ContextVar[ExperimentStore | None] = ContextVar("strategy_tool_store", default=None)
 _lake_var: ContextVar[DataLake | None] = ContextVar("strategy_tool_lake", default=None)
+_cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
+    "strategy_tool_cache", default=None
+)
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
 
 
@@ -94,9 +98,11 @@ def _with_deps(
     sandbox_token = _sandbox_var.set(deps.sandbox)
     store_token = _store_var.set(deps.experiment_store)
     lake_token = _lake_var.set(deps.data_lake)
+    cache_token = _cache_var.set(deps.cache)
     try:
         return fn(input_data, context)
     finally:
+        _cache_var.reset(cache_token)
         _lake_var.reset(lake_token)
         _store_var.reset(store_token)
         _sandbox_var.reset(sandbox_token)
@@ -2031,24 +2037,14 @@ def _backtest_cache_key(
 
 
 def _get_cached_backtest(cache_key: str) -> dict[str, Any] | None:
-    path = Path("reports/cache") / f"backtest_{cache_key}.json"
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        path.unlink(missing_ok=True)
-        return None
-    return payload if isinstance(payload, dict) else None
+    cache = _cache_var.get()
+    return None if cache is None else cache.get("backtest", cache_key)
 
 
 def _put_cached_backtest(cache_key: str, payload: dict[str, Any]) -> None:
-    cache_root = Path("reports/cache")
-    cache_root.mkdir(parents=True, exist_ok=True)
-    (cache_root / f"backtest_{cache_key}.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    cache = _cache_var.get()
+    if cache is not None:
+        cache.put("backtest", cache_key, payload)
 
 
 def _data_fingerprint(lake: DataLake) -> dict[str, tuple[int, int]]:

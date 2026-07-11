@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,8 @@ from qmt_agent_trader.agent.tools.todo_tools import build_todo_tools
 from qmt_agent_trader.agent.tools.universe_tools import build_universe_tools
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.cache import ContentAddressedCache
 from qmt_agent_trader.persistence.paths import PersistencePaths
 
 # Avoid circular import: import AgentToolRegistry inside build_agent_registry
@@ -45,18 +48,29 @@ def build_agent_registry(
     resolved_settings = settings or get_settings()
     sb = sandbox or CodeSandbox()
     paths = PersistencePaths.from_settings(resolved_settings)
+    atomic_store = AtomicFileStore(data_lake.lock_manager)
     store = ExperimentStore(
         experiment_root.expanduser().resolve(),
         locks_root=paths.locks_root,
         quarantine_root=paths.quarantine_root / "experiments",
     )
-    audit = AuditLogger(audit_path)
+    audit = AuditLogger(
+        audit_path,
+        atomic_store=atomic_store,
+        fsync=resolved_settings.audit_fsync,
+        rotation_bytes=resolved_settings.audit_rotation_bytes,
+    )
     deps = AgentToolDependencies(
         settings=resolved_settings,
         data_lake=data_lake,
         sandbox=sb,
         experiment_store=store,
         audit_logger=audit,
+        cache=ContentAddressedCache(
+            paths.cache_root,
+            atomic_store,
+            ttl=timedelta(seconds=resolved_settings.cache_ttl_seconds),
+        ),
     )
 
     registry = _ATR(audit_logger=audit)

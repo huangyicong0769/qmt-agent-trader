@@ -96,39 +96,67 @@ class AtomicFileStore:
             self.write_json(path, result, validator=validator)
             return result
 
-    def append_jsonl(self, path: Path, record: Any) -> None:
-        encoded = json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode() + b"\n"
+    def append_jsonl(
+        self, path: Path, record: Any, *, fsync: bool = True
+    ) -> None:
+        encoded = json.dumps(record, ensure_ascii=True).encode() + b"\n"
         if b"\n" in encoded[:-1]:
             raise StorageValidationError(
                 store_name="atomic_files", path=path, operation="append_jsonl",
                 reason="record encoded to more than one line",
             )
         with self.lock_manager.resource_lock(path):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-            original_length = os.fstat(descriptor).st_size
-            try:
-                written = os.write(descriptor, encoded)
-                if written != len(encoded):
-                    raise OSError("partial JSONL append")
+            self._append_encoded_jsonl(path, encoded, fsync=fsync)
+
+    def rotate_and_append_jsonl(
+        self,
+        path: Path,
+        record: Any,
+        *,
+        rotation_bytes: int | None = None,
+        fsync: bool = True,
+    ) -> None:
+        encoded = json.dumps(record, ensure_ascii=True).encode() + b"\n"
+        with self.lock_manager.resource_lock(path):
+            if (
+                rotation_bytes is not None
+                and path.exists()
+                and path.stat().st_size > 0
+                and path.stat().st_size + len(encoded) > rotation_bytes
+            ):
+                rotated = path.with_suffix(path.suffix + ".1")
+                os.replace(path, rotated)
+                _fsync_directory(path.parent)
+            self._append_encoded_jsonl(path, encoded, fsync=fsync)
+
+    def _append_encoded_jsonl(self, path: Path, encoded: bytes, *, fsync: bool) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        original_length = os.fstat(descriptor).st_size
+        try:
+            written = os.write(descriptor, encoded)
+            if written != len(encoded):
+                raise OSError("partial JSONL append")
+            if fsync:
                 os.fsync(descriptor)
-            except Exception as exc:
-                try:
-                    os.ftruncate(descriptor, original_length)
+        except Exception as exc:
+            try:
+                os.ftruncate(descriptor, original_length)
+                if fsync:
                     os.fsync(descriptor)
-                except Exception as rollback_exc:
-                    raise StorageAppendRollbackError(
-                        path=path,
-                        append_error=exc,
-                        rollback_error=rollback_exc,
-                    ) from rollback_exc
-                raise StorageError(
-                    store_name="atomic_files", path=path, operation="append_jsonl",
-                    reason="append failed and original length was restored",
-                    recoverable=True, original_error=exc,
-                ) from exc
-            finally:
-                os.close(descriptor)
+            except Exception as rollback_exc:
+                raise StorageAppendRollbackError(
+                    path=path,
+                    append_error=exc,
+                    rollback_error=rollback_exc,
+                ) from rollback_exc
+            raise StorageError(
+                store_name="atomic_files", path=path, operation="append_jsonl",
+                reason="append failed and original length was restored",
+                recoverable=True, original_error=exc,
+            ) from exc
+        finally:
+            os.close(descriptor)
 
     def _write(
         self, path: Path, content: bytes, *, create_only: bool,

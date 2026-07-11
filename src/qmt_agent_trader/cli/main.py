@@ -188,7 +188,16 @@ def _tushare_provider() -> TushareProvider:
 
 def _audit_logger(name: str) -> AuditLogger:
     settings = _settings()
-    return AuditLogger(settings.resolved_log_dir / "audit" / f"{name}.jsonl")
+    paths = PersistencePaths.from_settings(settings)
+    lock_manager = LockManager(
+        paths.locks_root, timeout_seconds=settings.remote_data_lock_timeout_seconds
+    )
+    return AuditLogger(
+        paths.audit_root / f"{name}.jsonl",
+        atomic_store=AtomicFileStore(lock_manager),
+        fsync=settings.audit_fsync,
+        rotation_bytes=settings.audit_rotation_bytes,
+    )
 
 
 @app.command()

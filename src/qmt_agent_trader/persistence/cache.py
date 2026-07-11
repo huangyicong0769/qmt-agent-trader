@@ -1,0 +1,144 @@
+"""Disposable content-addressed JSON cache with bounded lifetime."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore, FaultHook
+
+WarningSink = Callable[[dict[str, object]], None]
+
+
+class ContentAddressedCache:
+    def __init__(
+        self,
+        root: Path,
+        atomic_store: AtomicFileStore,
+        *,
+        ttl: timedelta = timedelta(days=1),
+        clock: Callable[[], datetime] | None = None,
+        warning_sink: WarningSink | None = None,
+    ) -> None:
+        self.root = root.expanduser().resolve()
+        self.atomic_store = atomic_store
+        self.ttl = ttl
+        self.clock = clock or (lambda: datetime.now(UTC))
+        self.warning_sink = warning_sink or self._log_warning
+        self.metrics = {
+            "hits": 0,
+            "misses": 0,
+            "expired": 0,
+            "corrupt_invalidations": 0,
+            "write_failures": 0,
+        }
+
+    @staticmethod
+    def key_for(value: Any) -> str:
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def path_for(self, namespace: str, key: str) -> Path:
+        safe_namespace = "".join(c for c in namespace if c.isalnum() or c in "-_")
+        return self.root / safe_namespace / f"{key}.json"
+
+    def get(self, namespace: str, key: str) -> dict[str, Any] | None:
+        path = self.path_for(namespace, key)
+        if not path.exists():
+            self.metrics["misses"] += 1
+            return None
+        try:
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            if not self._valid_envelope(envelope, key):
+                raise ValueError("invalid cache envelope")
+            if datetime.fromisoformat(envelope["expires_at"]) <= self.clock():
+                self.metrics["expired"] += 1
+                self._invalidate(path)
+                return None
+            self.metrics["hits"] += 1
+            return dict(envelope["value"])
+        except Exception as exc:
+            self.metrics["corrupt_invalidations"] += 1
+            self._invalidate(path)
+            self._warn(
+                {
+                    "reason": "CACHE_CORRUPT_INVALIDATED",
+                    "path": str(path),
+                    "error": type(exc).__name__,
+                }
+            )
+            return None
+
+    def put(
+        self,
+        namespace: str,
+        key: str,
+        value: dict[str, Any],
+        *,
+        fault_hook: FaultHook | None = None,
+        raise_on_error: bool = False,
+    ) -> None:
+        now = self.clock()
+        envelope = {
+            "schema_version": 1,
+            "key": key,
+            "created_at": now.isoformat(),
+            "expires_at": (now + self.ttl).isoformat(),
+            "value": value,
+        }
+        path = self.path_for(namespace, key)
+        try:
+            self.atomic_store.write_json(
+                path,
+                envelope,
+                validator=lambda item: self._valid_envelope(item, key),
+                fault_hook=fault_hook,
+            )
+        except Exception as exc:
+            self.metrics["write_failures"] += 1
+            self._warn(
+                {
+                    "reason": "CACHE_WRITE_FAILED",
+                    "path": str(path),
+                    "error": type(exc).__name__,
+                }
+            )
+            if raise_on_error:
+                raise
+
+    def _invalidate(self, path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            self._warn(
+                {
+                    "reason": "CACHE_INVALIDATION_FAILED",
+                    "path": str(path),
+                    "error": type(exc).__name__,
+                }
+            )
+
+    def _warn(self, payload: dict[str, object]) -> None:
+        try:
+            self.warning_sink(payload)
+        except Exception:
+            logging.getLogger(__name__).exception("cache warning sink failed")
+
+    @staticmethod
+    def _valid_envelope(value: Any, key: str) -> bool:
+        return (
+            isinstance(value, dict)
+            and value.get("schema_version") == 1
+            and value.get("key") == key
+            and isinstance(value.get("value"), dict)
+            and isinstance(value.get("expires_at"), str)
+        )
+
+    @staticmethod
+    def _log_warning(payload: dict[str, object]) -> None:
+        logging.getLogger(__name__).warning("cache invalidated", extra={"cache": payload})

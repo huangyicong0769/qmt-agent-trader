@@ -38,6 +38,7 @@ from qmt_agent_trader.factors.service import (
     evaluate_factor,
 )
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.cache import ContentAddressedCache
 
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
@@ -45,6 +46,7 @@ _lake: DataLake | None = None
 _sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("factor_tool_sandbox", default=None)
 _store_var: ContextVar[ExperimentStore | None] = ContextVar("factor_tool_store", default=None)
 _lake_var: ContextVar[DataLake | None] = ContextVar("factor_tool_lake", default=None)
+_cache_var: ContextVar[ContentAddressedCache | None] = ContextVar("factor_tool_cache", default=None)
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
@@ -79,9 +81,11 @@ def _with_deps(
     sandbox_token = _sandbox_var.set(deps.sandbox)
     store_token = _store_var.set(deps.experiment_store)
     lake_token = _lake_var.set(deps.data_lake)
+    cache_token = _cache_var.set(deps.cache)
     try:
         return fn(input_data, context)
     finally:
+        _cache_var.reset(cache_token)
         _lake_var.reset(lake_token)
         _store_var.reset(store_token)
         _sandbox_var.reset(sandbox_token)
@@ -629,7 +633,10 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
         },
         sort_keys=True,
     )
-    cached = get_cached_validation(cache_factor_name, start, end)
+    cache = _cache_var.get()
+    if cache is None:
+        return {"status": "NOT_IMPLEMENTED", "message": "cache not wired"}
+    cached = get_cached_validation(cache_factor_name, start, end, cache)
     if cached is not None:
         cached["cache_hit"] = True
         return cached
@@ -654,7 +661,7 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             sb.generated_root / "reports" / f"factor_{factor_id}.json" if sb else ""
         )
         result["cache_hit"] = False
-        put_cached_validation(cache_factor_name, start, end, result)
+        put_cached_validation(cache_factor_name, start, end, result, cache)
         return result
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
