@@ -17,7 +17,9 @@ from uuid import uuid4
 import pyarrow.parquet as pq
 import yaml
 
+from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.catalog import StoreCatalog
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import StorageBackupError, StorageValidationError
 from qmt_agent_trader.persistence.initialization import storage_migrations
@@ -74,33 +76,24 @@ class StorageOperations:
         self.locks = LockManager(paths.locks_root, timeout_seconds=timeout_seconds)
         self.atomic = AtomicFileStore(self.locks)
         self.database = DatabaseCoordinator(paths.control_db_path, self.locks)
+        self.catalog = StoreCatalog.canonical(paths)
 
     def inventory(self) -> list[StoreInventory]:
-        result: list[StoreInventory] = []
-        for name in PersistencePaths.__dataclass_fields__:
-            if name == "project_root":
-                continue
-            path = getattr(self.paths, name)
-            is_db = name == "control_db_path"
-            is_cache = name == "cache_root"
-            is_infra = name in {"locks_root", "quarantine_root", "backup_root"}
-            result.append(
-                StoreInventory(
-                    name=name,
-                    type="duckdb" if is_db else "directory",
-                    path=path,
-                    owner="persistence" if is_infra or is_db else "application",
-                    source_of_truth="cache" if is_cache else ("catalog" if is_db else "official"),
-                    schema_version=1 if is_db else None,
-                    mutable=not name.endswith("artifact_root"),
-                    lock_policy="database write lock" if is_db else "canonical resource lock",
-                    backup_policy="excluded"
-                    if is_cache or name in {"locks_root", "backup_root"}
-                    else "local consistent backup v1",
-                    health="present" if path.exists() else "not_initialized",
-                )
+        return [
+            StoreInventory(
+                name=store.name,
+                type=store.kind,
+                path=store.path,
+                owner=store.owner,
+                source_of_truth=store.source_of_truth,
+                schema_version=store.schema_version,
+                mutable=store.mutable,
+                lock_policy=store.lock_resource,
+                backup_policy=store.backup,
+                health="present" if store.path.exists() else "not_initialized",
             )
-        return result
+            for store in self.catalog.stores
+        ]
 
     def verify(self, *, deep: bool = False) -> VerificationResult:
         diagnostics: list[StorageDiagnostic] = []
@@ -132,13 +125,31 @@ class StorageOperations:
                         self.paths.control_db_path,
                     )
                 )
-        roots = self._official_roots(include_quarantine=True)
         seen: set[Path] = set()
-        for root in roots:
+        for store in self.catalog.stores:
+            root = store.path
             if not root.exists() or root in seen:
                 continue
             seen.add(root)
-            for path in root.rglob("*"):
+            if store.governed and root.is_dir():
+                for artifact_diagnostic in artifact_store_for_root(
+                    root, lock_manager=self.locks
+                ).diagnose():
+                    if (
+                        artifact_diagnostic.code == "ORPHAN_ARTIFACT"
+                        and store.legacy_policy == "allow_valid_legacy"
+                    ):
+                        continue
+                    diagnostics.append(
+                        StorageDiagnostic(
+                            store.name,
+                            artifact_diagnostic.code,
+                            artifact_diagnostic.reason,
+                            root / artifact_diagnostic.relative_path,
+                        )
+                    )
+            candidates = [root] if root.is_file() else root.rglob("*")
+            for path in candidates:
                 if not path.is_file() or self.paths.backup_root in path.parents:
                     continue
                 diagnostics.extend(self._verify_file(path, deep=deep))
@@ -324,26 +335,10 @@ class StorageOperations:
             "storage_repair_action": repair_action,
         }
 
-    def _official_roots(self, *, include_quarantine: bool) -> list[Path]:
-        roots = [
-            self.paths.lake_root,
-            self.paths.control_db_path,
-            self.paths.artifact_root,
-            self.paths.reports_root,
-            self.paths.approvals_root,
-            self.paths.order_plans_root,
-            self.paths.sessions_root,
-            self.paths.experiments_root,
-            self.paths.registries_root,
-            self.paths.audit_root,
-        ]
-        if include_quarantine:
-            roots.append(self.paths.quarantine_root)
-        return roots
-
     def _iter_backup_files(self) -> Iterator[Path]:
         seen: set[Path] = set()
-        for root in self._official_roots(include_quarantine=True):
+        for store in self.catalog.stores:
+            root = store.path
             candidates = [root] if root.is_file() else root.rglob("*") if root.exists() else []
             for path in candidates:
                 if (

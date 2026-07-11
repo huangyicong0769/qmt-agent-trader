@@ -21,7 +21,7 @@ def operations(tmp_path: Path) -> StorageOperations:
 
 def test_inventory_covers_every_canonical_path(operations: StorageOperations) -> None:
     names = {item.name for item in operations.inventory()}
-    assert names == set(PersistencePaths.__dataclass_fields__) - {"project_root"}
+    assert names == {store.name for store in operations.catalog.stores}
     assert all(
         item.owner and item.source_of_truth and item.lock_policy for item in operations.inventory()
     )
