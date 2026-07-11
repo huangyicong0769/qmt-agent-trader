@@ -17,6 +17,7 @@ from nicegui import ui
 
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.persistence.artifacts import ArtifactManifest, artifact_store_for_root
+from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.web.ui.layout import shell
 
@@ -45,9 +46,21 @@ class ReportMeta:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def _load_reports(reports_root: Path | None = None) -> list[ReportMeta]:
-    root = reports_root or PersistencePaths.from_settings(get_settings()).reports_root
-    results: list[ReportMeta] = []
+class ReportCollection(list[ReportMeta]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.excluded_reasons: list[str] = []
+
+    @property
+    def storage_status(self) -> str:
+        return "DEGRADED" if self.excluded_reasons else "OK"
+
+
+def _load_reports(reports_root: Path | None = None) -> ReportCollection:
+    paths = PersistencePaths.from_settings(get_settings())
+    root = reports_root or paths.reports_root
+    lock_manager = LockManager(paths.locks_root)
+    results = ReportCollection()
     for glob_pattern in ("backtests/bt_*.json", "research/research_*.json"):
         for p in sorted(
             root.glob(glob_pattern),
@@ -55,7 +68,7 @@ def _load_reports(reports_root: Path | None = None) -> list[ReportMeta]:
             reverse=True,
         ):
             try:
-                store = artifact_store_for_root(p.parent)
+                store = artifact_store_for_root(p.parent, lock_manager=lock_manager)
                 manifests = [
                     ArtifactManifest.model_validate_json(item.read_text(encoding="utf-8"))
                     for item in (p.parent / ".manifests").glob("*.json")
@@ -66,6 +79,7 @@ def _load_reports(reports_root: Path | None = None) -> list[ReportMeta]:
                 )
             except Exception as exc:
                 logger.warning("governed report excluded: %s (%s)", p, type(exc).__name__)
+                results.excluded_reasons.append(f"{p.name}: {type(exc).__name__}")
                 continue
             results.append(_parse_report(p, data))
     return results
@@ -397,6 +411,12 @@ def register() -> None:
 
 
 def _render_list(reports: list[ReportMeta], on_click: Any) -> None:
+    if isinstance(reports, ReportCollection) and reports.excluded_reasons:
+        ui.label(
+            "Storage DEGRADED: excluded "
+            f"{len(reports.excluded_reasons)} corrupt or unverifiable report(s). "
+            + "; ".join(reports.excluded_reasons)
+        ).classes("text-amber-700 bg-amber-50 p-3 rounded")
     if not reports:
         with ui.card().classes("w-full p-8"):
             ui.label("No backtest reports yet.").classes("text-gray-500")

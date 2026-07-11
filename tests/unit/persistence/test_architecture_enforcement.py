@@ -53,3 +53,15 @@ def test_architecture_scan_rejects_cwd_persistence_and_private_lock_roots(
 
     assert "cwd_relative_persistence_root" in primitives
     assert "noncanonical_lock_root" in primitives
+
+
+def test_architecture_scan_rejects_artifact_store_without_manager(tmp_path: Path) -> None:
+    (tmp_path / "artifact.py").write_text(
+        "from qmt_agent_trader.persistence.artifacts import artifact_store_for_root\n"
+        "artifact_store_for_root(root)\n"
+    )
+
+    assert any(
+        item.primitive == "artifact_store_without_canonical_manager"
+        for item in scan_forbidden_persistence(tmp_path)
+    )

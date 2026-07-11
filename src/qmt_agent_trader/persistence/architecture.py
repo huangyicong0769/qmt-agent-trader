@@ -21,6 +21,11 @@ _ALLOWLIST = {
     # resolves them beneath project_root before persistence access.
     "core/config.py": {"cwd_relative_persistence_root"},
     "web/config.py": {"cwd_relative_persistence_root"},
+    # Compatibility APIs accept injected ArtifactStore but retain local fallback
+    # for external callers; production composition passes a store explicitly.
+    "strategy/approval.py": {"artifact_store_without_canonical_manager"},
+    "services/order_plan_service.py": {"artifact_store_without_canonical_manager"},
+    "persistence/artifacts.py": {"noncanonical_lock_root"},
 }
 
 
@@ -70,6 +75,12 @@ def _primitive(
     if not isinstance(node, ast.Call):
         return None
     function = node.func
+    if (
+        isinstance(function, ast.Name)
+        and function.id == "artifact_store_for_root"
+        and not any(keyword.arg == "lock_manager" for keyword in node.keywords)
+    ):
+        return "artifact_store_without_canonical_manager"
     if isinstance(function, ast.Name) and function.id == "Path" and node.args:
         value = node.args[0]
         if (
