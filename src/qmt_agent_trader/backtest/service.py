@@ -14,6 +14,7 @@ from qmt_agent_trader.core.types import Side
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
+from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 
 
@@ -95,7 +96,7 @@ def run_backtest_report(
         quantity=quantity,
     )
     report = _build_report(summary, config_path=config_path)
-    receipt = artifact_store_for_root(reports_dir).create(
+    receipt = artifact_store_for_root(reports_dir, lock_manager=lake.lock_manager).create(
         f"{summary.run_id}.json",
         json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
         metadata=ArtifactMetadata(
@@ -118,7 +119,9 @@ def run_backtest_report(
     )
 
 
-def compare_backtest_reports(reports_dir: Path, *, limit: int = 10) -> dict[str, object]:
+def compare_backtest_reports(
+    reports_dir: Path, *, limit: int = 10, lock_manager: LockManager | None = None
+) -> dict[str, object]:
     if not reports_dir.exists():
         return {"status": "empty", "runs": []}
     paths = sorted(
@@ -126,16 +129,22 @@ def compare_backtest_reports(reports_dir: Path, *, limit: int = 10) -> dict[str,
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
-    runs = [_load_governed_backtest_report(path, reports_dir) for path in paths[:limit]]
+    runs = [
+        _load_governed_backtest_report(path, reports_dir, lock_manager=lock_manager)
+        for path in paths[:limit]
+    ]
     return {"status": "compared", "runs": runs}
 
 
-def _load_governed_backtest_report(path: Path, reports_dir: Path) -> dict[str, object]:
-    store = artifact_store_for_root(reports_dir)
+def _load_governed_backtest_report(
+    path: Path, reports_dir: Path, *, lock_manager: LockManager | None = None
+) -> dict[str, object]:
+    store = artifact_store_for_root(reports_dir, lock_manager=lock_manager)
     run_id = path.stem
     if store.manifest_path_for(run_id).exists():
         raw = store.read_verified(run_id, expected_relative_path=path.name)
     else:
+
         def validate_legacy(content: bytes) -> bool:
             candidate = json.loads(content)
             return isinstance(candidate, dict) and str(candidate.get("run_id")) == run_id

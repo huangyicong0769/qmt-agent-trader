@@ -400,10 +400,5 @@ def artifact_store_for_root(
 ) -> ArtifactStore:
     """Build the shared store for an explicitly injected domain root."""
     resolved_root = root.expanduser().resolve()
-    if lock_manager is None:
-        from qmt_agent_trader.core.config import get_settings
-        from qmt_agent_trader.persistence.paths import PersistencePaths
-
-        lock_manager = LockManager(PersistencePaths.from_settings(get_settings()).locks_root)
-    manager = lock_manager
+    manager = lock_manager or LockManager(resolved_root.parent / ".artifact-locks")
     return ArtifactStore(resolved_root, AtomicFileStore(manager), manager)

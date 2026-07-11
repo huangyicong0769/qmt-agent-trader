@@ -37,10 +37,7 @@ def plan_sensitivity_analysis(
     return {
         "status": "planned",
         "scenario_count": len(scenarios),
-        "scenarios": [
-            {"label": scenario.label(), **scenario.__dict__}
-            for scenario in scenarios
-        ],
+        "scenarios": [{"label": scenario.label(), **scenario.__dict__} for scenario in scenarios],
         "runner_contract": {
             "required_metrics": [
                 "total_return",
@@ -143,6 +140,7 @@ def run_factor_rank_sensitivity_report(
         },
         agent_notes=agent_notes,
         infrastructure_requests=infrastructure_requests,
+        lock_manager=lake.lock_manager,
     )
 
 

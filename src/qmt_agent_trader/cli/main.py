@@ -640,10 +640,12 @@ def backtest_run(
 
 @backtest_app.command("compare")
 def backtest_compare(runs: str = "latest-10") -> None:
+    lake = _data_lake()
     print_json(
         compare_backtest_reports(
             PersistencePaths.from_settings(_settings()).reports_root / "backtests",
             limit=_parse_latest_limit(runs),
+            lock_manager=lake.lock_manager,
         )
     )
 

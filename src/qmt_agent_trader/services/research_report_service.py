@@ -8,6 +8,7 @@ from typing import cast
 
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
+from qmt_agent_trader.persistence.locks import LockManager
 
 
 def save_research_report(
@@ -19,6 +20,7 @@ def save_research_report(
     metadata: dict[str, object] | None = None,
     agent_notes: str | None = None,
     infrastructure_requests: list[str] | None = None,
+    lock_manager: LockManager | None = None,
 ) -> dict[str, object]:
     """Persist an immutable research artifact and return a compact receipt."""
     run_id = new_id("research")
@@ -44,7 +46,7 @@ def save_research_report(
         "infrastructure_requests": _normalize_requests(infrastructure_requests),
     }
     content = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
-    receipt = artifact_store_for_root(reports_dir).create(
+    receipt = artifact_store_for_root(reports_dir, lock_manager=lock_manager).create(
         f"{run_id}.json",
         content,
         metadata=ArtifactMetadata(
@@ -87,7 +89,9 @@ def _metadata_id(metadata: dict[str, object] | None, *keys: str) -> str | None:
     return None
 
 
-def compare_research_reports(reports_dir: Path, *, limit: int = 10) -> dict[str, object]:
+def compare_research_reports(
+    reports_dir: Path, *, limit: int = 10, lock_manager: LockManager | None = None
+) -> dict[str, object]:
     """Return compact summaries of recent research artifacts."""
     if not reports_dir.exists():
         return {"status": "empty", "runs": [], "infrastructure_requests": []}
@@ -97,7 +101,7 @@ def compare_research_reports(reports_dir: Path, *, limit: int = 10) -> dict[str,
         reverse=True,
     )
     runs = [
-        _summarize_record(_load_governed_report(path, reports_dir), path)
+        _summarize_record(_load_governed_report(path, reports_dir, lock_manager=lock_manager), path)
         for path in paths[:limit]
     ]
     return {
@@ -114,13 +118,16 @@ def _load_json_object(path: Path) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def _load_governed_report(path: Path, reports_dir: Path) -> dict[str, object]:
-    store = artifact_store_for_root(reports_dir)
+def _load_governed_report(
+    path: Path, reports_dir: Path, *, lock_manager: LockManager | None = None
+) -> dict[str, object]:
+    store = artifact_store_for_root(reports_dir, lock_manager=lock_manager)
     run_id = path.stem
     if store.manifest_path_for(run_id).exists():
         raw = store.read_verified(run_id, expected_relative_path=path.name)
         value = json.loads(raw)
     else:
+
         def validate_legacy(content: bytes) -> bool:
             candidate = json.loads(content)
             return isinstance(candidate, dict) and str(candidate.get("run_id")) == run_id
@@ -206,11 +213,7 @@ def evaluate_research_gate(
             "compare at least two top_n or position-cap settings",
         ),
     ]
-    missing = [
-        str(check["message"])
-        for check in checks
-        if check["status"] in {"WARN", "FAILED"}
-    ]
+    missing = [str(check["message"]) for check in checks if check["status"] in {"WARN", "FAILED"}]
     return {
         "status": _gate_status(checks),
         "checks": checks,

@@ -33,6 +33,7 @@ from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
+from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
@@ -1134,7 +1135,13 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
             ),
         )
     else:
-        receipt = artifact_store_for_root(reports_root).create(
+        lake = _get_lake()
+        manager = (
+            lake.lock_manager
+            if lake is not None
+            else LockManager(PersistencePaths.from_settings(get_settings()).locks_root)
+        )
+        receipt = artifact_store_for_root(reports_root, lock_manager=manager).create(
             f"{exp_id}/{report_id}.md",
             content.encode("utf-8"),
             metadata=ArtifactMetadata(
@@ -1415,7 +1422,13 @@ def _load_run_artifact(run_id: str) -> dict[str, Any] | None:
         path = root / f"{run_id}.json"
         if not path.exists():
             continue
-        store = artifact_store_for_root(root)
+        lake = _get_lake()
+        manager = (
+            lake.lock_manager
+            if lake is not None
+            else LockManager(PersistencePaths.from_settings(get_settings()).locks_root)
+        )
+        store = artifact_store_for_root(root, lock_manager=manager)
         try:
             if store.manifest_path_for(run_id).exists():
                 raw = store.read_verified(run_id, expected_relative_path=path.name)
