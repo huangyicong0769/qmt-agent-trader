@@ -232,3 +232,21 @@ def test_health_payload_is_structured_and_secret_safe(operations: StorageOperati
         "storage_repair_action",
     }
     assert "secret" not in payload["storage_reason"]
+
+
+def test_locks_report_maps_catalog_resources_and_marks_unknown(
+    operations: StorageOperations,
+) -> None:
+    known = operations.catalog.by_name("sessions")
+    known_path = operations.locks.lock_path_for_resource(known.lock_resource)
+    known_path.parent.mkdir(parents=True)
+    known_path.touch()
+    unknown_path = operations.paths.locks_root / "resource-unknown.lock"
+    unknown_path.touch()
+
+    report = {item["path"]: item for item in operations.locks_report()}
+
+    assert report[str(known_path)]["known_resource"] == "sessions"
+    assert report[str(unknown_path)]["known_resource"] is None
+    assert report[str(unknown_path)]["resource_status"] == "unknown"
+    assert report[str(known_path)]["stale"] is False

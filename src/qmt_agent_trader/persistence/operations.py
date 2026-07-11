@@ -271,17 +271,31 @@ class StorageOperations:
     def locks_report(self) -> list[dict[str, Any]]:
         now = datetime.now(tz=UTC).timestamp()
         result: list[dict[str, Any]] = []
+        known = {
+            self.locks.lock_path_for_resource(store.lock_resource): store.name
+            for store in self.catalog.stores
+        }
+        database_digest = hashlib.sha256(
+            str(self.paths.control_db_path.resolve()).encode()
+        ).hexdigest()
+        known[self.paths.locks_root / f"database-{database_digest}.lock"] = "control_db"
+        known[self.paths.locks_root / "backup-barrier.lock"] = "backup_barrier"
         if not self.paths.locks_root.exists():
             return result
         for path in sorted(self.paths.locks_root.glob("*.lock")):
             age = max(0.0, now - path.stat().st_mtime)
+            active = _lock_is_active(path)
+            resource = known.get(path)
             result.append(
                 {
                     "path": str(path),
                     "resource": path.stem,
+                    "known_resource": resource,
+                    "resource_status": "known" if resource is not None else "unknown",
                     "age_seconds": age,
-                    "stale": age > 3600,
-                    "active": _lock_is_active(path),
+                    "stale": age > 3600 and not active,
+                    "stale_basis": "mtime_only_no_owner_evidence",
+                    "active": active,
                 }
             )
         return result
