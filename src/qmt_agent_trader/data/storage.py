@@ -139,7 +139,7 @@ class DataLake:
         writable = frame
         if len(frame.columns) == 0:
             writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
-        atomic_write_parquet(writable, path)
+        atomic_write_parquet(writable, path, lock_manager=self.lock_manager)
         return path
 
     def write_incremental_parquet(
@@ -184,7 +184,9 @@ class DataLake:
                 writable = merged
                 if len(merged.columns) == 0:
                     writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
-                atomic_write_parquet(writable, path)
+                atomic_write_parquet(
+                    writable, path, lock_manager=self.lock_manager, assume_locked=True
+                )
                 table_name = name if name.replace("_", "").isalnum() else name.replace("/", "_")
                 self.register_parquet(table_name, layer, name)
         except StorageLockTimeoutError as exc:

@@ -19,9 +19,11 @@ from qmt_agent_trader.agent.sandbox import CodeSandbox, generated_identity_segme
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
+from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.paths import PersistencePaths
 
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
@@ -365,7 +367,12 @@ def _propose_tool_registration(input_data: dict[str, Any], context: ToolContext)
 
     # Write proposal
     sb = _get_sandbox()
-    proposal_root = sb.generated_root / "tools" if sb else Path("proposals")
+    proposal_root = (
+        sb.generated_root / "tools"
+        if sb
+        else PersistencePaths.from_settings(get_settings()).project_root
+        / "src/qmt_agent_trader/agent/generated/tools"
+    )
     proposal_path = proposal_root / f"tool_proposal_{candidate_id}.json"
 
     proposal = {
@@ -375,9 +382,8 @@ def _propose_tool_registration(input_data: dict[str, Any], context: ToolContext)
         "status": "REVIEW_REQUIRED",
         "created_at": shanghai_now_iso(),
     }
-    AtomicFileStore(LockManager(proposal_root / ".locks")).write_json(
-        proposal_path, proposal, create_only=True
-    )
+    locks = PersistencePaths.from_settings(get_settings()).locks_root
+    AtomicFileStore(LockManager(locks)).write_json(proposal_path, proposal, create_only=True)
 
     return {
         "proposal_path": str(proposal_path),

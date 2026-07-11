@@ -39,10 +39,12 @@ from qmt_agent_trader.agent.tool_result import (
     normalize_tool_result,
 )
 from qmt_agent_trader.agent.tools.base import AgentTool
+from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.errors import StorageError
 from qmt_agent_trader.persistence.health import storage_error_health_payload
 from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.paths import PersistencePaths
 
 _PROCESS_PAYLOAD_SPILL_BYTES = 1_000_000
 
@@ -538,7 +540,8 @@ def _prepare_process_payload(
     if size <= _PROCESS_PAYLOAD_SPILL_BYTES:
         return payload
     path = _process_payload_path(tool.spec.name, context.run_id)
-    AtomicFileStore(LockManager(path.parent / ".locks")).write_text(path, raw)
+    locks = PersistencePaths.from_settings(get_settings()).locks_root
+    AtomicFileStore(LockManager(locks)).write_text(path, raw)
     result = payload.get("result")
     summary = _payload_summary(result)
     return {
@@ -565,7 +568,8 @@ def _resolve_process_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _process_payload_path(tool_name: str, run_id: str) -> Path:
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id or "run")
     safe_tool = re.sub(r"[^A-Za-z0-9_.-]+", "_", tool_name or "tool")
-    return Path("reports/tool_payloads") / f"{safe_run_id}_{safe_tool}.json"
+    root = PersistencePaths.from_settings(get_settings()).reports_root / "tool_payloads"
+    return root / f"{safe_run_id}_{safe_tool}.json"
 
 
 def _payload_summary(result: Any) -> dict[str, Any]:

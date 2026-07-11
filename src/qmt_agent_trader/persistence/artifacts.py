@@ -190,12 +190,17 @@ class ArtifactStore:
                 valid = True if validator is None else validator(content)
             except Exception as exc:
                 raise StorageValidationError(
-                    store_name="artifacts", path=path, operation="adopt",
-                    reason=f"legacy artifact validation failed: {exc}", original_error=exc,
+                    store_name="artifacts",
+                    path=path,
+                    operation="adopt",
+                    reason=f"legacy artifact validation failed: {exc}",
+                    original_error=exc,
                 ) from exc
             if valid is False:
                 raise StorageValidationError(
-                    store_name="artifacts", path=path, operation="adopt",
+                    store_name="artifacts",
+                    path=path,
+                    operation="adopt",
                     reason="legacy artifact validation failed",
                 )
             if manifest_path.exists():
@@ -395,5 +400,10 @@ def artifact_store_for_root(
 ) -> ArtifactStore:
     """Build the shared store for an explicitly injected domain root."""
     resolved_root = root.expanduser().resolve()
-    manager = lock_manager or LockManager(resolved_root.parent / ".artifact-locks")
+    if lock_manager is None:
+        from qmt_agent_trader.core.config import get_settings
+        from qmt_agent_trader.persistence.paths import PersistencePaths
+
+        lock_manager = LockManager(PersistencePaths.from_settings(get_settings()).locks_root)
+    manager = lock_manager
     return ArtifactStore(resolved_root, AtomicFileStore(manager), manager)

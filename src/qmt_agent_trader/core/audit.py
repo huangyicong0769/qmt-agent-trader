@@ -30,7 +30,14 @@ class AuditLogger:
         rotation_bytes: int | None = None,
     ) -> None:
         self.path = path.expanduser().resolve()
-        resolved_store = atomic_store or AtomicFileStore(LockManager(self.path.parent / ".locks"))
+        if atomic_store is None:
+            from qmt_agent_trader.core.config import get_settings
+            from qmt_agent_trader.persistence.paths import PersistencePaths
+
+            manager = LockManager(PersistencePaths.from_settings(get_settings()).locks_root)
+            resolved_store = AtomicFileStore(manager)
+        else:
+            resolved_store = atomic_store
         self._store = AuditJsonlStore(
             self.path, resolved_store, fsync=fsync, rotation_bytes=rotation_bytes
         )
