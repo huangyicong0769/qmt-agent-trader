@@ -20,6 +20,8 @@ from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.locks import LockManager
 
 _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
@@ -364,10 +366,7 @@ def _propose_tool_registration(input_data: dict[str, Any], context: ToolContext)
     # Write proposal
     sb = _get_sandbox()
     proposal_root = sb.generated_root / "tools" if sb else Path("proposals")
-    proposal_root.mkdir(parents=True, exist_ok=True)
     proposal_path = proposal_root / f"tool_proposal_{candidate_id}.json"
-
-    import json
 
     proposal = {
         "tool_candidate_id": candidate_id,
@@ -376,7 +375,9 @@ def _propose_tool_registration(input_data: dict[str, Any], context: ToolContext)
         "status": "REVIEW_REQUIRED",
         "created_at": shanghai_now_iso(),
     }
-    proposal_path.write_text(json.dumps(proposal, ensure_ascii=False, indent=2), encoding="utf-8")
+    AtomicFileStore(LockManager(proposal_root / ".locks")).write_json(
+        proposal_path, proposal, create_only=True
+    )
 
     return {
         "proposal_path": str(proposal_path),
@@ -398,9 +399,7 @@ propose_tool_registration_tool: AgentTool = tool(
 
 
 def build_meta_tools(deps: AgentToolDependencies) -> list[AgentTool]:
-    definitions: list[
-        tuple[AgentTool, Callable[[dict[str, Any], ToolContext], dict[str, Any]]]
-    ] = [
+    definitions: list[tuple[AgentTool, Callable[[dict[str, Any], ToolContext], dict[str, Any]]]] = [
         (detect_tool_gap_tool, _detect_tool_gap),
         (create_tool_spec_tool, _create_tool_spec),
         (generate_tool_code_tool, _generate_tool_code),

@@ -39,6 +39,8 @@ from qmt_agent_trader.agent.tool_result import (
     normalize_tool_result,
 )
 from qmt_agent_trader.agent.tools.base import AgentTool
+from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.locks import LockManager
 
 _PROCESS_PAYLOAD_SPILL_BYTES = 1_000_000
 
@@ -360,9 +362,7 @@ class AgentToolRegistry:
                     execution_status=str(output.get("execution_status", "UNKNOWN")),
                     domain_status=str(output.get("domain_status", "UNKNOWN")),
                     evidence_status=str(output.get("evidence_status", "UNKNOWN")),
-                    recommendation_status=str(
-                        output.get("recommendation_status", "UNKNOWN")
-                    ),
+                    recommendation_status=str(output.get("recommendation_status", "UNKNOWN")),
                     raw_status=(
                         str(output.get("raw_status"))
                         if output.get("raw_status") is not None
@@ -373,18 +373,10 @@ class AgentToolRegistry:
                         if output.get("diagnostic_status") is not None
                         else None
                     ),
-                    blockers=[
-                        str(item)
-                        for item in output.get("blockers", [])
-                        if str(item)
-                    ]
+                    blockers=[str(item) for item in output.get("blockers", []) if str(item)]
                     if isinstance(output.get("blockers"), list)
                     else [],
-                    warnings=[
-                        str(item)
-                        for item in output.get("warnings", [])
-                        if str(item)
-                    ]
+                    warnings=[str(item) for item in output.get("warnings", []) if str(item)]
                     if isinstance(output.get("warnings"), list)
                     else [],
                     next_repair_tool=(
@@ -541,8 +533,7 @@ def _prepare_process_payload(
     if size <= _PROCESS_PAYLOAD_SPILL_BYTES:
         return payload
     path = _process_payload_path(tool.spec.name, context.run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(raw, encoding="utf-8")
+    AtomicFileStore(LockManager(path.parent / ".locks")).write_text(path, raw)
     result = payload.get("result")
     summary = _payload_summary(result)
     return {
