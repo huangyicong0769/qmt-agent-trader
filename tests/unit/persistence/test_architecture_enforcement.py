@@ -29,3 +29,11 @@ def test_architecture_scan_is_alias_mode_aware_and_fail_closed(tmp_path: Path) -
         "duckdb.connect",
         "invalid_python",
     } <= primitives
+
+
+def test_architecture_scan_detects_duckdb_module_alias_connect(tmp_path: Path) -> None:
+    (tmp_path / "alias.py").write_text('import duckdb as ddb\nddb.connect("db")\n')
+
+    violations = scan_forbidden_persistence(tmp_path)
+
+    assert any(item.primitive == "duckdb.connect" for item in violations)
