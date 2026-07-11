@@ -37,3 +37,19 @@ def test_architecture_scan_detects_duckdb_module_alias_connect(tmp_path: Path) -
     violations = scan_forbidden_persistence(tmp_path)
 
     assert any(item.primitive == "duckdb.connect" for item in violations)
+
+
+def test_architecture_scan_rejects_cwd_persistence_and_private_lock_roots(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "roots.py").write_text(
+        "from pathlib import Path\n"
+        "from qmt_agent_trader.persistence.locks import LockManager\n"
+        'root = Path("reports/research")\n'
+        'manager = LockManager(root / ".artifact-locks")\n'
+    )
+
+    primitives = {item.primitive for item in scan_forbidden_persistence(tmp_path)}
+
+    assert "cwd_relative_persistence_root" in primitives
+    assert "noncanonical_lock_root" in primitives

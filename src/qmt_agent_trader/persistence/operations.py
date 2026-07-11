@@ -21,7 +21,11 @@ from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.catalog import StoreCatalog
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
-from qmt_agent_trader.persistence.errors import StorageBackupError, StorageValidationError
+from qmt_agent_trader.persistence.errors import (
+    StorageBackupError,
+    StorageConflictError,
+    StorageValidationError,
+)
 from qmt_agent_trader.persistence.initialization import storage_migrations
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.migrations import MigrationRegistry
@@ -122,6 +126,26 @@ class StorageOperations:
                         "control_db",
                         "DUCKDB_CORRUPT",
                         type(exc).__name__,
+                        self.paths.control_db_path,
+                    )
+                )
+            try:
+                pending = MigrationRegistry(self.database).apply(storage_migrations(), dry_run=True)
+                if pending:
+                    diagnostics.append(
+                        StorageDiagnostic(
+                            "control_db",
+                            "MIGRATION_PENDING",
+                            "pending immutable migrations: " + ", ".join(pending),
+                            self.paths.control_db_path,
+                        )
+                    )
+            except StorageConflictError as exc:
+                diagnostics.append(
+                    StorageDiagnostic(
+                        "control_db",
+                        "MIGRATION_CHECKSUM_MISMATCH",
+                        exc.reason,
                         self.paths.control_db_path,
                     )
                 )
@@ -260,6 +284,9 @@ class StorageOperations:
                 success = json.loads((root / "SUCCESS.json").read_text(encoding="utf-8"))
                 if success.get("manifest_sha256") != _hash(manifest_path):
                     raise ValueError("success marker is not bound to manifest")
+            snapshot = StorageOperations(self._rebased_paths(files_root))
+            snapshot_result = snapshot.verify(deep=True)
+            diagnostics.extend(snapshot_result.diagnostics)
         except Exception as exc:
             diagnostics.append(
                 StorageDiagnostic(
@@ -267,6 +294,15 @@ class StorageOperations:
                 )
             )
         return VerificationResult(not diagnostics, True, diagnostics)
+
+    def _rebased_paths(self, project_root: Path) -> PersistencePaths:
+        values: dict[str, Path] = {"project_root": project_root}
+        for name in PersistencePaths.__dataclass_fields__:
+            if name == "project_root":
+                continue
+            original = getattr(self.paths, name)
+            values[name] = project_root / original.relative_to(self.paths.project_root)
+        return PersistencePaths(**values)
 
     def locks_report(self) -> list[dict[str, Any]]:
         now = datetime.now(tz=UTC).timestamp()

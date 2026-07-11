@@ -17,6 +17,10 @@ class PersistenceViolation:
 _ALLOWLIST = {
     "persistence/atomic_files.py": {"DataFrame.to_parquet"},
     "persistence/database.py": {"duckdb.connect"},
+    # These modules declare user-configurable relative defaults; composition
+    # resolves them beneath project_root before persistence access.
+    "core/config.py": {"cwd_relative_persistence_root"},
+    "web/config.py": {"cwd_relative_persistence_root"},
 }
 
 
@@ -66,6 +70,22 @@ def _primitive(
     if not isinstance(node, ast.Call):
         return None
     function = node.func
+    if isinstance(function, ast.Name) and function.id == "Path" and node.args:
+        value = node.args[0]
+        if (
+            isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+            and value.value.split("/", 1)[0] in {"reports", "data", "sessions", "approvals"}
+        ):
+            return "cwd_relative_persistence_root"
+    if isinstance(function, ast.Name) and function.id == "LockManager" and node.args:
+        strings = {
+            child.value
+            for child in ast.walk(node.args[0])
+            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+        }
+        if strings & {".locks", ".artifact-locks"}:
+            return "noncanonical_lock_root"
     if isinstance(function, ast.Attribute) and function.attr == "write_text":
         if (
             isinstance(function.value, ast.Call)

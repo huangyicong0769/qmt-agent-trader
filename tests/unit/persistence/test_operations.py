@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -10,11 +11,14 @@ import pytest
 
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.core.config import Settings
+from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import StorageBackupError, StorageValidationError
 from qmt_agent_trader.persistence.health import storage_health_payload
+from qmt_agent_trader.persistence.initialization import storage_migrations
 from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
 
@@ -47,6 +51,20 @@ def test_verify_is_read_only_and_deep_detects_corrupt_parquet(
     assert before == after
     assert not result.healthy
     assert any(d.code == "PARQUET_CORRUPT" for d in result.diagnostics)
+
+
+def test_verify_reports_immutable_pending_migrations_without_mutation(
+    operations: StorageOperations,
+) -> None:
+    migrations = storage_migrations()
+    MigrationRegistry(operations.database).apply(migrations[:1])
+    before = operations.paths.control_db_path.read_bytes()
+
+    result = operations.verify()
+
+    assert not result.healthy
+    assert any(item.code == "MIGRATION_PENDING" for item in result.diagnostics)
+    assert operations.paths.control_db_path.read_bytes() == before
 
 
 def test_transient_report_cache_and_tool_payload_are_excluded_but_governed_reports_are_included(
@@ -119,14 +137,14 @@ def test_backup_excludes_cache_temp_and_locks_and_verifies_hashes(
 def test_backup_waits_for_active_writer_barrier(operations: StorageOperations) -> None:
     record = operations.paths.sessions_root / "s.json"
     record.parent.mkdir(parents=True)
-    record.write_text("before")
+    record.write_text('{"value": "before"}')
     acquired = threading.Event()
 
     def writer() -> None:
         with operations.locks.resource_lock(record):
             acquired.set()
             time.sleep(0.15)
-            record.write_text("after")
+            record.write_text('{"value": "after"}')
 
     thread = threading.Thread(target=writer)
     thread.start()
@@ -138,7 +156,97 @@ def test_backup_waits_for_active_writer_barrier(operations: StorageOperations) -
 
     assert elapsed >= 0.1
     backed_up = receipt.path / "files" / "sessions/s.json"
-    assert backed_up.read_text() == "after"
+    assert json.loads(backed_up.read_text()) == {"value": "after"}
+
+
+def test_report_artifact_creation_cannot_appear_mid_backup(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = operations.paths.reports_root / "research"
+    store = artifact_store_for_root(root, lock_manager=operations.locks)
+    store.create(
+        "first.json",
+        b'{"generation": 1}',
+        metadata=ArtifactMetadata(
+            artifact_id="first", artifact_type="research_report", producer="test"
+        ),
+    )
+    entered, release, writer_done = threading.Event(), threading.Event(), threading.Event()
+    original_copy = shutil.copy2
+
+    def blocking_copy(source: Path, target: Path) -> Path:
+        if source.name == "first.json":
+            entered.set()
+            release.wait(timeout=2)
+        return original_copy(source, target)
+
+    monkeypatch.setattr("qmt_agent_trader.persistence.operations.shutil.copy2", blocking_copy)
+    receipts: list[object] = []
+    backup_thread = threading.Thread(target=lambda: receipts.append(operations.backup()))
+    backup_thread.start()
+    assert entered.wait(timeout=2)
+
+    def create_second() -> None:
+        store.create(
+            "second.json",
+            b'{"generation": 2}',
+            metadata=ArtifactMetadata(
+                artifact_id="second", artifact_type="research_report", producer="test"
+            ),
+        )
+        writer_done.set()
+
+    writer = threading.Thread(target=create_second)
+    writer.start()
+    assert not writer_done.wait(timeout=0.1)
+    release.set()
+    backup_thread.join(timeout=3)
+    writer.join(timeout=3)
+    assert writer_done.is_set()
+    receipt = receipts[0]
+    manifest = json.loads(receipt.manifest_path.read_text())
+    assert not any(item["source"].endswith("second.json") for item in manifest["files"])
+
+
+def test_nonincremental_parquet_write_waits_for_backup_barrier(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lake = DataLake(
+        operations.paths.lake_root,
+        operations.paths.control_db_path,
+        lock_manager=operations.locks,
+        database_coordinator=operations.database,
+    )
+    lake.write_parquet(pd.DataFrame({"generation": [1]}), "raw", "sample")
+    entered, release, writer_done = threading.Event(), threading.Event(), threading.Event()
+    original_copy = shutil.copy2
+
+    def blocking_copy(source: Path, target: Path) -> Path:
+        if source.name == "sample.parquet":
+            entered.set()
+            release.wait(timeout=2)
+        return original_copy(source, target)
+
+    monkeypatch.setattr("qmt_agent_trader.persistence.operations.shutil.copy2", blocking_copy)
+    receipts: list[object] = []
+    backup_thread = threading.Thread(target=lambda: receipts.append(operations.backup()))
+    backup_thread.start()
+    assert entered.wait(timeout=2)
+    writer = threading.Thread(
+        target=lambda: (
+            lake.write_parquet(pd.DataFrame({"generation": [2]}), "raw", "sample"),
+            writer_done.set(),
+        )
+    )
+    writer.start()
+    assert not writer_done.wait(timeout=0.1)
+    release.set()
+    backup_thread.join(timeout=3)
+    writer.join(timeout=3)
+    receipt = receipts[0]
+    copied = receipt.path / "files/data/lake/raw/sample.parquet"
+    assert pd.read_parquet(copied)["generation"].tolist() == [1]
+    assert pd.read_parquet(lake.dataset_path("raw", "sample"))["generation"].tolist() == [2]
 
 
 def test_backup_failure_has_no_success_marker(
@@ -151,6 +259,33 @@ def test_backup_failure_has_no_success_marker(
         "qmt_agent_trader.persistence.operations.shutil.copy2",
         lambda *_: (_ for _ in ()).throw(OSError("injected")),
     )
+
+    with pytest.raises(StorageBackupError):
+        operations.backup()
+
+    assert not list(operations.paths.backup_root.rglob("SUCCESS.json"))
+
+
+@pytest.mark.parametrize("kind", ["parquet", "artifact"])
+def test_corrupt_source_snapshot_cannot_publish_success(
+    operations: StorageOperations, kind: str
+) -> None:
+    if kind == "parquet":
+        source = operations.paths.lake_root / "raw/broken.parquet"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"not-parquet")
+    else:
+        store = artifact_store_for_root(
+            operations.paths.reports_root / "research", lock_manager=operations.locks
+        )
+        receipt = store.create(
+            "broken.json",
+            b'{"valid": true}',
+            metadata=ArtifactMetadata(
+                artifact_id="broken", artifact_type="research_report", producer="test"
+            ),
+        )
+        receipt.path.write_bytes(b"tampered")
 
     with pytest.raises(StorageBackupError):
         operations.backup()
@@ -201,6 +336,7 @@ def test_backup_success_publish_failure_removes_final_directory(
 def test_backup_uses_coordinator_checkpoint_snapshot(
     operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    MigrationRegistry(operations.database).apply(storage_migrations())
     with operations.database.write_transaction("seed") as connection:
         connection.execute("CREATE TABLE snapshot_value(value INTEGER)")
         connection.execute("INSERT INTO snapshot_value VALUES (7)")
