@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -222,7 +223,7 @@ class StorageOperations:
 
     def locks_report(self) -> list[dict[str, Any]]:
         now = datetime.now(tz=UTC).timestamp()
-        result = []
+        result: list[dict[str, Any]] = []
         if not self.paths.locks_root.exists():
             return result
         for path in sorted(self.paths.locks_root.glob("*.lock")):
@@ -340,7 +341,7 @@ class StorageOperations:
             roots.append(self.paths.quarantine_root)
         return roots
 
-    def _iter_backup_files(self):
+    def _iter_backup_files(self) -> Iterator[Path]:
         seen: set[Path] = set()
         for root in self._official_roots(include_quarantine=True):
             candidates = [root] if root.is_file() else root.rglob("*") if root.exists() else []
@@ -360,10 +361,10 @@ class StorageOperations:
         result: list[StorageDiagnostic] = []
         try:
             if path.suffix == ".parquet":
-                parquet = pq.ParquetFile(path)
+                parquet = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
                 if deep:
                     for index in range(parquet.num_row_groups):
-                        parquet.read_row_group(index)
+                        parquet.read_row_group(index)  # type: ignore[no-untyped-call]
             elif path.suffix == ".json":
                 value = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(value, dict) and "content_hash" in value and "data" in value:

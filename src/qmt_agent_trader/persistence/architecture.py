@@ -34,7 +34,9 @@ def scan_forbidden_persistence(root: Path) -> list[PersistenceViolation]:
         for node in ast.walk(tree):
             primitive = _primitive(node)
             if primitive is not None and primitive not in allowed:
-                violations.append(PersistenceViolation(path, node.lineno, primitive))
+                violations.append(
+                    PersistenceViolation(path, int(getattr(node, "lineno", 0)), primitive)
+                )
     return violations
 
 

@@ -30,6 +30,12 @@ cache, temp, locks, and prior backups. Restore remains a staged operator action.
 No SQLite, control service, cloud, or distributed migration was added. Explicit
 quarantine does not replace the specialized Tushare ledger recovery workflow.
 
+## Final verification
+
+`make check` completed successfully: Ruff passed, mypy reported no issues across
+200 source files, and all 614 tests passed (76 existing dependency/deprecation
+warnings). `git diff --check` was also clean.
+
 ## Commits
 
 - `748419f feat(storage): add local operations and persistence enforcement`
