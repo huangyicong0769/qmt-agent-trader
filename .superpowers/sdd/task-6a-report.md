@@ -38,6 +38,9 @@ coordination, metadata, and recovery policy.
 - Agent audit recursively scrubs exact credential keys and known credential
   patterns while preserving benign telemetry such as `token_count`,
   `token_budget`, and ordinary text containing the word “token”.
+  The normalized key classifier covers Settings and provider variants including
+  `qmt_gateway_hmac_secret`, `hmac_secret`, `api_secret`, and `access_key`, plus
+  hyphenated/camel-case suffix variants and credential assignment strings.
 - Added `ContentAddressedCache`: canonical JSON SHA-256 key, schema/TTL envelope,
   validated atomic writes, hit/miss/expiry/corruption/write-failure metrics, and
   structured warnings. Corruption, invalidation, warning-sink, and write faults
@@ -112,3 +115,5 @@ clean
 `fix(persistence): harden audit and disposable caches`
 
 Review correction: `fix(persistence): preserve audit generations and cache semantics`
+
+Final scrub correction: `fix(audit): cover normalized credential key variants`

@@ -187,18 +187,35 @@ _SECRET_KEYS = frozenset(
         "x-api-key",
     }
 )
+_SAFE_TELEMETRY_KEYS = frozenset({"token_budget", "token_count"})
+_CREDENTIAL_KEY_SUFFIXES = (
+    "access_key",
+    "access_token",
+    "api_key",
+    "api_secret",
+    "auth_token",
+    "authorization",
+    "client_secret",
+    "hmac_secret",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+)
 _CREDENTIAL_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
     re.compile(
-        r"\b(?:api[_-]?key|password|secret|token)\s*[=:]\s*[^\s,;]+",
+        r"\b(?:access[_-]?key|access[_-]?token|api[_-]?(?:key|secret)|"
+        r"auth[_-]?token|client[_-]?secret|hmac[_-]?secret|password|"
+        r"refresh[_-]?token|secret|token)\s*[=:]\s*[^\s,;]+",
         re.IGNORECASE,
     ),
 )
 
 
 def _scrub_value(value: Any, *, key: str = "") -> Any:
-    if key.lower() in _SECRET_KEYS:
+    if _is_credential_key(key):
         return "[scrubbed]"
     if isinstance(value, dict):
         return {
@@ -215,3 +232,14 @@ def _scrub_value(value: Any, *, key: str = "") -> Any:
 
 def _contains_credential(value: str) -> bool:
     return any(pattern.search(value) for pattern in _CREDENTIAL_PATTERNS)
+
+
+def _is_credential_key(key: str) -> bool:
+    snake_case = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake_case.lower()).strip("_")
+    if normalized in _SAFE_TELEMETRY_KEYS:
+        return False
+    return normalized in _SECRET_KEYS or any(
+        normalized == suffix or normalized.endswith(f"_{suffix}")
+        for suffix in _CREDENTIAL_KEY_SUFFIXES
+    )

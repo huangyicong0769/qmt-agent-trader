@@ -149,7 +149,15 @@ def test_public_loggers_preserve_contract_scrub_secrets_and_ignore_cwd(
             "credentials": {
                 "password": "hunter2",
                 "authorization": "Bearer abc.def.ghi",
+                "qmt_gateway_hmac_secret": "gateway-secret",
+                "hmac_secret": "hmac-value",
+                "api_secret": "api-value",
+                "access_key": "access-value",
+                "broker-api-secret": "broker-value",
+                "providerAccessKey": "provider-value",
             },
+            "benign_prose": "token usage and hmac checks are healthy; secret strategy note",
+            "assignment": "hmac_secret=gateway-value",
             "timestamp": datetime(2026, 1, 1, tzinfo=UTC),
         },
         warnings=["Bearer abc.def.ghi"],
@@ -166,7 +174,15 @@ def test_public_loggers_preserve_contract_scrub_secrets_and_ignore_cwd(
         "credentials": {
             "password": "[scrubbed]",
             "authorization": "[scrubbed]",
+            "qmt_gateway_hmac_secret": "[scrubbed]",
+            "hmac_secret": "[scrubbed]",
+            "api_secret": "[scrubbed]",
+            "access_key": "[scrubbed]",
+            "broker-api-secret": "[scrubbed]",
+            "providerAccessKey": "[scrubbed]",
         },
+        "benign_prose": "token usage and hmac checks are healthy; secret strategy note",
+        "assignment": "[scrubbed]",
         "timestamp": "2026-01-01 00:00:00+00:00",
     }
     assert row["warnings"] == ["[scrubbed]"]
