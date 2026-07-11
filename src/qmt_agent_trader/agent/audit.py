@@ -170,48 +170,36 @@ class AuditLogger:
         return datetime.datetime.now(tz=datetime.UTC).isoformat()
 
 
-_SECRET_KEYS = frozenset(
+_SAFE_TELEMETRY_NAMES = frozenset(
     {
-        "api_key",
-        "apikey",
-        "access_token",
-        "auth_token",
-        "authorization",
-        "client_secret",
-        "deepseek_api_key",
-        "password",
-        "refresh_token",
-        "secret",
-        "token",
-        "tushare_token",
-        "x-api-key",
+        "completiontokens",
+        "prompttokens",
+        "tokenbudget",
+        "tokencount",
+        "tokenusage",
+        "totaltokens",
     }
 )
-_SAFE_TELEMETRY_KEYS = frozenset({"token_budget", "token_count"})
-_CREDENTIAL_KEY_SUFFIXES = (
-    "access_key",
-    "access_token",
-    "api_key",
-    "api_secret",
-    "auth_token",
+_CREDENTIAL_NAME_SUFFIXES = (
+    "accesskey",
+    "accesstoken",
+    "apikey",
+    "apisecret",
+    "authtoken",
     "authorization",
-    "client_secret",
-    "hmac_secret",
+    "bearer",
+    "clientsecret",
+    "hmacsecret",
     "password",
-    "refresh_token",
+    "refreshtoken",
     "secret",
     "token",
 )
 _CREDENTIAL_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
-    re.compile(
-        r"\b(?:access[_-]?key|access[_-]?token|api[_-]?(?:key|secret)|"
-        r"auth[_-]?token|client[_-]?secret|hmac[_-]?secret|password|"
-        r"refresh[_-]?token|secret|token)\s*[=:]\s*[^\s,;]+",
-        re.IGNORECASE,
-    ),
 )
+_ASSIGNMENT_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9_.-]*)\s*=")
 
 
 def _scrub_value(value: Any, *, key: str = "") -> Any:
@@ -231,15 +219,13 @@ def _scrub_value(value: Any, *, key: str = "") -> Any:
 
 
 def _contains_credential(value: str) -> bool:
-    return any(pattern.search(value) for pattern in _CREDENTIAL_PATTERNS)
+    return any(pattern.search(value) for pattern in _CREDENTIAL_PATTERNS) or any(
+        _is_credential_key(match.group(1)) for match in _ASSIGNMENT_PATTERN.finditer(value)
+    )
 
 
 def _is_credential_key(key: str) -> bool:
-    snake_case = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
-    normalized = re.sub(r"[^a-z0-9]+", "_", snake_case.lower()).strip("_")
-    if normalized in _SAFE_TELEMETRY_KEYS:
+    canonical = re.sub(r"[^a-z0-9]+", "", key.lower())
+    if canonical in _SAFE_TELEMETRY_NAMES:
         return False
-    return normalized in _SECRET_KEYS or any(
-        normalized == suffix or normalized.endswith(f"_{suffix}")
-        for suffix in _CREDENTIAL_KEY_SUFFIXES
-    )
+    return any(canonical.endswith(suffix) for suffix in _CREDENTIAL_NAME_SUFFIXES)

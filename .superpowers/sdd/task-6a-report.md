@@ -41,6 +41,10 @@ coordination, metadata, and recovery policy.
   The normalized key classifier covers Settings and provider variants including
   `qmt_gateway_hmac_secret`, `hmac_secret`, `api_secret`, and `access_key`, plus
   hyphenated/camel-case suffix variants and credential assignment strings.
+  Keys are canonicalized to lowercase alphanumeric names so acronym forms such
+  as `providerAPISecret` and `qmtGatewayHMACSecret` cannot bypass suffix checks;
+  assignment identifiers use the same classifier while benign assignments and
+  token telemetry remain visible.
 - Added `ContentAddressedCache`: canonical JSON SHA-256 key, schema/TTL envelope,
   validated atomic writes, hit/miss/expiry/corruption/write-failure metrics, and
   structured warnings. Corruption, invalidation, warning-sink, and write faults
@@ -117,3 +121,5 @@ clean
 Review correction: `fix(persistence): preserve audit generations and cache semantics`
 
 Final scrub correction: `fix(audit): cover normalized credential key variants`
+
+Acronym scrub correction: `fix(audit): share canonical credential classification`
