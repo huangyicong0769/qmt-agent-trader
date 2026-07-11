@@ -407,7 +407,7 @@ def _storage_error_payload(exc: StorageError) -> dict[str, Any]:
         status = "conflict"
     else:
         status = "degraded"
-    payload = {
+    payload: dict[str, Any] = {
         "status": "STORAGE_ERROR",
         "storage_status": status,
         "storage_component": exc.store_name,
