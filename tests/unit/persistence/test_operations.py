@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.backtest.service import BacktestRunSummary, run_backtest_report
 from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
@@ -21,6 +22,7 @@ from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
+from qmt_agent_trader.services.research_report_service import save_research_report
 
 
 @pytest.fixture
@@ -206,6 +208,55 @@ def test_report_artifact_creation_cannot_appear_mid_backup(
     receipt = receipts[0]
     manifest = json.loads(receipt.manifest_path.read_text())
     assert not any(item["source"].endswith("second.json") for item in manifest["files"])
+
+
+@pytest.mark.parametrize("writer_kind", ["backtest", "research"])
+def test_real_report_writer_uses_custom_settings_backup_barrier(
+    operations: StorageOperations,
+    monkeypatch: pytest.MonkeyPatch,
+    writer_kind: str,
+) -> None:
+    lake = DataLake(
+        operations.paths.lake_root,
+        operations.paths.control_db_path,
+        lock_manager=operations.locks,
+        database_coordinator=operations.database,
+    )
+    monkeypatch.setattr(
+        "qmt_agent_trader.backtest.service.run_single_symbol_backtest",
+        lambda *_args, **_kwargs: BacktestRunSummary(
+            run_id="bt_barrier",
+            symbol="000001.SZ",
+            signal_date="20260101",
+            quantity=100,
+            fills=0,
+            execution_dates=[],
+            leakage_valid=True,
+        ),
+    )
+    done = threading.Event()
+
+    def write_report() -> None:
+        if writer_kind == "backtest":
+            run_backtest_report(
+                lake, reports_dir=operations.paths.reports_root / "backtests"
+            )
+        else:
+            save_research_report(
+                operations.paths.reports_root / "research",
+                artifact_type="test",
+                title="barrier",
+                payload={},
+                lock_manager=operations.locks,
+            )
+        done.set()
+
+    with operations.locks.backup_barrier():
+        writer = threading.Thread(target=write_report)
+        writer.start()
+        assert not done.wait(timeout=0.1)
+    writer.join(timeout=2)
+    assert done.is_set()
 
 
 def test_nonincremental_parquet_write_waits_for_backup_barrier(
