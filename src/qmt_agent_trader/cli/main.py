@@ -10,7 +10,6 @@ from typing import Annotated, cast
 
 import pandas as pd
 import typer
-from rich import print
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -60,8 +59,10 @@ from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_fa
 from qmt_agent_trader.persistence.artifacts import ArtifactStore, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.errors import StorageError
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.operations import StorageOperations, as_json
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
     append_order_plan_event,
@@ -82,6 +83,7 @@ agent_app = typer.Typer(help="LLM research agent commands.")
 strategy_app = typer.Typer(help="Strategy approval commands.")
 broker_app = typer.Typer(help="Remote QMT broker commands.")
 trade_app = typer.Typer(help="Order plan and trading commands.")
+storage_app = typer.Typer(help="Local persistence health and operations.")
 
 app.add_typer(data_app, name="data")
 app.add_typer(factor_app, name="factor")
@@ -90,10 +92,67 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(strategy_app, name="strategy")
 app.add_typer(broker_app, name="broker")
 app.add_typer(trade_app, name="trade")
+app.add_typer(storage_app, name="storage")
 
 
 def _settings() -> Settings:
     return get_settings()
+
+
+def _storage_operations() -> StorageOperations:
+    settings = _settings()
+    return StorageOperations(
+        PersistencePaths.from_settings(settings),
+        timeout_seconds=settings.remote_data_lock_timeout_seconds,
+    )
+
+
+@storage_app.command("inventory")
+def storage_inventory() -> None:
+    print_json([as_json(item) for item in _storage_operations().inventory()])
+
+
+@storage_app.command("verify")
+def storage_verify(deep: bool = typer.Option(False, "--deep")) -> None:
+    result = _storage_operations().verify(deep=deep)
+    print_json(as_json(result))
+    if not result.healthy:
+        raise typer.Exit(code=1)
+
+
+@storage_app.command("migrate")
+def storage_migrate(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    try:
+        applied = _storage_operations().migrate(dry_run=dry_run)
+    except StorageError as exc:
+        print_json({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})
+        raise typer.Exit(code=1) from exc
+    print_json({"status": "ok", "dry_run": dry_run, "migrations": applied})
+
+
+@storage_app.command("backup")
+def storage_backup() -> None:
+    try:
+        receipt = _storage_operations().backup()
+    except StorageError as exc:
+        print_json({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})
+        raise typer.Exit(code=1) from exc
+    print_json({"status": "ok", **as_json(receipt)})
+
+
+@storage_app.command("locks")
+def storage_locks() -> None:
+    print_json(_storage_operations().locks_report())
+
+
+@storage_app.command("quarantine")
+def storage_quarantine(store: str, record: str) -> None:
+    try:
+        receipt = _storage_operations().quarantine(store, record)
+    except StorageError as exc:
+        print_json({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})
+        raise typer.Exit(code=1) from exc
+    print_json({"status": "quarantined", **as_json(receipt)})
 
 
 def _artifact_store(root: Path) -> ArtifactStore:
@@ -314,9 +373,7 @@ def data_fetch(
 @data_app.command("build-table")
 def data_build_table(
     table: Annotated[str, typer.Option("--table")],
-    snapshot_as_of_date: Annotated[
-        str | None, typer.Option("--snapshot-as-of-date")
-    ] = None,
+    snapshot_as_of_date: Annotated[str | None, typer.Option("--snapshot-as-of-date")] = None,
 ) -> None:
     """Build one allowed silver table from registry-driven raw datasets."""
     print_json(DataTableBuilder(_data_lake()).build(table, snapshot_as_of_date=snapshot_as_of_date))
@@ -700,8 +757,11 @@ def _agent_runtime() -> AgentRuntime:
 def _agent_store() -> ExperimentStore:
     settings = _settings()
     paths = PersistencePaths.from_settings(settings)
-    return ExperimentStore(paths.experiments_root, locks_root=paths.locks_root,
-        quarantine_root=paths.quarantine_root / "experiments")
+    return ExperimentStore(
+        paths.experiments_root,
+        locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "experiments",
+    )
 
 
 @agent_app.command("experiments")
@@ -773,11 +833,7 @@ def agent_self_bootstrap(
     """Run the self-bootstrap pipeline to detect tool gaps."""
     reg = _agent_registry()
     store = _agent_store()
-    ids = (
-        [i.strip() for i in experiment_ids.split(",")]
-        if experiment_ids
-        else [f"auto_{recent}"]
-    )
+    ids = [i.strip() for i in experiment_ids.split(",")] if experiment_ids else [f"auto_{recent}"]
     workflow = SelfBootstrapWorkflow(reg, store)
     exp = workflow.run(ids)
     print_json(exp.model_dump(mode="json"))
@@ -1021,7 +1077,7 @@ def _string_list(value: object) -> list[str]:
 
 
 def print_json(payload: object) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 def _load_plan_or_error(identifier: str) -> OrderPlan:
