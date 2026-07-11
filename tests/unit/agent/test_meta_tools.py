@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
@@ -109,3 +112,29 @@ def test_meta_tool_generation_keeps_run_versions(registry) -> None:
     assert first["status"] == second["status"] == "generated"
     assert first["code_path"] != second["code_path"]
     assert "meta_one" in first["code_path"] and "meta_two" in second["code_path"]
+
+
+def test_generated_tool_tests_load_exact_supplied_run_version(registry) -> None:
+    spec = {"name": "candidate_exact"}
+    old = registry.run_tool(
+        "generate_tool_code", {"tool_spec": spec}, ToolContext(run_id="old_run")
+    )
+    current = registry.run_tool(
+        "generate_tool_code", {"tool_spec": spec}, ToolContext(run_id="current_run")
+    )
+    tests = registry.run_tool(
+        "generate_tool_tests",
+        {"tool_spec": spec, "code_path": current["code_path"]},
+        ToolContext(run_id="current_run"),
+    )
+
+    text = Path(tests["tests_path"]).read_text(encoding="utf-8")
+    assert current["code_path"] in text
+    assert old["code_path"] not in text
+    module_spec = importlib.util.spec_from_file_location(
+        "generated_tool_tests", tests["tests_path"]
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    module.test_empty_input()

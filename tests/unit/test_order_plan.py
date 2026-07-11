@@ -1,10 +1,12 @@
 import pytest
+from pydantic import ValidationError
 
 from qmt_agent_trader.broker.order import Order
 from qmt_agent_trader.broker.order_plan import OrderPlan, OrderPlanApproval, RiskChecks
 from qmt_agent_trader.core.types import ApprovalStatus, OrderType, Side
 from qmt_agent_trader.persistence.errors import StorageConflictError, StorageValidationError
 from qmt_agent_trader.services.order_plan_service import (
+    OrderPlanEvent,
     append_order_plan_event,
     load_order_plan,
     load_order_plan_events,
@@ -143,3 +145,13 @@ def test_order_plan_events_have_schema_identity_and_locked_concurrent_reads(tmp_
     events = snapshots[0]
     assert all(event.schema_version == 1 and event.event_id for event in events)
     assert {event.details["index"] for event in events} == set(range(12))
+
+
+def test_order_plan_event_rejects_unknown_schema_version() -> None:
+    with pytest.raises(ValidationError):
+        OrderPlanEvent(
+            schema_version=2,
+            order_plan_id="op_1",
+            event_type="RISK_CHECKED",
+            actor="test",
+        )

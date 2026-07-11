@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -43,7 +44,7 @@ def build_sample_paper_order_plan(strategy_id: str) -> OrderPlan:
 
 
 class OrderPlanEvent(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     event_id: str = Field(default_factory=lambda: new_id("ope"))
     order_plan_id: str
     event_type: str
@@ -94,7 +95,28 @@ def load_order_plan(
     if store.manifest_path_for(order_plan_id).exists():
         raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
     else:
-        raw = artifact_path.read_bytes()
+        def validate_legacy(content: bytes) -> bool:
+            candidate = OrderPlan.model_validate_json(content)
+            if candidate.order_plan_id != order_plan_id:
+                raise ValueError("order plan id does not match repository path")
+            return True
+
+        try:
+            receipt = store.adopt(
+                relative_path,
+                metadata=ArtifactMetadata(
+                    artifact_id=order_plan_id,
+                    artifact_type="order_plan",
+                    producer="services.order_plan_service.legacy_adoption",
+                ),
+                validator=validate_legacy,
+            )
+        except StorageValidationError as exc:
+            raise StorageValidationError(
+                store_name="order_plans", path=artifact_path, operation="adopt_legacy",
+                reason="legacy order plan is invalid", original_error=exc,
+            ) from exc
+        raw = receipt.content
     try:
         plan = OrderPlan.model_validate_json(raw)
     except Exception as exc:
@@ -109,17 +131,7 @@ def load_order_plan(
         raise
     if plan.order_plan_id != order_plan_id:
         raise ValueError("order plan id does not match repository path")
-    store.adopt(
-        relative_path,
-        metadata=ArtifactMetadata(
-            artifact_id=order_plan_id,
-            artifact_type="order_plan",
-            producer="services.order_plan_service.legacy_adoption",
-            related_strategy_id=plan.strategy_id,
-        ),
-    )
-    content = store.read_verified(order_plan_id, expected_relative_path=relative_path)
-    return OrderPlan.model_validate_json(content)
+    return plan
 
 
 def append_order_plan_event(

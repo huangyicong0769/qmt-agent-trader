@@ -142,6 +142,29 @@ def test_adopt_legacy_file_preserves_exact_bytes_and_is_idempotent(store: Artifa
     assert store.read_verified("legacy", expected_relative_path="reports/legacy.json") == original
 
 
+def test_adopt_validates_exact_locked_bytes_and_rejects_stale_expectation(
+    store: ArtifactStore,
+) -> None:
+    path = store.path_for("reports/legacy.json")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"current")
+
+    with pytest.raises(StorageConflictError, match="changed before adoption"):
+        store.adopt(
+            "reports/legacy.json",
+            metadata=_metadata("legacy"),
+            expected_content=b"stale",
+        )
+
+    adopted = store.adopt(
+        "reports/legacy.json",
+        metadata=_metadata("legacy"),
+        validator=lambda raw: raw == b"current",
+    )
+    assert adopted.content == b"current"
+    assert not path.with_name("unexpected").exists()
+
+
 def test_verify_rejects_manifest_identity_or_relative_path_substitution(
     store: ArtifactStore,
 ) -> None:

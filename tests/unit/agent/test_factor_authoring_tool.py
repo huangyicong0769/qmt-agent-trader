@@ -244,3 +244,19 @@ def test_same_factor_identity_can_generate_two_immutable_run_versions(registry) 
     assert first["code_path"] != second["code_path"]
     assert Path(first["code_path"]).exists() and Path(second["code_path"]).exists()
     assert "run_one" in first["code_path"] and "run_two" in second["code_path"]
+
+
+def test_run_directory_encoding_does_not_collapse_distinct_run_ids(registry) -> None:
+    python_function = (
+        "def compute_factor(data: pd.DataFrame, context: FactorContext) -> pd.Series:\n"
+        "    return pd.Series(data['close'], index=data.index, name='factor_value')"
+    )
+    payload = {
+        "factor_spec": {"factor_id": "factor_collision", "name": "collision"},
+        "python_function": python_function,
+    }
+    first = registry.run_tool("generate_factor_code", payload, ToolContext(run_id="a/b"))
+    second = registry.run_tool("generate_factor_code", payload, ToolContext(run_id="a?b"))
+
+    assert first["status"] == second["status"] == "generated"
+    assert Path(first["code_path"]).parent != Path(second["code_path"]).parent

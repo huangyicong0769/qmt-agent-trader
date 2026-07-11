@@ -41,6 +41,7 @@ class ArtifactReceipt(BaseModel):
     path: Path
     manifest_path: Path
     manifest: ArtifactManifest
+    content: bytes
 
 
 class ArtifactVerification(BaseModel):
@@ -152,13 +153,17 @@ class ArtifactStore:
                 if created_content and not manifest_path.exists():
                     path.unlink(missing_ok=True)
                 raise
-        return ArtifactReceipt(path=path, manifest_path=manifest_path, manifest=manifest)
+        return ArtifactReceipt(
+            path=path, manifest_path=manifest_path, manifest=manifest, content=content
+        )
 
     def adopt(
         self,
         relative_path: str | Path,
         *,
         metadata: ArtifactMetadata,
+        expected_content: bytes | None = None,
+        validator: Callable[[bytes], bool | None] | None = None,
     ) -> ArtifactReceipt:
         """Create a manifest for pre-existing immutable bytes without rewriting them."""
         path = self.path_for(relative_path)
@@ -174,6 +179,25 @@ class ArtifactStore:
                     reason="legacy artifact is missing or not a file",
                 )
             content = path.read_bytes()
+            if expected_content is not None and content != expected_content:
+                raise StorageConflictError(
+                    store_name="artifacts",
+                    path=path,
+                    operation="adopt",
+                    reason="artifact changed before adoption; retry from current bytes",
+                )
+            try:
+                valid = True if validator is None else validator(content)
+            except Exception as exc:
+                raise StorageValidationError(
+                    store_name="artifacts", path=path, operation="adopt",
+                    reason=f"legacy artifact validation failed: {exc}", original_error=exc,
+                ) from exc
+            if valid is False:
+                raise StorageValidationError(
+                    store_name="artifacts", path=path, operation="adopt",
+                    reason="legacy artifact validation failed",
+                )
             if manifest_path.exists():
                 manifest = self._validated_manifest(
                     metadata.artifact_id,
@@ -190,6 +214,7 @@ class ArtifactStore:
                     path=path,
                     manifest_path=manifest_path,
                     manifest=manifest,
+                    content=content,
                 )
             manifest = ArtifactManifest(
                 **metadata.model_dump(),
@@ -204,7 +229,9 @@ class ArtifactStore:
                 create_only=True,
                 model=ArtifactManifest,
             )
-            return ArtifactReceipt(path=path, manifest_path=manifest_path, manifest=manifest)
+            return ArtifactReceipt(
+                path=path, manifest_path=manifest_path, manifest=manifest, content=content
+            )
 
     def load_manifest(self, artifact_id: str) -> ArtifactManifest:
         path = self.manifest_path_for(artifact_id)

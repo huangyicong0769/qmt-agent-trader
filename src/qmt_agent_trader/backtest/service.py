@@ -136,11 +136,11 @@ def _load_governed_backtest_report(path: Path, reports_dir: Path) -> dict[str, o
     if store.manifest_path_for(run_id).exists():
         raw = store.read_verified(run_id, expected_relative_path=path.name)
     else:
-        raw = path.read_bytes()
-        value = json.loads(raw)
-        if not isinstance(value, dict) or str(value.get("run_id")) != run_id:
-            raise ValueError("legacy backtest report run_id does not match filename")
-        store.adopt(
+        def validate_legacy(content: bytes) -> bool:
+            candidate = json.loads(content)
+            return isinstance(candidate, dict) and str(candidate.get("run_id")) == run_id
+
+        receipt = store.adopt(
             path.name,
             metadata=ArtifactMetadata(
                 artifact_id=run_id,
@@ -148,7 +148,9 @@ def _load_governed_backtest_report(path: Path, reports_dir: Path) -> dict[str, o
                 producer="backtest.service.legacy_adoption",
                 related_run_id=run_id,
             ),
+            validator=validate_legacy,
         )
+        raw = receipt.content
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("backtest report is not a JSON object")

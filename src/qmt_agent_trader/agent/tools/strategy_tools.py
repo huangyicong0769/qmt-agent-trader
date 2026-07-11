@@ -6,7 +6,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import date, datetime
@@ -16,7 +15,7 @@ from typing import Any, Literal, cast
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
-from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.agent.sandbox import CodeSandbox, generated_identity_segment
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tool_result import (
@@ -209,8 +208,8 @@ def _generate_strategy_code(input_data: dict[str, Any], context: ToolContext) ->
         return {"status": "error", "message": "sandbox not wired"}
 
     try:
-        run_segment = _safe_generated_segment(context.run_id)
-        version_segment = _safe_generated_segment(spec.version)
+        run_segment = generated_identity_segment(context.run_id)
+        version_segment = generated_identity_segment(spec.version)
         run_root = f"strategies/drafts/{strategy_id}/{version_segment}/{run_segment}"
         code_path = sb.write_candidate_file(
             f"{run_root}/strategy.py",
@@ -1208,11 +1207,6 @@ def _bind_tool(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _safe_generated_segment(value: str) -> str:
-    segment = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
-    return segment or hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-
-
 def _factor_legs_from_selected(
     selected_factors: Any,
     constraints: dict[str, Any],
@@ -1421,21 +1415,24 @@ def _load_run_artifact(run_id: str) -> dict[str, Any] | None:
                 raw = store.read_verified(run_id, expected_relative_path=path.name)
                 payload = json.loads(raw)
             else:
-                payload = json.loads(path.read_bytes())
-                if not isinstance(payload, dict) or str(payload.get("run_id")) != run_id:
-                    return None
-                store.adopt(
+                def validate_legacy(content: bytes) -> bool:
+                    candidate = json.loads(content)
+                    return (
+                        isinstance(candidate, dict)
+                        and str(candidate.get("run_id")) == run_id
+                    )
+
+                receipt = store.adopt(
                     path.name,
                     metadata=ArtifactMetadata(
                         artifact_id=run_id,
-                        artifact_type=str(payload.get("artifact_type") or "legacy_run_report"),
+                        artifact_type="legacy_run_report",
                         producer="agent.tools.strategy_tools.legacy_report_adoption",
                         related_run_id=run_id,
-                        related_strategy_id=str(payload.get("strategy_id"))
-                        if payload.get("strategy_id")
-                        else None,
                     ),
+                    validator=validate_legacy,
                 )
+                payload = json.loads(receipt.content)
         except Exception as exc:
             return {
                 "run_id": run_id,

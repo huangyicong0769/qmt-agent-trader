@@ -121,18 +121,21 @@ def _load_governed_report(path: Path, reports_dir: Path) -> dict[str, object]:
         raw = store.read_verified(run_id, expected_relative_path=path.name)
         value = json.loads(raw)
     else:
-        value = _load_json_object(path)
-        if str(value.get("run_id")) != run_id:
-            raise ValueError("legacy research report run_id does not match filename")
-        store.adopt(
+        def validate_legacy(content: bytes) -> bool:
+            candidate = json.loads(content)
+            return isinstance(candidate, dict) and str(candidate.get("run_id")) == run_id
+
+        receipt = store.adopt(
             path.name,
             metadata=ArtifactMetadata(
                 artifact_id=run_id,
-                artifact_type=str(value.get("artifact_type") or "legacy_research_report"),
+                artifact_type="legacy_research_report",
                 producer="services.research_report_service.legacy_adoption",
                 related_run_id=run_id,
             ),
+            validator=validate_legacy,
         )
+        value = json.loads(receipt.content)
     if not isinstance(value, dict):
         raise ValueError(f"research report is not a JSON object: {path}")
     return cast(dict[str, object], value)

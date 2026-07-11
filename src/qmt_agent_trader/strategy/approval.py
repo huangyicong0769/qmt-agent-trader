@@ -99,7 +99,33 @@ def read_approval_file(
     if store.manifest_path_for(artifact_id).exists():
         raw = store.read_verified(artifact_id, expected_relative_path=path.name)
     else:
-        raw = path.read_bytes()
+        def validate_legacy(content: bytes) -> bool:
+            candidate = StrategyApproval.model_validate(yaml.safe_load(content))
+            if _approval_filename(candidate) != path.name:
+                raise ValueError("approval filename identity does not match parsed strategy")
+            return True
+
+        try:
+            receipt = store.adopt(
+                path.name,
+                metadata=ArtifactMetadata(
+                    artifact_id=artifact_id,
+                    artifact_type="strategy_approval",
+                    producer="strategy.approval.legacy_adoption",
+                ),
+                validator=validate_legacy,
+            )
+        except StorageValidationError as exc:
+            reason = (
+                "approval filename identity does not match parsed strategy"
+                if "filename identity" in exc.reason
+                else "legacy approval is invalid"
+            )
+            raise StorageValidationError(
+                store_name="approvals", path=path, operation="adopt_legacy",
+                reason=reason, original_error=exc,
+            ) from exc
+        raw = receipt.content
     try:
         approval = StrategyApproval.model_validate(yaml.safe_load(raw))
     except Exception as exc:
@@ -110,21 +136,17 @@ def read_approval_file(
             reason="legacy approval is invalid",
             original_error=exc,
         ) from exc
-    store.adopt(
-        path.name,
-        metadata=ArtifactMetadata(
-            artifact_id=artifact_id,
-            artifact_type="strategy_approval",
-            producer="strategy.approval.legacy_adoption",
-            related_strategy_id=approval.strategy_id,
-        ),
-    )
-    content = store.read_verified(
-        artifact_id,
-        expected_relative_path=path.name,
-    )
-    return StrategyApproval.model_validate(yaml.safe_load(content))
+    if _approval_filename(approval) != path.name:
+        raise StorageValidationError(
+            store_name="approvals", path=path, operation="read",
+            reason="approval filename identity does not match parsed strategy",
+        )
+    return approval
 
 
 def _approval_artifact_id(filename: str) -> str:
     return f"approval:{filename}"
+
+
+def _approval_filename(approval: StrategyApproval) -> str:
+    return f"{approval.strategy_id}_{approval.strategy_version}.approval.yaml"

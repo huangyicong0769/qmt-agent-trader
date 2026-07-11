@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import importlib.util
 import json
 import re
@@ -19,7 +18,7 @@ import pandas as pd
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
-from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.agent.sandbox import CodeSandbox, generated_identity_segment
 from qmt_agent_trader.agent.schemas import FactorSpec, ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tool_result import (
@@ -204,7 +203,7 @@ def _generate_factor_code(input_data: dict[str, Any], context: ToolContext) -> d
         return {"status": "error", "message": "sandbox not wired"}
 
     try:
-        run_segment = _safe_generated_segment(context.run_id)
+        run_segment = generated_identity_segment(context.run_id)
         run_root = f"factors/drafts/{factor_id}/{run_segment}"
         code_path = sb.write_candidate_file(
             f"{run_root}/factor.py",
@@ -910,11 +909,6 @@ def _resolve_factor_code_path(
         if candidate.exists():
             return candidate, True
     return code_path, False
-
-
-def _safe_generated_segment(value: str) -> str:
-    segment = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
-    return segment or hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _load_factor_spec(spec_path_raw: str, sb: CodeSandbox) -> dict[str, Any]:

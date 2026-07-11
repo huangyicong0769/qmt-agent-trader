@@ -82,3 +82,19 @@ def test_invalid_legacy_approval_is_structured_and_not_adopted(tmp_path) -> None
         read_approval_file(path)
 
     assert not (tmp_path / ".manifests").exists()
+
+
+def test_legacy_approval_filename_must_match_parsed_identity(tmp_path) -> None:
+    path = tmp_path / "expected_1.0.approval.yaml"
+    path.write_text(
+        "strategy_id: other\nstrategy_name: Other\nstrategy_version: '2.0'\n"
+        "approved_by: human\napproved_at: '2026-07-11T00:00:00+08:00'\n"
+        "allowed_universe: [ETF]\nallowed_accounts: [paper]\n"
+        "max_single_position_pct: 0.1\nmax_turnover_daily_pct: 0.2\n"
+        "max_order_value: 1000\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StorageValidationError, match="filename identity"):
+        read_approval_file(path)
+    assert not (tmp_path / ".manifests").exists()

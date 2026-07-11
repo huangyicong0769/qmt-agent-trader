@@ -10,6 +10,7 @@ saved to disk. The sandbox enforces:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -76,6 +77,12 @@ _ALLOWED_IMPORT_PREFIXES: tuple[str, ...] = (
     "sklearn",
     "statsmodels",
 )
+
+
+def generated_identity_segment(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._") or "run"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    return f"{slug}-{digest}"
 
 
 class CodeSandbox:

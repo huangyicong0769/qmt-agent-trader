@@ -8,8 +8,6 @@ directly into the formal registry.
 
 from __future__ import annotations
 
-import hashlib
-import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
@@ -17,7 +15,7 @@ from typing import Any
 
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.permissions import PermissionLevel
-from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.agent.sandbox import CodeSandbox, generated_identity_segment
 from qmt_agent_trader.agent.schemas import ToolContext, ToolSpec
 from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
@@ -27,11 +25,6 @@ _sandbox: CodeSandbox | None = None
 _store: ExperimentStore | None = None
 _sandbox_var: ContextVar[CodeSandbox | None] = ContextVar("meta_tool_sandbox", default=None)
 _store_var: ContextVar[ExperimentStore | None] = ContextVar("meta_tool_store", default=None)
-
-
-def _safe_generated_segment(value: str) -> str:
-    segment = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
-    return segment or hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore) -> None:
@@ -176,7 +169,7 @@ def run(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
         return {"status": "error", "message": "sandbox not wired"}
 
     run_id = context.run_id
-    run_segment = _safe_generated_segment(run_id)
+    run_segment = generated_identity_segment(run_id)
     rel_path = f"tools/{safe_name}/{version}/{run_segment}/tool.py"
     try:
         code_path = sb.write_candidate_file(
@@ -209,41 +202,50 @@ def _generate_tool_tests(input_data: dict[str, Any], context: ToolContext) -> di
     name = spec_data.get("name", "candidate")
     safe_name = name.replace(" ", "_").lower()
     version = "0.1.0"
-    input_data.get("code_path", "")
+    code_path_raw = str(input_data.get("code_path") or "")
+    sb = _get_sandbox()
+    if sb is None:
+        return {"status": "error", "message": "sandbox not wired"}
+    try:
+        code_path = sb.validate_path(code_path_raw)
+    except Exception as exc:
+        return {"tests_path": "", "error": str(exc)}
+    if not code_path.is_file():
+        return {"tests_path": "", "error": "code_path is required and must exist"}
 
     test_code = f'''"""Tests for candidate tool: {name}."""
 
-import pytest
+import importlib.util
+from pathlib import Path
 from qmt_agent_trader.agent.schemas import ToolContext
 
+CODE_PATH = Path({str(code_path)!r})
+SPEC = importlib.util.spec_from_file_location("candidate_tool_exact_run", CODE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+run = MODULE.run
 
 def test_empty_input():
     """Normal input produces a status."""
-    from generated.tools.{safe_name}.v0_1_0.tool import run
     result = run({{}}, ToolContext(run_id="test"))
     assert "status" in result
 
 
 def test_error_input():
     """Invalid input should not crash."""
-    from generated.tools.{safe_name}.v0_1_0.tool import run
     result = run(None, ToolContext(run_id="test"))  # type: ignore
     assert isinstance(result, dict)
 
 
 def test_audit_trail():
     """Tool context run_id must propagate."""
-    from generated.tools.{safe_name}.v0_1_0.tool import run
     result = run({{}}, ToolContext(run_id="audit-test"))
     assert isinstance(result, dict)
 '''
 
-    sb = _get_sandbox()
-    if sb is None:
-        return {"status": "error", "message": "sandbox not wired"}
-
     run_id = context.run_id
-    run_segment = _safe_generated_segment(run_id)
+    run_segment = generated_identity_segment(run_id)
     rel_path = f"tools/{safe_name}/{version}/{run_segment}/test_tool.py"
     try:
         tests_path = sb.write_candidate_file(
