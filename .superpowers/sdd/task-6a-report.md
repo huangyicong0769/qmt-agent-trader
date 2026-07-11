@@ -28,13 +28,16 @@ coordination, metadata, and recovery policy.
 - Audit rows carry `schema_version=2`; legacy unversioned rows remain readable.
 - Shared canonical `LockManager` plus `AtomicFileStore` serialize multi-process
   append and rotation. Each row is encoded once and emitted by one `os.write`.
-- Rotation size check, rename, and boundary append share one resource lock.
+- Rotation size check, monotonic numbered-generation rename, and boundary append
+  share one resource lock. Retention defaults to unlimited, and readers/verifier
+  traverse every generation in order before the active file.
 - Flush is intrinsic to the descriptor write and fsync is configurable through
   `Settings.audit_fsync`; rotation size is `Settings.audit_rotation_bytes`.
 - Verification reports an incomplete final line as a truncated tail and reports
   malformed complete lines as line-numbered mid-file corruption.
-- Agent audit retains existing error-message scrub and recursively scrubs secret
-  keys/suspicious secret-bearing strings across the persisted record.
+- Agent audit recursively scrubs exact credential keys and known credential
+  patterns while preserving benign telemetry such as `token_count`,
+  `token_budget`, and ordinary text containing the word “token”.
 - Added `ContentAddressedCache`: canonical JSON SHA-256 key, schema/TTL envelope,
   validated atomic writes, hit/miss/expiry/corruption/write-failure metrics, and
   structured warnings. Corruption, invalidation, warning-sink, and write faults
@@ -42,6 +45,9 @@ coordination, metadata, and recovery policy.
 - Runtime creates one cache and injects it through `AgentToolDependencies` and
   context-scoped factor/strategy tool execution. Module-level and CWD cache roots
   were removed.
+- Cache reads, writes, and conditional invalidation share the canonical resource
+  lock. Factor freshness rejection uses the cache API; optional cache absence
+  degrades to an ordinary miss and never changes tool availability.
 
 ## Compatibility and migrations
 
@@ -58,11 +64,16 @@ coordination, metadata, and recovery policy.
   `persistence.audit` and `persistence.cache` did not exist.
 - RED: adapter test then failed because public `AuditLogger` did not accept the
   injected atomic store.
-- GREEN: focused audit/cache/adapter/tool suites: 40 passed.
+- Review RED: six forced rotations retained only the last two events; a
+  multiprocess rotation test retained 2/80. Optional cache absence returned
+  `NOT_IMPLEMENTED`; factor freshness bypassed cache metrics/API; and a writer
+  completed while a corrupt reader was paused before invalidation.
+- GREEN: focused audit/cache/adapter/tool suites: 67 passed.
 
-Covered multi-process audit append, half-tail, mid-file corruption, rotation
-boundary, fsync policy, secret scrub, backward read, CWD independence, cache
-TTL/hit/miss, corrupt invalidation, fault preservation, and concurrent writes.
+Covered multi-process audit append, repeated and multiprocess rotation, half-tail,
+mid-file corruption, fsync policy, exact secret scrub, backward read, CWD
+independence, cache TTL/hit/miss, corrupt/freshness invalidation, unlink and write
+fault preservation, optional-cache behavior, and controlled concurrent replacement.
 
 ## Verification
 
@@ -73,10 +84,11 @@ uv run pytest tests/unit/persistence/test_audit_jsonl.py \
   tests/unit/agent/test_tool_registry.py \
   tests/unit/agent/test_factor_workflow.py \
   tests/unit/agent/test_strategy_workflow.py -q
-40 passed
+67 passed
 
 uv run ruff check src tests/unit/persistence/test_audit_jsonl.py \
-  tests/unit/persistence/test_content_cache.py tests/unit/agent/test_factor_cache.py
+  tests/unit/persistence/test_content_cache.py tests/unit/agent/test_factor_cache.py \
+  tests/unit/agent/test_factor_workflow.py
 All checks passed
 
 uv run mypy src
@@ -92,10 +104,11 @@ clean
   failure remains a structured `StorageAppendRollbackError`.
 - Cache corruption is deleted with warning/metric; failed replacement preserves
   the previous valid entry and degrades to a miss.
-- Rotation currently retains one `.1` generation, matching the bounded safe
-  rotation implemented here. Broader retention/export policy belongs to later
-  artifact/operations work.
+- Rotation generations are unlimited by default because audit JSONL is source of
+  truth; no implicit retention path silently deletes prior events.
 
 ## Commit
 
 `fix(persistence): harden audit and disposable caches`
+
+Review correction: `fix(persistence): preserve audit generations and cache semantics`

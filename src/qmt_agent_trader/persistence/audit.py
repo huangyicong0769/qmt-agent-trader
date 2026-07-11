@@ -30,17 +30,22 @@ class AuditVerification:
 
 def verify_audit_jsonl(path: Path) -> AuditVerification:
     result = AuditVerification(path=path)
-    if not path.exists():
+    paths = _audit_paths(path)
+    if not paths:
         return result
-    raw_lines = path.read_bytes().splitlines(keepends=True)
-    for index, raw in enumerate(raw_lines, start=1):
+    raw_lines = [
+        (source, raw)
+        for source in paths
+        for raw in source.read_bytes().splitlines(keepends=True)
+    ]
+    for index, (source, raw) in enumerate(raw_lines, start=1):
         try:
             value = json.loads(raw)
             if not isinstance(value, dict):
                 raise ValueError("audit record must be an object")
             result.valid_records += 1
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-            is_final = index == len(raw_lines)
+            is_final = source == path and index == len(raw_lines)
             if is_final and not raw.endswith(b"\n"):
                 result.tail_truncated = True
             else:
@@ -77,11 +82,8 @@ class AuditJsonlStore:
         return verify_audit_jsonl(self.path)
 
     def read_records(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        paths = [self.path.with_suffix(self.path.suffix + ".1"), self.path]
         rows: list[dict[str, Any]] = []
-        for path in paths:
-            if not path.exists():
-                continue
+        for path in _audit_paths(self.path):
             for raw in path.read_bytes().splitlines(keepends=True):
                 try:
                     value = json.loads(raw)
@@ -90,3 +92,21 @@ class AuditJsonlStore:
                 if isinstance(value, dict):
                     rows.append(value)
         return rows[-limit:] if limit is not None else rows
+
+
+def _audit_paths(path: Path) -> list[Path]:
+    legacy = path.with_suffix(path.suffix + ".1")
+    prefix = f"{path.name}."
+    generations = sorted(
+        (
+            candidate
+            for candidate in path.parent.glob(f"{path.name}.*")
+            if candidate != legacy and candidate.name.removeprefix(prefix).isdigit()
+        ),
+        key=lambda candidate: int(candidate.name.removeprefix(prefix)),
+    )
+    return [
+        *([legacy] if legacy.exists() else []),
+        *generations,
+        *([path] if path.exists() else []),
+    ]

@@ -32,7 +32,12 @@ def get_cached_validation(
     if result is None:
         return None
     if result.get("status") == "validated" and not _REQUIRED_VALIDATION_FIELDS.issubset(result):
-        cache.path_for("factor-validation", key).unlink(missing_ok=True)
+        cache.invalidate(
+            "factor-validation",
+            key,
+            expected_value=result,
+            reason="CACHE_VALIDATION_STALE",
+        )
         return None
     return result
 

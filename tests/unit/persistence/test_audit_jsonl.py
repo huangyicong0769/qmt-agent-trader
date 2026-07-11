@@ -20,6 +20,16 @@ def _append_rows(path: str, locks: str, worker: int) -> None:
         store.append({"worker": worker, "index": index})
 
 
+def _append_rotating_rows(path: str, locks: str, worker: int) -> None:
+    store = AuditJsonlStore(
+        Path(path),
+        AtomicFileStore(LockManager(Path(locks))),
+        rotation_bytes=180,
+    )
+    for index in range(20):
+        store.append({"worker": worker, "index": index, "padding": "x" * 40})
+
+
 def test_audit_multi_process_append_is_complete(tmp_path: Path) -> None:
     path = tmp_path / "audit/events.jsonl"
     processes = [
@@ -55,19 +65,44 @@ def test_verifier_distinguishes_half_tail_from_mid_file_corruption(tmp_path: Pat
     assert result.corruptions[0].line_number == 2
 
 
-def test_rotation_keeps_boundary_event_and_reader_supports_legacy(tmp_path: Path) -> None:
+def test_repeated_rotation_preserves_every_event_in_order(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     audit = AuditJsonlStore(
         path,
         AtomicFileStore(LockManager(tmp_path / "locks")),
         rotation_bytes=90,
     )
-    audit.append({"event": "first", "padding": "x" * 40})
-    audit.append({"event": "boundary", "padding": "y" * 40})
+    for index in range(6):
+        audit.append({"event": index, "padding": "x" * 40})
 
     events = [row["event"] for row in audit.read_records()]
-    assert events == ["first", "boundary"]
-    assert path.with_suffix(".jsonl.1").exists()
+    assert events == list(range(6))
+    assert len(list(tmp_path.glob("audit.jsonl.*"))) >= 3
+    assert audit.verify().valid_records == 6
+
+
+def test_multiprocess_rotation_preserves_all_boundary_events(tmp_path: Path) -> None:
+    path = tmp_path / "audit/events.jsonl"
+    locks = tmp_path / "locks"
+    processes = [
+        multiprocessing.Process(
+            target=_append_rotating_rows, args=(str(path), str(locks), worker)
+        )
+        for worker in range(4)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+        assert process.exitcode == 0
+
+    audit = AuditJsonlStore(path, AtomicFileStore(LockManager(locks)), rotation_bytes=180)
+    rows = audit.read_records()
+    assert len(rows) == 80
+    assert {(row["worker"], row["index"]) for row in rows} == {
+        (worker, index) for worker in range(4) for index in range(20)
+    }
+    assert audit.verify().valid_records == 80
 
 
 def test_store_schema_version_cannot_be_overridden_by_record(tmp_path: Path) -> None:
@@ -108,9 +143,16 @@ def test_public_loggers_preserve_contract_scrub_secrets_and_ignore_cwd(
         output_data={
             "nested": {"api_key": "sk-secret"},
             "safe": "visible",
+            "token_count": 42,
+            "token_budget": 100,
+            "description": "token usage is within budget",
+            "credentials": {
+                "password": "hunter2",
+                "authorization": "Bearer abc.def.ghi",
+            },
             "timestamp": datetime(2026, 1, 1, tzinfo=UTC),
         },
-        warnings=["bearer leaked"],
+        warnings=["Bearer abc.def.ghi"],
     )
     row = json.loads(agent_path.read_text())
     assert row["schema_version"] == 2
@@ -118,6 +160,13 @@ def test_public_loggers_preserve_contract_scrub_secrets_and_ignore_cwd(
     assert row["output_data"] == {
         "nested": {"api_key": "[scrubbed]"},
         "safe": "visible",
+        "token_count": 42,
+        "token_budget": 100,
+        "description": "token usage is within budget",
+        "credentials": {
+            "password": "[scrubbed]",
+            "authorization": "[scrubbed]",
+        },
         "timestamp": "2026-01-01 00:00:00+00:00",
     }
     assert row["warnings"] == ["[scrubbed]"]

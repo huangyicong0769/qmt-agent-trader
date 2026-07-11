@@ -35,6 +35,9 @@ class ContentAddressedCache:
             "misses": 0,
             "expired": 0,
             "corrupt_invalidations": 0,
+            "invalidations": 0,
+            "invalidation_failures": 0,
+            "read_failures": 0,
             "write_failures": 0,
         }
 
@@ -49,25 +52,37 @@ class ContentAddressedCache:
 
     def get(self, namespace: str, key: str) -> dict[str, Any] | None:
         path = self.path_for(namespace, key)
-        if not path.exists():
-            self.metrics["misses"] += 1
-            return None
         try:
-            envelope = json.loads(path.read_text(encoding="utf-8"))
-            if not self._valid_envelope(envelope, key):
-                raise ValueError("invalid cache envelope")
-            if datetime.fromisoformat(envelope["expires_at"]) <= self.clock():
-                self.metrics["expired"] += 1
-                self._invalidate(path)
-                return None
-            self.metrics["hits"] += 1
-            return dict(envelope["value"])
+            with self.atomic_store.lock_manager.resource_lock(path):
+                if not path.exists():
+                    self.metrics["misses"] += 1
+                    return None
+                try:
+                    envelope = json.loads(path.read_text(encoding="utf-8"))
+                    if not self._valid_envelope(envelope, key):
+                        raise ValueError("invalid cache envelope")
+                    if datetime.fromisoformat(envelope["expires_at"]) <= self.clock():
+                        self.metrics["expired"] += 1
+                        self._invalidate_unlocked(path)
+                        return None
+                    self.metrics["hits"] += 1
+                    return dict(envelope["value"])
+                except Exception as exc:
+                    self.metrics["corrupt_invalidations"] += 1
+                    self._invalidate_unlocked(path)
+                    self._warn(
+                        {
+                            "reason": "CACHE_CORRUPT_INVALIDATED",
+                            "path": str(path),
+                            "error": type(exc).__name__,
+                        }
+                    )
+                    return None
         except Exception as exc:
-            self.metrics["corrupt_invalidations"] += 1
-            self._invalidate(path)
+            self.metrics["read_failures"] += 1
             self._warn(
                 {
-                    "reason": "CACHE_CORRUPT_INVALIDATED",
+                    "reason": "CACHE_READ_FAILED",
                     "path": str(path),
                     "error": type(exc).__name__,
                 }
@@ -93,12 +108,13 @@ class ContentAddressedCache:
         }
         path = self.path_for(namespace, key)
         try:
-            self.atomic_store.write_json(
-                path,
-                envelope,
-                validator=lambda item: self._valid_envelope(item, key),
-                fault_hook=fault_hook,
-            )
+            with self.atomic_store.lock_manager.resource_lock(path):
+                self.atomic_store.write_json(
+                    path,
+                    envelope,
+                    validator=lambda item: self._valid_envelope(item, key),
+                    fault_hook=fault_hook,
+                )
         except Exception as exc:
             self.metrics["write_failures"] += 1
             self._warn(
@@ -111,10 +127,32 @@ class ContentAddressedCache:
             if raise_on_error:
                 raise
 
-    def _invalidate(self, path: Path) -> None:
+    def invalidate(
+        self,
+        namespace: str,
+        key: str,
+        *,
+        expected_value: dict[str, Any] | None = None,
+        reason: str = "CACHE_INVALIDATED",
+    ) -> bool:
+        path = self.path_for(namespace, key)
         try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
+            with self.atomic_store.lock_manager.resource_lock(path):
+                if not path.exists():
+                    return False
+                if expected_value is not None:
+                    envelope = json.loads(path.read_text(encoding="utf-8"))
+                    if not self._valid_envelope(envelope, key):
+                        return False
+                    if envelope["value"] != expected_value:
+                        return False
+                removed = self._invalidate_unlocked(path)
+                if removed:
+                    self.metrics["invalidations"] += 1
+                    self._warn({"reason": reason, "path": str(path)})
+                return removed
+        except Exception as exc:
+            self.metrics["invalidation_failures"] += 1
             self._warn(
                 {
                     "reason": "CACHE_INVALIDATION_FAILED",
@@ -122,6 +160,22 @@ class ContentAddressedCache:
                     "error": type(exc).__name__,
                 }
             )
+            return False
+
+    def _invalidate_unlocked(self, path: Path) -> bool:
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except OSError as exc:
+            self.metrics["invalidation_failures"] += 1
+            self._warn(
+                {
+                    "reason": "CACHE_INVALIDATION_FAILED",
+                    "path": str(path),
+                    "error": type(exc).__name__,
+                }
+            )
+            return False
 
     def _warn(self, payload: dict[str, object]) -> None:
         try:

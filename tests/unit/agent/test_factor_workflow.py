@@ -7,11 +7,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from qmt_agent_trader.agent.audit import AuditLogger
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ExperimentStatus, ToolContext
+from qmt_agent_trader.agent.tool_dependencies import AgentToolDependencies
 from qmt_agent_trader.agent.tools import build_agent_registry
+from qmt_agent_trader.agent.tools.factor_tools import build_factor_tools
 from qmt_agent_trader.agent.workflows.factor_discovery import FactorDiscoveryWorkflow
+from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.data.storage import DataLake
 
 
@@ -162,6 +166,36 @@ def test_factor_evaluation_blocks_unbounded_long_window_without_symbols(registry
     assert result["reason"] == "UNBOUNDED_FACTOR_EVALUATION"
     assert result["missing_inputs"] == ["symbols"]
     assert result["next_repair_tool"] == "query_universe"
+
+
+def test_factor_evaluation_without_optional_cache_degrades_to_miss(
+    lake, registry, tmp_path
+) -> None:
+    deps = AgentToolDependencies(
+        settings=Settings(project_root=tmp_path),
+        data_lake=lake,
+        sandbox=CodeSandbox(tmp_path / "generated-no-cache"),
+        experiment_store=ExperimentStore(tmp_path / "experiments-no-cache"),
+        audit_logger=AuditLogger(tmp_path / "audit-no-cache.jsonl"),
+        cache=None,
+    )
+    tool = next(
+        item
+        for item in build_factor_tools(deps)
+        if item.spec.name == "evaluate_factor_candidate"
+    )
+
+    result = tool.run(
+        {
+            "factor_id": "momentum_20d",
+            "start_date": "20240105",
+            "end_date": "20240120",
+        },
+        ToolContext(run_id="factor-no-cache"),
+    )
+
+    assert result["status"] != "NOT_IMPLEMENTED"
+    assert result["cache_hit"] is False
 
 
 def test_agent_can_list_saved_factors_and_duplicate_saves_are_rejected(registry) -> None:

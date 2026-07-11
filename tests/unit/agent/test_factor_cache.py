@@ -12,8 +12,15 @@ def _store(tmp_path):
     )
 
 
-def test_cached_validation_without_freshness_fields_is_ignored(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_cached_validation_without_freshness_fields_is_invalidated_through_cache_api(
+    tmp_path,
+) -> None:
+    warnings = []
+    store = ContentAddressedCache(
+        tmp_path / "cache",
+        AtomicFileStore(LockManager(tmp_path / "locks")),
+        warning_sink=warnings.append,
+    )
     cache.put_cached_validation(
         "factor_a",
         "20240101",
@@ -23,6 +30,8 @@ def test_cached_validation_without_freshness_fields_is_ignored(tmp_path) -> None
     )
 
     assert cache.get_cached_validation("factor_a", "20240101", "20240131", store) is None
+    assert store.metrics["invalidations"] == 1
+    assert warnings[-1]["reason"] == "CACHE_VALIDATION_STALE"
 
 
 def test_cached_validation_with_freshness_fields_is_returned(tmp_path) -> None:

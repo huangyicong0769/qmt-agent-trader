@@ -124,7 +124,7 @@ class AtomicFileStore:
                 and path.stat().st_size > 0
                 and path.stat().st_size + len(encoded) > rotation_bytes
             ):
-                rotated = path.with_suffix(path.suffix + ".1")
+                rotated = _next_jsonl_generation(path)
                 os.replace(path, rotated)
                 _fsync_directory(path.parent)
             self._append_encoded_jsonl(path, encoded, fsync=fsync)
@@ -259,6 +259,16 @@ def _model_value(
 
 def _temp_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+
+
+def _next_jsonl_generation(path: Path) -> Path:
+    prefix = f"{path.name}."
+    generations = [
+        int(candidate.name.removeprefix(prefix))
+        for candidate in path.parent.glob(f"{path.name}.*")
+        if candidate.name.removeprefix(prefix).isdigit()
+    ]
+    return path.with_name(f"{path.name}.{max(generations, default=0) + 1:012d}")
 
 
 def _fsync_directory(path: Path) -> None:

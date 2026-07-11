@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -160,11 +161,7 @@ class AuditLogger:
     def _scrub_error(message: str | None) -> str | None:
         if message is None:
             return None
-        # Drop API keys / tokens that might slip into an error message.
-        for fragment in ("sk-", "tushare", "hmac", "secret", "token"):
-            if fragment in message.lower():
-                return "[scrubbed]"
-        return message
+        return "[scrubbed]" if _contains_credential(message) else message
 
     @staticmethod
     def _now() -> str:
@@ -173,12 +170,35 @@ class AuditLogger:
         return datetime.datetime.now(tz=datetime.UTC).isoformat()
 
 
-_SECRET_KEYS = ("api_key", "apikey", "secret", "token", "password", "authorization")
-_SECRET_FRAGMENTS = ("sk-", "hmac", "secret", "token", "bearer ")
+_SECRET_KEYS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "access_token",
+        "auth_token",
+        "authorization",
+        "client_secret",
+        "deepseek_api_key",
+        "password",
+        "refresh_token",
+        "secret",
+        "token",
+        "tushare_token",
+        "x-api-key",
+    }
+)
+_CREDENTIAL_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b", re.IGNORECASE),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
+    re.compile(
+        r"\b(?:api[_-]?key|password|secret|token)\s*[=:]\s*[^\s,;]+",
+        re.IGNORECASE,
+    ),
+)
 
 
 def _scrub_value(value: Any, *, key: str = "") -> Any:
-    if any(fragment in key.lower() for fragment in _SECRET_KEYS):
+    if key.lower() in _SECRET_KEYS:
         return "[scrubbed]"
     if isinstance(value, dict):
         return {
@@ -186,8 +206,12 @@ def _scrub_value(value: Any, *, key: str = "") -> Any:
         }
     if isinstance(value, (list, tuple)):
         return [_scrub_value(item) for item in value]
-    if isinstance(value, str) and any(fragment in value.lower() for fragment in _SECRET_FRAGMENTS):
+    if isinstance(value, str) and _contains_credential(value):
         return "[scrubbed]"
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _contains_credential(value: str) -> bool:
+    return any(pattern.search(value) for pattern in _CREDENTIAL_PATTERNS)

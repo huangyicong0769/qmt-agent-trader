@@ -634,9 +634,11 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
         sort_keys=True,
     )
     cache = _cache_var.get()
-    if cache is None:
-        return {"status": "NOT_IMPLEMENTED", "message": "cache not wired"}
-    cached = get_cached_validation(cache_factor_name, start, end, cache)
+    cached = (
+        get_cached_validation(cache_factor_name, start, end, cache)
+        if cache is not None
+        else None
+    )
     if cached is not None:
         cached["cache_hit"] = True
         return cached
@@ -661,7 +663,8 @@ def _evaluate_factor_candidate(input_data: dict[str, Any], context: ToolContext)
             sb.generated_root / "reports" / f"factor_{factor_id}.json" if sb else ""
         )
         result["cache_hit"] = False
-        put_cached_validation(cache_factor_name, start, end, result, cache)
+        if cache is not None:
+            put_cached_validation(cache_factor_name, start, end, result, cache)
         return result
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
