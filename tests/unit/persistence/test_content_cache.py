@@ -57,6 +57,8 @@ def test_cache_rejects_unsafe_paths_and_propagates_lock_timeout(tmp_path: Path) 
     with manager.resource_lock(path):
         with pytest.raises(StorageLockTimeoutError):
             cache.get("factor", key)
+        with pytest.raises(StorageLockTimeoutError):
+            cache.invalidate("factor", key)
 
 
 def test_corrupt_cache_invalidates_with_warning_and_never_blocks(tmp_path: Path) -> None:

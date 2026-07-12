@@ -141,31 +141,20 @@ class ContentAddressedCache:
         reason: str = "CACHE_INVALIDATED",
     ) -> bool:
         path = self.path_for(namespace, key)
-        try:
-            with self.atomic_store.lock_manager.resource_lock(path):
-                if not path.exists():
+        with self.atomic_store.lock_manager.resource_lock(path):
+            if not path.exists():
+                return False
+            if expected_value is not None:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+                if not self._valid_envelope(envelope, key):
                     return False
-                if expected_value is not None:
-                    envelope = json.loads(path.read_text(encoding="utf-8"))
-                    if not self._valid_envelope(envelope, key):
-                        return False
-                    if envelope["value"] != expected_value:
-                        return False
-                removed = self._invalidate_unlocked(path)
-                if removed:
-                    self.metrics["invalidations"] += 1
-                    self._warn({"reason": reason, "path": str(path)})
-                return removed
-        except Exception as exc:
-            self.metrics["invalidation_failures"] += 1
-            self._warn(
-                {
-                    "reason": "CACHE_INVALIDATION_FAILED",
-                    "path": str(path),
-                    "error": type(exc).__name__,
-                }
-            )
-            return False
+                if envelope["value"] != expected_value:
+                    return False
+            removed = self._invalidate_unlocked(path)
+            if removed:
+                self.metrics["invalidations"] += 1
+                self._warn({"reason": reason, "path": str(path)})
+            return removed
 
     def _invalidate_unlocked(self, path: Path) -> bool:
         try:

@@ -227,6 +227,11 @@ class StorageOperations:
                 create_only=True,
             )
             return BackupReceipt(final, final / "manifest.json")
+        except StorageLockTimeoutError:
+            shutil.rmtree(staging, ignore_errors=True)
+            if final.exists() and not (final / "SUCCESS.json").exists():
+                shutil.rmtree(final, ignore_errors=True)
+            raise
         except Exception as exc:
             shutil.rmtree(staging, ignore_errors=True)
             if final.exists() and not (final / "SUCCESS.json").exists():

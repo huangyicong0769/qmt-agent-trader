@@ -36,10 +36,15 @@ class AuditReadResult:
 
 
 def verify_audit_jsonl(path: Path) -> AuditVerification:
+    return _read_audit_jsonl(path).verification
+
+
+def _read_audit_jsonl(path: Path) -> AuditReadResult:
     result = AuditVerification(path=path)
+    records: list[dict[str, Any]] = []
     paths = _audit_paths(path)
     if not paths:
-        return result
+        return AuditReadResult(records, result)
     raw_lines = [
         (source, raw)
         for source in paths
@@ -51,13 +56,14 @@ def verify_audit_jsonl(path: Path) -> AuditVerification:
             if not isinstance(value, dict):
                 raise ValueError("audit record must be an object")
             result.valid_records += 1
+            records.append(value)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             is_final = source == path and index == len(raw_lines)
             if is_final and not raw.endswith(b"\n"):
                 result.tail_truncated = True
             else:
                 result.corruptions.append(AuditCorruption(index, str(exc)))
-    return result
+    return AuditReadResult(records, result)
 
 
 class AuditJsonlStore:
@@ -87,7 +93,8 @@ class AuditJsonlStore:
         )
 
     def verify(self) -> AuditVerification:
-        return verify_audit_jsonl(self.path)
+        with self.atomic_store.lock_manager.resource_lock(self.path):
+            return _read_audit_jsonl(self.path).verification
 
     def read_records(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         result = self.read_records_with_diagnostics(limit=limit)
@@ -102,17 +109,10 @@ class AuditJsonlStore:
         return result.records
 
     def read_records_with_diagnostics(self, *, limit: int | None = None) -> AuditReadResult:
-        rows: list[dict[str, Any]] = []
-        for path in _audit_paths(self.path):
-            for raw in path.read_bytes().splitlines(keepends=True):
-                try:
-                    value = json.loads(raw)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                if isinstance(value, dict):
-                    rows.append(value)
-        selected = rows[-limit:] if limit is not None else rows
-        return AuditReadResult(selected, self.verify())
+        with self.atomic_store.lock_manager.resource_lock(self.path):
+            result = _read_audit_jsonl(self.path)
+            selected = result.records[-limit:] if limit is not None else result.records
+            return AuditReadResult(selected, result.verification)
 
 
 def _audit_paths(path: Path) -> list[Path]:
