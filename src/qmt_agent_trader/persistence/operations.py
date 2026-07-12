@@ -353,13 +353,47 @@ class StorageOperations:
         raw = Path(record)
         root = definition.path.parent if definition.path.is_file() else definition.path
         source = (root / raw).resolve()
-        if raw.is_absolute() or root.resolve() not in source.parents or not source.is_file():
+        expected_file = definition.path.resolve() if definition.path.is_file() else None
+        invalid_single_file = expected_file is not None and source != expected_file
+        if (
+            raw.is_absolute()
+            or invalid_single_file
+            or root.resolve() not in source.parents
+            or not source.is_file()
+        ):
             raise StorageValidationError(
                 store_name="quarantine",
                 path=source,
                 operation="resolve",
                 reason="record path is unsafe or missing",
             )
+        if definition.governed:
+            artifact_store = artifact_store_for_root(root, lock_manager=self.locks)
+            relative = source.relative_to(root).as_posix()
+            diagnostic = next(
+                (
+                    item
+                    for item in artifact_store.diagnose()
+                    if item.relative_path == relative and item.artifact_id is not None
+                ),
+                None,
+            )
+            if diagnostic is not None and diagnostic.artifact_id is not None:
+                auxiliary: tuple[Path, ...] = ()
+                if definition.name == "order_plans":
+                    event_path = root / ".events" / (
+                        hashlib.sha256(diagnostic.artifact_id.encode()).hexdigest() + ".jsonl"
+                    )
+                    auxiliary = (event_path,) if event_path.is_file() else ()
+                receipt = artifact_store.quarantine(
+                    artifact_id=diagnostic.artifact_id,
+                    expected_relative_path=relative,
+                    quarantine_root=self.paths.quarantine_root / store,
+                    auxiliary_paths=auxiliary,
+                )
+                return QuarantineReceipt(
+                    receipt.quarantined_content_path, receipt.sidecar_path
+                )
         target_root = self.paths.quarantine_root / store
         target = (
             target_root

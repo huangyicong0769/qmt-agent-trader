@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -62,6 +64,18 @@ class ArtifactDiagnostic(BaseModel):
     relative_path: str
     artifact_id: str | None = None
     reason: str
+
+
+@dataclass(frozen=True)
+class ArtifactQuarantineReceipt:
+    artifact_id: str
+    original_content_path: Path
+    original_manifest_path: Path
+    quarantined_content_path: Path
+    quarantined_manifest_path: Path
+    sidecar_path: Path
+    diagnostics: tuple[ArtifactDiagnostic, ...]
+    quarantined_auxiliary_paths: tuple[Path, ...] = ()
 
 
 class ArtifactStore:
@@ -134,7 +148,7 @@ class ArtifactStore:
                 )
             created_content = False
             try:
-                self.atomic_store.write_bytes(
+                self.atomic_store.write_bytes_assume_locked(
                     path,
                     content,
                     create_only=True,
@@ -143,7 +157,7 @@ class ArtifactStore:
                 created_content = True
                 if self.fault_hook is not None:
                     self.fault_hook("after_content_publish", path)
-                self.atomic_store.write_json(
+                self.atomic_store.write_json_assume_locked(
                     manifest_path,
                     manifest,
                     create_only=True,
@@ -158,6 +172,10 @@ class ArtifactStore:
         )
 
     def load_manifest(self, artifact_id: str) -> ArtifactManifest:
+        with self.lock_manager.resource_lock(self._resource):
+            return self._load_manifest_assume_locked(artifact_id)
+
+    def _load_manifest_assume_locked(self, artifact_id: str) -> ArtifactManifest:
         path = self.manifest_path_for(artifact_id)
         try:
             manifest = ArtifactManifest.model_validate_json(path.read_text(encoding="utf-8"))
@@ -184,9 +202,19 @@ class ArtifactStore:
         *,
         expected_relative_path: str | Path | None = None,
     ) -> ArtifactVerification:
-        manifest = self._validated_manifest(
-            artifact_id,
-            expected_relative_path=expected_relative_path,
+        with self.lock_manager.resource_lock(self._resource):
+            return self._verify_assume_locked(
+                artifact_id, expected_relative_path=expected_relative_path
+            )
+
+    def _verify_assume_locked(
+        self,
+        artifact_id: str,
+        *,
+        expected_relative_path: str | Path | None = None,
+    ) -> ArtifactVerification:
+        manifest = self._validated_manifest_assume_locked(
+            artifact_id, expected_relative_path=expected_relative_path
         )
         path = self.path_for(manifest.relative_path)
         manifest_path = self.manifest_path_for(artifact_id)
@@ -213,9 +241,8 @@ class ArtifactStore:
         *,
         expected_relative_path: str | Path | None = None,
     ) -> bytes:
-        resource = f"artifact-store:{self.root}"
-        with self.lock_manager.resource_lock(resource):
-            manifest = self._validated_manifest(
+        with self.lock_manager.resource_lock(self._resource):
+            manifest = self._validated_manifest_assume_locked(
                 artifact_id,
                 expected_relative_path=expected_relative_path,
             )
@@ -239,13 +266,13 @@ class ArtifactStore:
                 )
             return content
 
-    def _validated_manifest(
+    def _validated_manifest_assume_locked(
         self,
         artifact_id: str,
         *,
         expected_relative_path: str | Path | None,
     ) -> ArtifactManifest:
-        manifest = self.load_manifest(artifact_id)
+        manifest = self._load_manifest_assume_locked(artifact_id)
         if expected_relative_path is not None:
             expected = self.path_for(expected_relative_path).relative_to(self.root).as_posix()
             if manifest.relative_path != expected:
@@ -258,6 +285,10 @@ class ArtifactStore:
         return manifest
 
     def diagnose(self) -> list[ArtifactDiagnostic]:
+        with self.lock_manager.resource_lock(self._resource):
+            return self.diagnose_assume_locked()
+
+    def diagnose_assume_locked(self) -> list[ArtifactDiagnostic]:
         diagnostics: list[ArtifactDiagnostic] = []
         referenced_paths: set[str] = set()
         manifest_root = self.root / self._MANIFEST_DIRECTORY
@@ -315,6 +346,116 @@ class ArtifactStore:
                         )
                     )
         return diagnostics
+
+    def quarantine(
+        self,
+        *,
+        artifact_id: str,
+        expected_relative_path: str | Path | None = None,
+        quarantine_root: Path,
+        auxiliary_paths: tuple[Path, ...] = (),
+    ) -> ArtifactQuarantineReceipt:
+        """Move a corrupt governed artifact and its manifest as one recoverable unit."""
+        with self.lock_manager.resource_lock(self._resource):
+            manifest = self._validated_manifest_assume_locked(
+                artifact_id, expected_relative_path=expected_relative_path
+            )
+            content_path = self.path_for(manifest.relative_path)
+            manifest_path = self.manifest_path_for(artifact_id)
+            diagnostics = tuple(
+                item
+                for item in self.diagnose_assume_locked()
+                if item.artifact_id == artifact_id
+                or item.relative_path == manifest.relative_path
+            )
+            if not diagnostics:
+                raise StorageValidationError(
+                    store_name="artifacts",
+                    path=content_path,
+                    operation="quarantine",
+                    reason="authoritative artifact is healthy",
+                )
+            artifact_digest = hashlib.sha256(artifact_id.encode()).hexdigest()
+            unit_name = f"{self.now().replace(':', '')}-{artifact_digest}"
+            unit_root = quarantine_root.expanduser().resolve() / unit_name
+            quarantined_content = unit_root / "content" / manifest.relative_path
+            quarantined_manifest = unit_root / "manifest.json"
+            sidecar = unit_root / "QUARANTINE.json"
+            quarantined_content.parent.mkdir(parents=True, exist_ok=False)
+            moved_content = False
+            moved_manifest = False
+            moved_auxiliary: list[tuple[Path, Path]] = []
+            try:
+                os.replace(content_path, quarantined_content)
+                moved_content = True
+                os.replace(manifest_path, quarantined_manifest)
+                moved_manifest = True
+                for auxiliary in auxiliary_paths:
+                    resolved = auxiliary.expanduser().resolve()
+                    if self.root not in resolved.parents or not resolved.is_file():
+                        raise StorageValidationError(
+                            store_name="artifacts",
+                            path=resolved,
+                            operation="quarantine",
+                            reason="auxiliary path is outside artifact root or missing",
+                        )
+                    target = unit_root / "auxiliary" / resolved.relative_to(self.root)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(resolved, target)
+                    moved_auxiliary.append((resolved, target))
+                self.atomic_store.write_json_assume_locked(
+                    sidecar,
+                    {
+                        "schema_version": 1,
+                        "artifact_id": artifact_id,
+                        "original_content_path": str(content_path),
+                        "original_manifest_path": str(manifest_path),
+                        "content_sha256": hashlib.sha256(
+                            quarantined_content.read_bytes()
+                        ).hexdigest(),
+                        "manifest_sha256": hashlib.sha256(
+                            quarantined_manifest.read_bytes()
+                        ).hexdigest(),
+                        "auxiliary_paths": [
+                            {
+                                "original_path": str(original),
+                                "quarantine_path": str(target),
+                                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                            }
+                            for original, target in moved_auxiliary
+                        ],
+                        "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
+                        "quarantined_at": self.now(),
+                    },
+                    create_only=True,
+                )
+            except Exception:
+                sidecar.unlink(missing_ok=True)
+                for original, target in reversed(moved_auxiliary):
+                    if target.exists():
+                        original.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(target, original)
+                if moved_manifest and quarantined_manifest.exists():
+                    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(quarantined_manifest, manifest_path)
+                if moved_content and quarantined_content.exists():
+                    content_path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(quarantined_content, content_path)
+                raise
+            return ArtifactQuarantineReceipt(
+                artifact_id=artifact_id,
+                original_content_path=content_path,
+                original_manifest_path=manifest_path,
+                quarantined_content_path=quarantined_content,
+                quarantined_manifest_path=quarantined_manifest,
+                sidecar_path=sidecar,
+                diagnostics=diagnostics,
+                quarantined_auxiliary_paths=tuple(target for _, target in moved_auxiliary),
+            )
+
+    @property
+    def _resource(self) -> str:
+        return f"artifact-store:{self.root}"
 
     def _invalid_path(self, relative_path: str | Path) -> StorageValidationError:
         return StorageValidationError(

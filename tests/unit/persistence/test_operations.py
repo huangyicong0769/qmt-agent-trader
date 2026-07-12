@@ -569,6 +569,31 @@ def test_quarantine_accepts_manifest_hash_corrupt_artifact(
 
     assert quarantined.path.exists()
     assert not receipt.path.exists()
+    assert not receipt.manifest_path.exists()
+    assert (quarantined.manifest_path.parent / "manifest.json").is_file()
+
+
+def test_order_plan_quarantine_moves_manifest_content_and_events(
+    operations: StorageOperations,
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    content_path = save_order_plan(plan, operations.paths.order_plans_root)
+    append_order_plan_event(
+        plan.order_plan_id,
+        directory=operations.paths.order_plans_root,
+        event_type="RISK_CHECKED",
+        actor="test",
+    )
+    event_path = next((operations.paths.order_plans_root / ".events").glob("*.jsonl"))
+    content_path.write_bytes(b"tampered")
+
+    quarantined = operations.quarantine("order_plans", content_path.name)
+
+    unit_root = quarantined.manifest_path.parent
+    assert not content_path.exists()
+    assert not event_path.exists()
+    assert (unit_root / "manifest.json").is_file()
+    assert (unit_root / "auxiliary" / ".events" / event_path.name).is_file()
 
 
 def test_shared_health_payload_recursively_scrubs_all_diagnostics() -> None:

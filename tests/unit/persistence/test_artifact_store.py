@@ -212,3 +212,34 @@ def test_concurrent_create_has_exactly_one_winner(store: ArtifactStore) -> None:
 
     assert sorted(results) == ["conflict", "created"]
     assert store.verify("run_1").verified is True
+
+
+def test_quarantine_moves_tampered_content_and_manifest_as_one_unit(
+    store: ArtifactStore, tmp_path: Path
+) -> None:
+    receipt = store.create("reports/run_1.json", b"original", metadata=_metadata())
+    receipt.path.write_bytes(b"tampered")
+
+    quarantined = store.quarantine(
+        artifact_id="run_1",
+        expected_relative_path="reports/run_1.json",
+        quarantine_root=tmp_path / "quarantine",
+    )
+
+    assert quarantined.quarantined_content_path.read_bytes() == b"tampered"
+    assert quarantined.quarantined_manifest_path.is_file()
+    assert quarantined.sidecar_path.is_file()
+    assert not receipt.path.exists()
+    assert not receipt.manifest_path.exists()
+    assert not store.diagnose()
+
+
+def test_quarantine_rejects_healthy_artifact(store: ArtifactStore, tmp_path: Path) -> None:
+    store.create("reports/run_1.json", b"original", metadata=_metadata())
+
+    with pytest.raises(StorageValidationError, match="healthy"):
+        store.quarantine(
+            artifact_id="run_1",
+            expected_relative_path="reports/run_1.json",
+            quarantine_root=tmp_path / "quarantine",
+        )
