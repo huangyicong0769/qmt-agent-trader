@@ -13,45 +13,16 @@ from qmt_agent_trader.persistence.errors import (
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.services.order_plan_service import (
     OrderPlanEvent,
+    append_order_plan_event,
+    load_order_plan,
+    load_order_plan_events,
+    save_order_plan,
     verify_order_plan_event_stream,
-)
-from qmt_agent_trader.services.order_plan_service import (
-    append_order_plan_event as _append_order_plan_event,
-)
-from qmt_agent_trader.services.order_plan_service import (
-    load_order_plan as _load_order_plan,
-)
-from qmt_agent_trader.services.order_plan_service import (
-    load_order_plan_events as _load_order_plan_events,
-)
-from qmt_agent_trader.services.order_plan_service import (
-    save_order_plan as _save_order_plan,
 )
 
 
 def _store(root):
     return artifact_store_for_root(root, lock_manager=LockManager(root / ".test-locks"))
-
-
-def save_order_plan(plan, directory):
-    return _save_order_plan(plan, directory, artifact_store=_store(directory))
-
-
-def load_order_plan(identifier, directory=None):
-    root = directory or __import__("pathlib").Path(identifier).parent
-    return _load_order_plan(identifier, root, artifact_store=_store(root))
-
-
-def append_order_plan_event(order_plan_id, *, directory, **kwargs):
-    return _append_order_plan_event(
-        order_plan_id, directory=directory, artifact_store=_store(directory), **kwargs
-    )
-
-
-def load_order_plan_events(order_plan_id, directory):
-    return _load_order_plan_events(
-        order_plan_id, directory, artifact_store=_store(directory)
-    )
 
 
 def make_plan(status: ApprovalStatus = ApprovalStatus.APPROVED) -> OrderPlan:
@@ -90,8 +61,9 @@ def test_unapproved_strategy_cannot_submit() -> None:
 
 def test_order_plan_save_and_load(tmp_path) -> None:
     plan = make_plan()
-    path = save_order_plan(plan, tmp_path)
-    loaded = load_order_plan(path.as_posix())
+    store = _store(tmp_path)
+    path = save_order_plan(plan, artifact_store=store)
+    loaded = load_order_plan(path.as_posix(), artifact_store=store)
 
     assert loaded.order_plan_id == plan.order_plan_id
     assert loaded.plan_hash == plan.plan_hash
@@ -100,37 +72,39 @@ def test_order_plan_save_and_load(tmp_path) -> None:
 
 def test_order_plan_is_create_only_and_verified_before_execution(tmp_path) -> None:
     plan = make_plan()
-    path = save_order_plan(plan, tmp_path)
+    store = _store(tmp_path)
+    path = save_order_plan(plan, artifact_store=store)
 
     with pytest.raises(StorageConflictError):
-        save_order_plan(plan, tmp_path)
+        save_order_plan(plan, artifact_store=store)
     path.write_text(path.read_text(encoding="utf-8").replace("acct", "evil"), encoding="utf-8")
     with pytest.raises(StorageValidationError, match="hash_mismatch"):
-        load_order_plan(plan.order_plan_id, tmp_path)
+        load_order_plan(plan.order_plan_id, artifact_store=store)
 
 
 def test_order_plan_events_append_without_mutating_original_plan(tmp_path) -> None:
     plan = make_plan()
-    path = save_order_plan(plan, tmp_path)
+    store = _store(tmp_path)
+    path = save_order_plan(plan, artifact_store=store)
     original = path.read_bytes()
 
     append_order_plan_event(
         plan.order_plan_id,
-        directory=tmp_path,
         event_type="RISK_CHECKED",
         actor="cli",
         details={"status": "PASSED"},
+        artifact_store=store,
     )
     append_order_plan_event(
         plan.order_plan_id,
-        directory=tmp_path,
         event_type="PAPER_ACCEPTED",
         actor="cli",
         details={"live": False},
+        artifact_store=store,
     )
 
-    loaded = load_order_plan(plan.order_plan_id, tmp_path)
-    events = load_order_plan_events(plan.order_plan_id, tmp_path)
+    loaded = load_order_plan(plan.order_plan_id, artifact_store=store)
+    events = load_order_plan_events(plan.order_plan_id, artifact_store=store)
     assert loaded.plan_hash == plan.plan_hash
     assert path.read_bytes() == original
     assert [event.event_type for event in events] == ["RISK_CHECKED", "PAPER_ACCEPTED"]
@@ -144,7 +118,7 @@ def test_load_rejects_unmanifested_order_plan_without_changing_bytes(tmp_path) -
     path.write_bytes(original)
 
     with pytest.raises(StorageValidationError, match="manifest is missing"):
-        load_order_plan(plan.order_plan_id, tmp_path)
+        load_order_plan(plan.order_plan_id, artifact_store=_store(tmp_path))
 
     assert path.read_bytes() == original
     assert not (tmp_path / ".manifests").exists()
@@ -155,30 +129,45 @@ def test_invalid_legacy_order_plan_is_structured_and_not_adopted(tmp_path) -> No
     path.write_text("{broken", encoding="utf-8")
 
     with pytest.raises(StorageValidationError, match="manifest is missing"):
-        load_order_plan("op_broken", tmp_path)
+        load_order_plan("op_broken", artifact_store=_store(tmp_path))
 
     assert not (tmp_path / ".manifests").exists()
+
+
+def test_order_plan_path_cannot_select_foreign_artifact_root(tmp_path) -> None:
+    foreign = tmp_path / "foreign/op.json"
+    foreign.parent.mkdir()
+    foreign.write_text("{}")
+
+    with pytest.raises(StorageValidationError, match="outside the artifact store root"):
+        load_order_plan(str(foreign), artifact_store=_store(tmp_path / "plans"))
 
 
 def test_order_plan_events_have_schema_identity_and_locked_concurrent_reads(tmp_path) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     plan = make_plan()
-    save_order_plan(plan, tmp_path)
+    store = _store(tmp_path)
+    save_order_plan(plan, artifact_store=store)
 
     def append(index: int) -> None:
         append_order_plan_event(
             plan.order_plan_id,
-            directory=tmp_path,
             event_type="RISK_CHECKED",
             actor="test",
             details={"index": index},
+            artifact_store=store,
         )
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         list(executor.map(append, range(12)))
         snapshots = list(
-            executor.map(lambda _: load_order_plan_events(plan.order_plan_id, tmp_path), range(4))
+            executor.map(
+                lambda _: load_order_plan_events(
+                    plan.order_plan_id, artifact_store=store
+                ),
+                range(4),
+            )
         )
 
     assert all(len(snapshot) == 12 for snapshot in snapshots)
@@ -199,24 +188,25 @@ def test_order_plan_event_rejects_unknown_schema_version() -> None:
 
 def test_order_plan_event_truncated_tail_fails_closed(tmp_path) -> None:
     plan = make_plan()
-    save_order_plan(plan, tmp_path)
+    store = _store(tmp_path)
+    save_order_plan(plan, artifact_store=store)
     append_order_plan_event(
         plan.order_plan_id,
-        directory=tmp_path,
         event_type="RISK_CHECKED",
         actor="test",
+        artifact_store=store,
     )
     event_path = next((tmp_path / ".events").glob("*.jsonl"))
     event_path.write_bytes(event_path.read_bytes() + b'{"broken"')
 
     with pytest.raises(StorageCorruptError, match="truncated tail"):
-        load_order_plan_events(plan.order_plan_id, tmp_path)
+        load_order_plan_events(plan.order_plan_id, artifact_store=store)
     with pytest.raises(StorageCorruptError, match="cannot append"):
         append_order_plan_event(
             plan.order_plan_id,
-            directory=tmp_path,
             event_type="PAPER_ACCEPTED",
             actor="test",
+            artifact_store=store,
         )
 
     verification = verify_order_plan_event_stream(
@@ -228,12 +218,13 @@ def test_order_plan_event_truncated_tail_fails_closed(tmp_path) -> None:
 
 def test_order_plan_event_verifier_rejects_duplicate_event_identity(tmp_path) -> None:
     plan = make_plan()
-    save_order_plan(plan, tmp_path)
+    store = _store(tmp_path)
+    save_order_plan(plan, artifact_store=store)
     append_order_plan_event(
         plan.order_plan_id,
-        directory=tmp_path,
         event_type="RISK_CHECKED",
         actor="test",
+        artifact_store=store,
     )
     event_path = next((tmp_path / ".events").glob("*.jsonl"))
     event_path.write_bytes(event_path.read_bytes() * 2)
@@ -248,12 +239,13 @@ def test_order_plan_event_verifier_rejects_duplicate_event_identity(tmp_path) ->
 
 def test_order_plan_event_verifier_rejects_filename_binding_mismatch(tmp_path) -> None:
     plan = make_plan()
-    save_order_plan(plan, tmp_path)
+    store = _store(tmp_path)
+    save_order_plan(plan, artifact_store=store)
     append_order_plan_event(
         plan.order_plan_id,
-        directory=tmp_path,
         event_type="RISK_CHECKED",
         actor="test",
+        artifact_store=store,
     )
     event_path = next((tmp_path / ".events").glob("*.jsonl"))
     mismatched = event_path.with_name("0" * 64 + ".jsonl")

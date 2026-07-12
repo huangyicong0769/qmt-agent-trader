@@ -70,12 +70,9 @@ def test_verify_detects_corrupt_order_plan_event_stream(
     plan_store = artifact_store_for_root(
         operations.paths.order_plans_root, lock_manager=operations.locks
     )
-    save_order_plan(
-        plan, operations.paths.order_plans_root, artifact_store=plan_store
-    )
+    save_order_plan(plan, artifact_store=plan_store)
     append_order_plan_event(
         plan.order_plan_id,
-        directory=operations.paths.order_plans_root,
         event_type="RISK_CHECKED",
         actor="test",
         artifact_store=plan_store,
@@ -619,12 +616,9 @@ def test_order_plan_quarantine_moves_manifest_content_and_events(
     plan_store = artifact_store_for_root(
         operations.paths.order_plans_root, lock_manager=operations.locks
     )
-    content_path = save_order_plan(
-        plan, operations.paths.order_plans_root, artifact_store=plan_store
-    )
+    content_path = save_order_plan(plan, artifact_store=plan_store)
     append_order_plan_event(
         plan.order_plan_id,
-        directory=operations.paths.order_plans_root,
         event_type="RISK_CHECKED",
         actor="test",
         artifact_store=plan_store,

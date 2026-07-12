@@ -923,7 +923,6 @@ def strategy_approve(
     paths = PersistencePaths.from_settings(_settings())
     path = write_approval_file(
         approval,
-        paths.approvals_root,
         artifact_store=_artifact_store(paths.approvals_root),
     )
     registry.attach_approval(strategy_id, str(path))
@@ -957,7 +956,6 @@ def trade_generate_plan(strategy_id: Annotated[str, typer.Option("--strategy-id"
     paths = PersistencePaths.from_settings(_settings())
     path = save_order_plan(
         plan,
-        paths.order_plans_root,
         artifact_store=_artifact_store(paths.order_plans_root),
     )
     print_json({"status": "generated", "path": str(path), "plan_hash": plan.plan_hash})
@@ -978,7 +976,6 @@ def trade_risk_check(plan: Annotated[str, typer.Option("--plan")]) -> None:
     _audit_logger("trade").append("trade.risk_check", "cli", payload)
     append_order_plan_event(
         order_plan.order_plan_id,
-        directory=plans_root,
         event_type="RISK_CHECKED",
         actor="cli",
         details={"status": result.status.value},
@@ -994,7 +991,6 @@ def trade_paper(plan: Annotated[str, typer.Option("--plan")]) -> None:
     artifact_store = _artifact_store(plans_root)
     event_history = load_order_plan_events(
         order_plan.order_plan_id,
-        plans_root,
         artifact_store=artifact_store,
     )
     result = run_order_plan_risk_checks(order_plan)
@@ -1016,7 +1012,6 @@ def trade_paper(plan: Annotated[str, typer.Option("--plan")]) -> None:
     _audit_logger("trade").append("trade.paper", "cli", payload)
     append_order_plan_event(
         order_plan.order_plan_id,
-        directory=plans_root,
         event_type="PAPER_ACCEPTED",
         actor="cli",
         details={"live": False, "idempotency_key": order_plan.idempotency_key},
@@ -1115,7 +1110,6 @@ def _load_plan_or_error(identifier: str) -> OrderPlan:
     try:
         return load_order_plan(
             identifier,
-            plans_root,
             artifact_store=_artifact_store(plans_root),
         )
     except ValueError as exc:

@@ -6,28 +6,14 @@ from qmt_agent_trader.persistence.errors import StorageConflictError, StorageVal
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.strategy.approval import (
     StrategyApproval,
+    read_approval_file,
     transition_status,
-)
-from qmt_agent_trader.strategy.approval import (
-    read_approval_file as _read_approval_file,
-)
-from qmt_agent_trader.strategy.approval import (
-    write_approval_file as _write_approval_file,
+    write_approval_file,
 )
 
 
-def write_approval_file(approval, directory):
-    store = artifact_store_for_root(
-        directory, lock_manager=LockManager(directory / ".test-locks")
-    )
-    return _write_approval_file(approval, directory, artifact_store=store)
-
-
-def read_approval_file(path):
-    store = artifact_store_for_root(
-        path.parent, lock_manager=LockManager(path.parent / ".test-locks")
-    )
-    return _read_approval_file(path, artifact_store=store)
+def _store(root):
+    return artifact_store_for_root(root, lock_manager=LockManager(root / ".test-locks"))
 
 
 def test_strategy_approval_state_machine() -> None:
@@ -53,15 +39,18 @@ def test_approval_yaml_is_create_only_hashed_and_preserves_human_fields(tmp_path
         max_order_value=100_000,
     )
 
-    path = write_approval_file(approval, tmp_path)
-    loaded = read_approval_file(path)
+    store = _store(tmp_path)
+    path = write_approval_file(approval, artifact_store=store)
+    loaded = read_approval_file(path, artifact_store=store)
 
     assert loaded.approved_by == "human-reviewer"
     assert loaded.approved_at == "2026-07-11T10:00:00+08:00"
     assert len(list((tmp_path / ".manifests").glob("*.json"))) == 1
     with pytest.raises(StorageConflictError):
-        write_approval_file(approval.model_copy(update={"approved_by": "agent"}), tmp_path)
-    assert read_approval_file(path).approved_by == "human-reviewer"
+        write_approval_file(
+            approval.model_copy(update={"approved_by": "agent"}), artifact_store=store
+        )
+    assert read_approval_file(path, artifact_store=store).approved_by == "human-reviewer"
 
 
 def test_read_rejects_unmanifested_approval_without_mutation(tmp_path) -> None:
@@ -84,7 +73,7 @@ def test_read_rejects_unmanifested_approval_without_mutation(tmp_path) -> None:
     path.write_bytes(original)
 
     with pytest.raises(StorageValidationError, match="manifest is missing"):
-        read_approval_file(path)
+        read_approval_file(path, artifact_store=_store(tmp_path))
 
     assert path.read_bytes() == original
 
@@ -94,9 +83,18 @@ def test_invalid_legacy_approval_is_structured_and_not_adopted(tmp_path) -> None
     path.write_text("approved_by: [", encoding="utf-8")
 
     with pytest.raises(StorageValidationError, match="manifest is missing"):
-        read_approval_file(path)
+        read_approval_file(path, artifact_store=_store(tmp_path))
 
     assert not (tmp_path / ".manifests").exists()
+
+
+def test_approval_path_cannot_select_foreign_artifact_root(tmp_path) -> None:
+    foreign = tmp_path / "foreign/approval.yaml"
+    foreign.parent.mkdir()
+    foreign.write_text("{}")
+
+    with pytest.raises(StorageValidationError, match="outside the artifact store root"):
+        read_approval_file(foreign, artifact_store=_store(tmp_path / "approvals"))
 
 
 def test_legacy_approval_filename_must_match_parsed_identity(tmp_path) -> None:
@@ -111,5 +109,5 @@ def test_legacy_approval_filename_must_match_parsed_identity(tmp_path) -> None:
     )
 
     with pytest.raises(StorageValidationError, match="manifest is missing"):
-        read_approval_file(path)
+        read_approval_file(path, artifact_store=_store(tmp_path))
     assert not (tmp_path / ".manifests").exists()

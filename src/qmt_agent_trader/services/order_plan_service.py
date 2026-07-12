@@ -18,7 +18,7 @@ from qmt_agent_trader.persistence.artifacts import (
     ArtifactMetadata,
     ArtifactStore,
 )
-from qmt_agent_trader.persistence.errors import StorageCorruptError
+from qmt_agent_trader.persistence.errors import StorageCorruptError, StorageValidationError
 
 
 def build_sample_paper_order_plan(strategy_id: str) -> OrderPlan:
@@ -128,7 +128,6 @@ def verify_order_plan_event_stream(
 
 def save_order_plan(
     plan: OrderPlan,
-    directory: Path,
     *,
     artifact_store: ArtifactStore,
 ) -> Path:
@@ -149,20 +148,23 @@ def save_order_plan(
 
 def load_order_plan(
     identifier: str,
-    directory: Path = Path("order_plans"),
     *,
     artifact_store: ArtifactStore,
 ) -> OrderPlan:
     path = Path(identifier)
-    if path.exists():
-        selected_directory = path.parent
+    store = artifact_store
+    if path.is_absolute() or path.parent != Path("."):
+        selected = path.expanduser().resolve()
+        if selected.parent != store.root:
+            raise StorageValidationError(
+                store_name="order_plans",
+                path=selected,
+                operation="load",
+                reason="order plan path is outside the artifact store root",
+            )
         order_plan_id = path.stem
     else:
-        selected_directory = directory
         order_plan_id = identifier
-    store = artifact_store
-    if store.root != selected_directory.expanduser().resolve():
-        raise ValueError("artifact store root does not match order plan directory")
     relative_path = f"{order_plan_id}.json"
     artifact_path = store.path_for(relative_path)
     if not artifact_path.exists():
@@ -180,7 +182,6 @@ def load_order_plan(
 def append_order_plan_event(
     order_plan_id: str,
     *,
-    directory: Path = Path("order_plans"),
     event_type: str,
     actor: str,
     details: dict[str, object] | None = None,
@@ -222,7 +223,6 @@ def append_order_plan_event(
 
 def load_order_plan_events(
     order_plan_id: str,
-    directory: Path = Path("order_plans"),
     *,
     artifact_store: ArtifactStore,
 ) -> list[OrderPlanEvent]:

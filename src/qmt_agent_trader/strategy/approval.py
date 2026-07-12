@@ -54,7 +54,6 @@ def transition_status(current: ApprovalStatus, target: ApprovalStatus) -> Approv
 
 def write_approval_file(
     approval: StrategyApproval,
-    directory: Path,
     *,
     artifact_store: ArtifactStore,
 ) -> Path:
@@ -89,11 +88,23 @@ def write_approval_file(
 
 
 def read_approval_file(
-    path: Path,
+    filename_or_path: str | Path,
     *,
     artifact_store: ArtifactStore,
 ) -> StrategyApproval:
     store = artifact_store
+    raw_path = Path(filename_or_path)
+    if raw_path.is_absolute() or raw_path.parent != Path("."):
+        path = raw_path.expanduser().resolve()
+        if path.parent != store.root:
+            raise StorageValidationError(
+                store_name="approvals",
+                path=path,
+                operation="read",
+                reason="approval path is outside the artifact store root",
+            )
+    else:
+        path = store.path_for(raw_path.name)
     artifact_id = _approval_artifact_id(path.name)
     raw = store.read_verified(artifact_id, expected_relative_path=path.name)
     try:
