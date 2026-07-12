@@ -1,7 +1,7 @@
 # Persistence boundary inventory
 
-- Status: Phase 0 architecture baseline
-- Scope: production code on `codex/persistence-storage-refactor-v2` as inspected on 2026-07-10
+- Status: Historical baseline reconciled with current architecture
+- Scope: historical risks recorded on 2026-07-10 plus the current persistence contracts
 - Decision records: [control store](adr-control-store.md), [artifact store](adr-artifact-store.md)
 
 ## Purpose and classification
@@ -16,7 +16,13 @@ Source owners in the tables are exact project-relative paths beneath `src/qmt_ag
 
 Unless a row says otherwise, there is no backup, restore, quarantine, manifest, hash, schema migration, or revision history. `Settings.project_root` plus `data_dir`/`log_dir` injects the principal data and log roots, but several module-level relative paths still depend on the process working directory.
 
-## Analytical data and catalog
+## Historical risks before persistence refactor
+
+The inventory tables below preserve the original pre-refactor risk evidence. Statements about
+direct writes, schema v1, CWD-relative roots, legacy adoption, and missing locks describe the
+historical baseline, not the current runtime.
+
+### Analytical data and catalog
 
 | Domain | Owner and exact write boundary | Source of truth and physical path | Format; mutability; access pattern | Current coordination, metadata, and recovery | Known failure mode and later migration target |
 | --- | --- | --- | --- | --- | --- |
@@ -37,7 +43,7 @@ The refactor must preserve the validated-temp/atomic-replace Parquet path in `da
 
 As of the Phase 2 implementation on 2026-07-11, repository production code has no callers of `record_fetch_result`, `fetch_state`, or `fetch_events`; only compatibility tests exercise `data_fetch_state` and `data_fetch_events`. The tables and methods remain supported so existing local databases and external callers are not broken. New provider code must use the v2 metadata contract. Removal requires a later explicit migration after downstream caller inventory and a release deprecation window; it is not part of this refactor.
 
-## Control plane state
+### Control plane state
 
 | Domain | Owner and exact write boundary | Source of truth and physical path | Format; mutability; access pattern | Current coordination, metadata, and recovery | Known failure mode and later migration target |
 | --- | --- | --- | --- | --- | --- |
@@ -49,7 +55,7 @@ As of the Phase 2 implementation on 2026-07-11, repository production code has n
 | Chat sessions | `web/ui/pages/chat.py:_ChatSession.save`, `close_session`; module constant `SESSIONS_DIR` | **CWD-relative** `sessions/{sid}.json`; deletion with `unlink` | JSON conversation snapshot; mutable whole-file rewrite and destructive delete | Directory created at import; no lock/atomic swap/backup/version; load silently skips malformed JSON | Two web processes or overlapping saves lose messages; partial file silently disappears from UI; CWD changes split state. CPS session repository with injected project-root path and revisioned writes. |
 | Validation/backtest cache | Factor and strategy tool cache helpers; runtime injects `ContentAddressedCache` through `AgentToolDependencies` | Canonical `PersistencePaths.cache_root/{factor-validation,backtest}/{sha256}.json` | Disposable JSON envelope; deterministic content key, schema version and configurable TTL | Validated atomic replace; corrupt/expired entries auto-invalidate with structured warning and metrics; failures do not block research | Existing tool hit/miss behavior is preserved; cache remains excluded from durable backup. |
 
-## Reviewable and audit artifacts
+### Reviewable and audit artifacts
 
 | Domain | Owner and exact write boundary | Source of truth and physical path | Format; mutability; access pattern | Current coordination, metadata, and recovery | Known failure mode and later migration target |
 | --- | --- | --- | --- | --- | --- |
@@ -86,11 +92,34 @@ The following direct production boundaries must later call shared storage APIs: 
 
 `scripts/replay_session9_smart_beta_real_agent.py` and `scripts/profile_research_tools.py` also use direct `write_text` for replay/profiling outputs. They are operator/development scripts rather than imported production boundaries, so they are not store sources of truth. When those scripts are retained, they should consume the same artifact API or be explicitly marked disposable; this Phase 0 task does not modify them.
 
+## Remaining known debt
+
+- Control-database schema probing still contains a narrow DuckDB error classifier that should be
+  replaced with explicit catalog inspection when that seam is next modified.
+- Local backup remains same-host and does not protect against disk or host loss.
+- Tushare legacy-ledger archive publication and its database migration status cannot form one
+  cross-filesystem/database transaction; the existing resumable protocol remains authoritative.
+
 ## Evidence method
 
 The baseline was produced from current code using searches for `write_text`, `write_bytes`, append-mode `open`, `to_parquet`, `duckdb.connect`, DuckDB DDL/DML, `os.replace`, and all callers of the registry/store constructors and lake writers. No persistence behavior in this document is inferred from the refactor proposal alone.
 
-## Phase 6 operations reconciliation
+## Current architecture
+
+- Mutable registries and records use current schema v2 repositories with revision, hash,
+  canonical model validation, and locked atomic publication.
+- Order plans, approvals, reports, and generated code require a canonical `ArtifactStore`;
+  ordinary reads do not migrate or adopt legacy files.
+- Order-plan content, manifests, and event streams share the artifact-root lock. Event corruption
+  fails closed for append, read, operational verification, and execution.
+- Governed quarantine distinguishes hash mismatch, content missing before quarantine, safely
+  recoverable invalid manifests, unrecoverable manifests, and unrelated orphan content.
+- DataLake external Parquet SQL uses `query_external()`; registered views and control tables use
+  `query_catalog()`.
+- Universe, todo, experiment, and chat state use injected canonical roots rather than CWD-relative
+  storage.
+
+### Phase 6 operations reconciliation
 
 `StoreCatalog.canonical(PersistencePaths)` is now the single executable inventory
 boundary. `qmt-agent storage inventory` emits one structured entry per real

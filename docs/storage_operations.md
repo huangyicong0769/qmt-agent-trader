@@ -65,7 +65,12 @@ an exact catalog store and contained record path and rejects healthy records.
 Ordinary records use their canonical resource lock. Governed artifacts use the
 artifact-root lock and move content plus manifest as one rollback-safe unit;
 an order plan also moves its corresponding governance event stream. The
-quarantine sidecar records hashes, paths, diagnostics, and time. Evidence
+quarantine operation records whether content was present, already missing, or
+unknown because an invalid manifest had no recoverable binding. A parseable invalid
+manifest may bind content only when its artifact id, safe relative path, and hashed
+manifest filename agree; otherwise only the manifest is isolated and unrelated
+orphans remain untouched. The sidecar records binding state, hashes, paths,
+diagnostics, and time. Evidence
 publication failure rolls the complete unit back. Tushare's existing repair
 command remains the owner of its specialized ledger history-reset protocol.
 
