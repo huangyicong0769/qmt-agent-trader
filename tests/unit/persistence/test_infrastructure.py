@@ -225,7 +225,7 @@ def test_marker_directory_fsync_failure_leaves_no_marker(tmp_path: Path, monkeyp
             raise OSError("directory fsync failed")
         real_fsync(descriptor)
 
-    monkeypatch.setattr("qmt_agent_trader.persistence.locks.os.fsync", fail_directory_fsync)
+    monkeypatch.setattr("qmt_agent_trader.persistence.locks._marker_fsync", fail_directory_fsync)
 
     with pytest.raises(OSError, match="directory fsync failed"):
         with manager.resource_lock(tmp_path / "record.json"):

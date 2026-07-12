@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from os import fsync as _marker_fsync
 from os import write as _marker_write
 from pathlib import Path
 from time import monotonic, sleep
@@ -157,7 +158,7 @@ class LockManager:
             written = _marker_write(descriptor, payload)
             if written != len(payload):
                 raise OSError("short marker write")
-            os.fsync(descriptor)
+            _marker_fsync(descriptor)
         except Exception:
             os.close(descriptor)
             path.unlink(missing_ok=True)
@@ -167,7 +168,7 @@ class LockManager:
         try:
             directory_descriptor = os.open(path.parent, os.O_RDONLY)
             try:
-                os.fsync(directory_descriptor)
+                _marker_fsync(directory_descriptor)
             finally:
                 os.close(directory_descriptor)
         except Exception:
