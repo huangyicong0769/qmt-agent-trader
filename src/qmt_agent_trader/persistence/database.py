@@ -63,6 +63,21 @@ class DatabaseCoordinator:
                 connection.close()
 
     @contextmanager
+    def transient_read_connection(
+        self, operation: str = "transient_read"
+    ) -> Iterator[duckdb.DuckDBPyConnection]:
+        """Open an isolated in-memory query engine without touching control state."""
+        connection: duckdb.DuckDBPyConnection | None = None
+        try:
+            connection = duckdb.connect(":memory:")
+            yield connection
+        except duckdb.Error as exc:
+            raise self._error(operation, exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @contextmanager
     def write_transaction(self, operation: str = "write") -> Iterator[duckdb.DuckDBPyConnection]:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_manager.database_write_lock(self.database_path):

@@ -6,6 +6,20 @@ from pathlib import Path
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools.strategy_tools import generate_research_report_tool
 from qmt_agent_trader.core.config import Settings
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
+
+
+def _write_governed_run(reports: Path, run_id: str, payload: dict[str, object]) -> None:
+    artifact_store_for_root(reports).create(
+        f"{run_id}.json",
+        json.dumps(payload).encode(),
+        metadata=ArtifactMetadata(
+            artifact_id=run_id,
+            artifact_type="strategy_backtest",
+            producer="tests.research_report_evidence",
+            related_run_id=run_id,
+        ),
+    )
 
 
 def test_research_report_does_not_promote_failed_or_unverified_candidates(
@@ -19,28 +33,27 @@ def test_research_report_does_not_promote_failed_or_unverified_candidates(
     )
     reports = tmp_path / "reports" / "research"
     reports.mkdir(parents=True)
-    (reports / "run_failed.json").write_text(
-        json.dumps(
-            {
-                "run_id": "run_failed",
-                "status": "completed",
-                "diagnostics": {"status": "FAIL", "checks": []},
-                "candidate_type": "strategy",
-                "universe_requested": "named_universe",
-                "universe_effective": "default_universe",
-                "symbols_source": "default_universe",
-                "symbols_count": 5000,
-                "generated_code": False,
-                "static_checks": "NOT_RUN",
-                "saved_in_registry": False,
-                "execution_backend": "factor_rank_composite_adapter",
-                "factor_weights": {"factor_a": 0.7, "factor_b": 0.3},
-                "research_only": True,
-                "live_trading_allowed": False,
-                "warnings": ["diagnostics failed"],
-            }
-        ),
-        encoding="utf-8",
+    _write_governed_run(
+        reports,
+        "run_failed",
+        {
+            "run_id": "run_failed",
+            "status": "completed",
+            "diagnostics": {"status": "FAIL", "checks": []},
+            "candidate_type": "strategy",
+            "universe_requested": "named_universe",
+            "universe_effective": "default_universe",
+            "symbols_source": "default_universe",
+            "symbols_count": 5000,
+            "generated_code": False,
+            "static_checks": "NOT_RUN",
+            "saved_in_registry": False,
+            "execution_backend": "factor_rank_composite_adapter",
+            "factor_weights": {"factor_a": 0.7, "factor_b": 0.3},
+            "research_only": True,
+            "live_trading_allowed": False,
+            "warnings": ["diagnostics failed"],
+        },
     )
 
     result = generate_research_report_tool.run(
@@ -74,37 +87,36 @@ def test_research_report_returns_structured_evidence_summary(
     )
     reports = tmp_path / "reports" / "research"
     reports.mkdir(parents=True)
-    (reports / "run_strategy.json").write_text(
-        json.dumps(
-            {
-                "run_id": "run_strategy",
-                "artifact_type": "strategy_backtest",
-                "strategy_id": "strat_a",
-                "factor_ids": ["factor_a", "momentum_20d"],
-                "execution_backend": "factor_rank_composite_adapter",
-                "factor_weights": {"factor_a": 0.6, "momentum_20d": 0.4},
-                "research_only": True,
-                "live_trading_allowed": False,
-                "metrics": {
-                    "total_return": -0.12,
-                    "sharpe": 0.01,
-                    "max_drawdown": -0.28,
-                },
-                "diagnostics": {"status": "FAIL", "checks": []},
-                "data_window": {
-                    "requested_end": "2026-06-26",
-                    "actual_end": "20260626",
-                    "data_freshness": "covers_requested_end",
-                },
-                "config": {
-                    "symbols": ["000001.SZ", "600519.SH"],
-                    "start_date": "2024-03-01",
-                    "end_date": "2026-06-26",
-                    "universe": "custom_2_stocks",
-                },
-            }
-        ),
-        encoding="utf-8",
+    _write_governed_run(
+        reports,
+        "run_strategy",
+        {
+            "run_id": "run_strategy",
+            "artifact_type": "strategy_backtest",
+            "strategy_id": "strat_a",
+            "factor_ids": ["factor_a", "momentum_20d"],
+            "execution_backend": "factor_rank_composite_adapter",
+            "factor_weights": {"factor_a": 0.6, "momentum_20d": 0.4},
+            "research_only": True,
+            "live_trading_allowed": False,
+            "metrics": {
+                "total_return": -0.12,
+                "sharpe": 0.01,
+                "max_drawdown": -0.28,
+            },
+            "diagnostics": {"status": "FAIL", "checks": []},
+            "data_window": {
+                "requested_end": "2026-06-26",
+                "actual_end": "20260626",
+                "data_freshness": "covers_requested_end",
+            },
+            "config": {
+                "symbols": ["000001.SZ", "600519.SH"],
+                "start_date": "2024-03-01",
+                "end_date": "2026-06-26",
+                "universe": "custom_2_stocks",
+            },
+        },
     )
 
     result = generate_research_report_tool.run(

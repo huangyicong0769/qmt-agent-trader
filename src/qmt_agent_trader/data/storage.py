@@ -213,7 +213,7 @@ class DataLake:
             return pd.DataFrame()
 
         escaped_path = str(path).replace("'", "''")
-        with self.connect() as con:
+        with self.database_coordinator.transient_read_connection("read_parquet_filtered") as con:
             schema = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{escaped_path}')").fetchdf()
             available_columns = [str(item) for item in schema["column_name"].tolist()]
             available = set(available_columns)
@@ -264,7 +264,12 @@ class DataLake:
         return pd.concat(frames, ignore_index=True)
 
     def query_parquet(self, sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
-        with self.connect() as con:
+        connection = (
+            self.database_coordinator.transient_read_connection("query_parquet")
+            if "read_parquet(" in sql.lower()
+            else self.connect()
+        )
+        with connection as con:
             return con.execute(sql, params or {}).fetchdf()
 
     def register_parquet(self, table_name: str, layer: str, name: str) -> None:

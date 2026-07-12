@@ -3,6 +3,7 @@ import json
 import pytest
 
 from qmt_agent_trader.core.types import ApprovalStatus
+from qmt_agent_trader.persistence.errors import StorageSchemaMismatchError
 from qmt_agent_trader.strategy.models import SavedStrategy, StrategySource, StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
 
@@ -82,19 +83,18 @@ def test_strategy_registry_rejects_direct_approved_candidate(tmp_path) -> None:
         registry.save_candidate(_saved("strat_test", ApprovalStatus.APPROVED))
 
 
-def test_strategy_registry_migrates_v1_without_persisting_builtins(tmp_path) -> None:
+def test_strategy_registry_rejects_v1_without_mutation(tmp_path) -> None:
     legacy_record = _saved("legacy_strategy").model_dump(mode="json")
     legacy = {"version": 1, "strategies": [legacy_record]}
     path = tmp_path / "registry.json"
     path.write_text(json.dumps(legacy), encoding="utf-8")
 
-    registry = StrategyRegistry(tmp_path)
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    original = path.read_bytes()
 
-    assert registry.get_strategy("legacy_strategy") is not None
-    assert payload["schema_version"] == 2
-    assert [item["strategy_id"] for item in payload["items"]] == ["legacy_strategy"]
-    assert json.loads((tmp_path / "registry.json.v1.bak").read_text()) == legacy
+    with pytest.raises(StorageSchemaMismatchError):
+        StrategyRegistry(tmp_path)
+
+    assert path.read_bytes() == original
 
 
 def test_strategy_registry_preserves_trusted_approval_gate_after_migration(tmp_path) -> None:

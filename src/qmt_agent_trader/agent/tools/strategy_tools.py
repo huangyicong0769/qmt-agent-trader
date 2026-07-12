@@ -2094,7 +2094,7 @@ def _backtest_cache_key(
         "factor_fingerprint": _factor_fingerprint(lake, requested_factor_ids),
     }
     raw = json.dumps(payload, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _get_cached_backtest(cache_key: str) -> dict[str, Any] | None:
