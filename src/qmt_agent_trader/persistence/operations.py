@@ -174,6 +174,7 @@ class StorageOperations:
                             root / artifact_diagnostic.relative_path,
                         )
                     )
+                continue
             candidates = [root] if root.is_file() else root.rglob("*")
             for path in candidates:
                 if not path.is_file() or self.paths.backup_root in path.parents:

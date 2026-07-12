@@ -145,6 +145,38 @@ def test_composed_generated_code_root_is_verified_and_backed_up(
     )
 
 
+def test_governed_store_is_diagnosed_once_per_verify(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = operations.paths.approvals_root
+    store = artifact_store_for_root(root, lock_manager=operations.locks)
+    for index in range(3):
+        store.create(
+            f"approval-{index}.yaml",
+            b"status: APPROVED\n",
+            metadata=ArtifactMetadata(
+                artifact_id=f"approval-{index}", artifact_type="approval", producer="test"
+            ),
+        )
+    calls = 0
+    original = type(store).diagnose_assume_locked
+
+    def counted(self: object) -> list[object]:
+        nonlocal calls
+        calls += 1
+        return original(self)  # type: ignore[arg-type, return-value]
+
+    monkeypatch.setattr(type(store), "diagnose_assume_locked", counted)
+
+    expected = sum(
+        1
+        for definition in operations.catalog.stores
+        if definition.governed and definition.path.is_dir()
+    )
+    assert operations.verify(deep=True).healthy
+    assert calls == expected
+
+
 def test_backup_excludes_cache_temp_and_locks_and_verifies_hashes(
     operations: StorageOperations,
 ) -> None:
