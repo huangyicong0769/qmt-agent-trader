@@ -305,3 +305,28 @@ def test_quarantine_unparseable_manifest_does_not_guess_orphan_content(
     sidecar = __import__("json").loads(quarantined.sidecar_path.read_text())
     assert sidecar["binding_state"] == "UNRECOVERABLE"
     assert sidecar["content_state"] == "UNKNOWN_NOT_MOVED"
+
+
+def test_quarantine_sidecar_failure_rolls_back_complete_unit(
+    store: ArtifactStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = store.create("reports/rollback.json", b"original", metadata=_metadata("rollback"))
+    receipt.path.write_bytes(b"tampered")
+    original_write = store.atomic_store.write_json_assume_locked
+
+    def fail_sidecar(path: Path, *args, **kwargs) -> None:
+        if path.name == "QUARANTINE.json":
+            raise OSError("sidecar publish failed")
+        original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(store.atomic_store, "write_json_assume_locked", fail_sidecar)
+
+    with pytest.raises(OSError, match="sidecar publish failed"):
+        store.quarantine(
+            artifact_id="rollback",
+            expected_relative_path="reports/rollback.json",
+            quarantine_root=tmp_path / "quarantine",
+        )
+
+    assert receipt.path.read_bytes() == b"tampered"
+    assert receipt.manifest_path.is_file()
