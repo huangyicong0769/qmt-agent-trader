@@ -242,29 +242,39 @@ class ArtifactStore:
         expected_relative_path: str | Path | None = None,
     ) -> bytes:
         with self.lock_manager.resource_lock(self._resource):
-            manifest = self._validated_manifest_assume_locked(
-                artifact_id,
-                expected_relative_path=expected_relative_path,
+            return self._read_verified_assume_locked(
+                artifact_id, expected_relative_path=expected_relative_path
             )
-            path = self.path_for(manifest.relative_path)
-            try:
-                content = path.read_bytes()
-            except OSError as exc:
-                raise StorageValidationError(
-                    store_name="artifacts",
-                    path=path,
-                    operation="read_verified",
-                    reason="missing_artifact",
-                    original_error=exc,
-                ) from exc
-            if hashlib.sha256(content).hexdigest() != manifest.content_hash:
-                raise StorageValidationError(
-                    store_name="artifacts",
-                    path=path,
-                    operation="read_verified",
-                    reason="hash_mismatch",
-                )
-            return content
+
+    def _read_verified_assume_locked(
+        self,
+        artifact_id: str,
+        *,
+        expected_relative_path: str | Path | None = None,
+    ) -> bytes:
+        manifest = self._validated_manifest_assume_locked(
+            artifact_id,
+            expected_relative_path=expected_relative_path,
+        )
+        path = self.path_for(manifest.relative_path)
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise StorageValidationError(
+                store_name="artifacts",
+                path=path,
+                operation="read_verified",
+                reason="missing_artifact",
+                original_error=exc,
+            ) from exc
+        if hashlib.sha256(content).hexdigest() != manifest.content_hash:
+            raise StorageValidationError(
+                store_name="artifacts",
+                path=path,
+                operation="read_verified",
+                reason="hash_mismatch",
+            )
+        return content
 
     def _validated_manifest_assume_locked(
         self,

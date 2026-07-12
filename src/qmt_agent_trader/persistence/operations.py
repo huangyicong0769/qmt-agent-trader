@@ -176,6 +176,9 @@ class StorageOperations:
                         )
                     )
                 continue
+            if store.verifier_id == "order_plan_event_stream_v1":
+                diagnostics.extend(self._verify_order_plan_event_store(store))
+                continue
             candidates = [root] if root.is_file() else root.rglob("*")
             for path in candidates:
                 if not path.is_file() or self.paths.backup_root in path.parents:
@@ -184,6 +187,24 @@ class StorageOperations:
         return VerificationResult(
             not any(d.severity == "error" for d in diagnostics), deep, diagnostics
         )
+
+    def _verify_order_plan_event_store(
+        self, definition: StoreDefinition
+    ) -> list[StorageDiagnostic]:
+        artifact_store = artifact_store_for_root(
+            self.paths.order_plans_root, lock_manager=self.locks
+        )
+        diagnostics: list[StorageDiagnostic] = []
+        with self.locks.resource_lock(artifact_store._resource):
+            if not definition.path.exists():
+                return diagnostics
+            for path in sorted(definition.path.glob("*.jsonl")):
+                verification = verify_order_plan_event_stream(path)
+                diagnostics.extend(
+                    StorageDiagnostic(definition.name, item.code, item.reason, path)
+                    for item in verification.corruptions
+                )
+        return diagnostics
 
     def migrate(self, *, dry_run: bool) -> list[str]:
         return MigrationRegistry(self.database).apply(storage_migrations(), dry_run=dry_run)

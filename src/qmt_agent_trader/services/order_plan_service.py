@@ -187,21 +187,37 @@ def append_order_plan_event(
     artifact_store: ArtifactStore,
 ) -> OrderPlanEvent:
     store = artifact_store
-    verification = store.verify(
-        order_plan_id,
-        expected_relative_path=f"{order_plan_id}.json",
-    )
-    if not verification.verified:
-        store.read_verified(order_plan_id, expected_relative_path=f"{order_plan_id}.json")
-    event = OrderPlanEvent(
-        order_plan_id=order_plan_id,
-        event_type=event_type,
-        actor=actor,
-        details=details or {},
-    )
-    event_path = _event_path(store, order_plan_id)
-    store.atomic_store.append_jsonl(event_path, event.model_dump(mode="json"))
-    return event
+    with store.lock_manager.resource_lock(store._resource):
+        verification = store._verify_assume_locked(
+            order_plan_id,
+            expected_relative_path=f"{order_plan_id}.json",
+        )
+        if not verification.verified:
+            store._read_verified_assume_locked(
+                order_plan_id, expected_relative_path=f"{order_plan_id}.json"
+            )
+        event_path = _event_path(store, order_plan_id)
+        if event_path.exists():
+            stream = verify_order_plan_event_stream(
+                event_path, expected_order_plan_id=order_plan_id
+            )
+            if not stream.healthy:
+                raise StorageCorruptError(
+                    store_name="order_plan_events",
+                    path=event_path,
+                    operation="append",
+                    reason="cannot append to corrupt event stream",
+                )
+        event = OrderPlanEvent(
+            order_plan_id=order_plan_id,
+            event_type=event_type,
+            actor=actor,
+            details=details or {},
+        )
+        store.atomic_store.append_jsonl_assume_locked(
+            event_path, event.model_dump(mode="json")
+        )
+        return event
 
 
 def load_order_plan_events(
@@ -212,7 +228,7 @@ def load_order_plan_events(
 ) -> list[OrderPlanEvent]:
     store = artifact_store
     path = _event_path(store, order_plan_id)
-    with store.lock_manager.resource_lock(path):
+    with store.lock_manager.resource_lock(store._resource):
         if not path.exists():
             return []
         verification = verify_order_plan_event_stream(

@@ -211,6 +211,13 @@ def test_order_plan_event_truncated_tail_fails_closed(tmp_path) -> None:
 
     with pytest.raises(StorageCorruptError, match="truncated tail"):
         load_order_plan_events(plan.order_plan_id, tmp_path)
+    with pytest.raises(StorageCorruptError, match="cannot append"):
+        append_order_plan_event(
+            plan.order_plan_id,
+            directory=tmp_path,
+            event_type="PAPER_ACCEPTED",
+            actor="test",
+        )
 
     verification = verify_order_plan_event_stream(
         event_path, expected_order_plan_id=plan.order_plan_id
