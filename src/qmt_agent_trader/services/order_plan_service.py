@@ -18,6 +18,7 @@ from qmt_agent_trader.persistence.artifacts import (
     ArtifactStore,
     artifact_store_for_root,
 )
+from qmt_agent_trader.persistence.errors import StorageCorruptError
 
 
 def build_sample_paper_order_plan(strategy_id: str) -> OrderPlan:
@@ -140,13 +141,26 @@ def load_order_plan_events(
         if not path.exists():
             return []
         raw = path.read_bytes()
-        complete = raw if raw.endswith(b"\n") else raw.rsplit(b"\n", 1)[0]
+        if raw and not raw.endswith(b"\n"):
+            raise StorageCorruptError(
+                store_name="order_plan_events",
+                path=path,
+                operation="read",
+                reason="order plan event stream has a truncated tail",
+                suggested_repair="inspect and restore the event stream before execution",
+            )
         events: list[OrderPlanEvent] = []
-        for line in complete.splitlines():
+        for line in raw.splitlines():
             try:
                 events.append(OrderPlanEvent.model_validate(json.loads(line)))
             except Exception as exc:
-                raise ValueError("invalid order plan event record") from exc
+                raise StorageCorruptError(
+                    store_name="order_plan_events",
+                    path=path,
+                    operation="read",
+                    reason="order plan event stream contains an invalid record",
+                    original_error=exc,
+                ) from exc
         return events
 
 

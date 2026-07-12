@@ -10,6 +10,7 @@ import pytest
 
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
+from qmt_agent_trader.persistence.errors import StorageLockTimeoutError, StorageValidationError
 from qmt_agent_trader.persistence.locks import LockManager
 
 
@@ -41,6 +42,21 @@ def test_cache_hit_miss_ttl_and_content_addressed_key(tmp_path: Path) -> None:
     assert cache.get("factor", key) == {"status": "ok"}
     cache.clock = lambda: now + timedelta(seconds=11)
     assert cache.get("factor", key) is None
+
+
+def test_cache_rejects_unsafe_paths_and_propagates_lock_timeout(tmp_path: Path) -> None:
+    manager = LockManager(tmp_path / "locks", timeout_seconds=0.01)
+    cache = ContentAddressedCache(tmp_path / "cache", AtomicFileStore(manager))
+    key = cache.key_for({"factor": "locked"})
+    path = cache.path_for("factor", key)
+
+    with pytest.raises(StorageValidationError):
+        cache.path_for("../factor", key)
+    with pytest.raises(StorageValidationError):
+        cache.path_for("factor", "../not-a-hash")
+    with manager.resource_lock(path):
+        with pytest.raises(StorageLockTimeoutError):
+            cache.get("factor", key)
 
 
 def test_corrupt_cache_invalidates_with_warning_and_never_blocks(tmp_path: Path) -> None:

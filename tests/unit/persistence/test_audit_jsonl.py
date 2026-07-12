@@ -5,10 +5,13 @@ import multiprocessing
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from qmt_agent_trader.agent.audit import AuditLogger as AgentAuditLogger
 from qmt_agent_trader.core.audit import AuditLogger as CoreAuditLogger
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.audit import AuditJsonlStore, verify_audit_jsonl
+from qmt_agent_trader.persistence.errors import StorageCorruptError
 from qmt_agent_trader.persistence.locks import LockManager
 
 
@@ -63,6 +66,18 @@ def test_verifier_distinguishes_half_tail_from_mid_file_corruption(tmp_path: Pat
     assert result.tail_truncated is False
     assert result.valid_records == 2
     assert result.corruptions[0].line_number == 2
+
+
+def test_audit_reader_returns_diagnostics_and_strict_read_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    path.write_bytes(b'{"ok":true}\nnot-json\n')
+    store = AuditJsonlStore(path, AtomicFileStore(LockManager(tmp_path / "locks")))
+
+    result = store.read_records_with_diagnostics()
+    assert result.records == [{"ok": True}]
+    assert result.verification.corruptions
+    with pytest.raises(StorageCorruptError):
+        store.read_records()
 
 
 def test_repeated_rotation_preserves_every_event_in_order(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.errors import StorageCorruptError
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,12 @@ class AuditVerification:
     @property
     def healthy(self) -> bool:
         return not self.tail_truncated and not self.corruptions
+
+
+@dataclass(frozen=True)
+class AuditReadResult:
+    records: list[dict[str, Any]]
+    verification: AuditVerification
 
 
 def verify_audit_jsonl(path: Path) -> AuditVerification:
@@ -83,6 +90,18 @@ class AuditJsonlStore:
         return verify_audit_jsonl(self.path)
 
     def read_records(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        result = self.read_records_with_diagnostics(limit=limit)
+        if not result.verification.healthy:
+            raise StorageCorruptError(
+                store_name="audit",
+                path=self.path,
+                operation="read_records",
+                reason="audit stream contains truncated or corrupt records",
+                suggested_repair="inspect the audit verification diagnostics",
+            )
+        return result.records
+
+    def read_records_with_diagnostics(self, *, limit: int | None = None) -> AuditReadResult:
         rows: list[dict[str, Any]] = []
         for path in _audit_paths(self.path):
             for raw in path.read_bytes().splitlines(keepends=True):
@@ -92,7 +111,8 @@ class AuditJsonlStore:
                     continue
                 if isinstance(value, dict):
                     rows.append(value)
-        return rows[-limit:] if limit is not None else rows
+        selected = rows[-limit:] if limit is not None else rows
+        return AuditReadResult(selected, self.verify())
 
 
 def _audit_paths(path: Path) -> list[Path]:

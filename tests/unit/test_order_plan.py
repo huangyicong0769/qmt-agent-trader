@@ -4,7 +4,11 @@ from pydantic import ValidationError
 from qmt_agent_trader.broker.order import Order
 from qmt_agent_trader.broker.order_plan import OrderPlan, OrderPlanApproval, RiskChecks
 from qmt_agent_trader.core.types import ApprovalStatus, OrderType, Side
-from qmt_agent_trader.persistence.errors import StorageConflictError, StorageValidationError
+from qmt_agent_trader.persistence.errors import (
+    StorageConflictError,
+    StorageCorruptError,
+    StorageValidationError,
+)
 from qmt_agent_trader.services.order_plan_service import (
     OrderPlanEvent,
     append_order_plan_event,
@@ -155,3 +159,19 @@ def test_order_plan_event_rejects_unknown_schema_version() -> None:
             event_type="RISK_CHECKED",
             actor="test",
         )
+
+
+def test_order_plan_event_truncated_tail_fails_closed(tmp_path) -> None:
+    plan = make_plan()
+    save_order_plan(plan, tmp_path)
+    append_order_plan_event(
+        plan.order_plan_id,
+        directory=tmp_path,
+        event_type="RISK_CHECKED",
+        actor="test",
+    )
+    event_path = next((tmp_path / ".events").glob("*.jsonl"))
+    event_path.write_bytes(event_path.read_bytes() + b'{"broken"')
+
+    with pytest.raises(StorageCorruptError, match="truncated tail"):
+        load_order_plan_events(plan.order_plan_id, tmp_path)

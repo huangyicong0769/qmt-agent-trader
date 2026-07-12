@@ -5,14 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore, FaultHook
+from qmt_agent_trader.persistence.errors import (
+    StorageError,
+    StorageLockTimeoutError,
+    StorageValidationError,
+)
 
 WarningSink = Callable[[dict[str, object]], None]
+_NAMESPACE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_KEY = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ContentAddressedCache:
@@ -47,47 +55,42 @@ class ContentAddressedCache:
         return hashlib.sha256(canonical.encode()).hexdigest()
 
     def path_for(self, namespace: str, key: str) -> Path:
-        safe_namespace = "".join(c for c in namespace if c.isalnum() or c in "-_")
-        return self.root / safe_namespace / f"{key}.json"
+        if not _NAMESPACE.fullmatch(namespace) or not _KEY.fullmatch(key):
+            raise StorageValidationError(
+                store_name="cache",
+                path=self.root,
+                operation="path_for",
+                reason="namespace or key is not canonical",
+            )
+        return self.root / namespace / f"{key}.json"
 
     def get(self, namespace: str, key: str) -> dict[str, Any] | None:
         path = self.path_for(namespace, key)
-        try:
-            with self.atomic_store.lock_manager.resource_lock(path):
-                if not path.exists():
-                    self.metrics["misses"] += 1
-                    return None
-                try:
-                    envelope = json.loads(path.read_text(encoding="utf-8"))
-                    if not self._valid_envelope(envelope, key):
-                        raise ValueError("invalid cache envelope")
-                    if datetime.fromisoformat(envelope["expires_at"]) <= self.clock():
-                        self.metrics["expired"] += 1
-                        self._invalidate_unlocked(path)
-                        return None
-                    self.metrics["hits"] += 1
-                    return dict(envelope["value"])
-                except Exception as exc:
-                    self.metrics["corrupt_invalidations"] += 1
+        with self.atomic_store.lock_manager.resource_lock(path):
+            if not path.exists():
+                self.metrics["misses"] += 1
+                return None
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+                if not self._valid_envelope(envelope, key):
+                    raise ValueError("invalid cache envelope")
+                if datetime.fromisoformat(envelope["expires_at"]) <= self.clock():
+                    self.metrics["expired"] += 1
                     self._invalidate_unlocked(path)
-                    self._warn(
-                        {
-                            "reason": "CACHE_CORRUPT_INVALIDATED",
-                            "path": str(path),
-                            "error": type(exc).__name__,
-                        }
-                    )
                     return None
-        except Exception as exc:
-            self.metrics["read_failures"] += 1
-            self._warn(
-                {
-                    "reason": "CACHE_READ_FAILED",
-                    "path": str(path),
-                    "error": type(exc).__name__,
-                }
-            )
-            return None
+                self.metrics["hits"] += 1
+                return dict(envelope["value"])
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError) as exc:
+                self.metrics["corrupt_invalidations"] += 1
+                self._invalidate_unlocked(path)
+                self._warn(
+                    {
+                        "reason": "CACHE_CORRUPT_INVALIDATED",
+                        "path": str(path),
+                        "error": type(exc).__name__,
+                    }
+                )
+                return None
 
     def put(
         self,
@@ -115,7 +118,9 @@ class ContentAddressedCache:
                     validator=lambda item: self._valid_envelope(item, key),
                     fault_hook=fault_hook,
                 )
-        except Exception as exc:
+        except StorageLockTimeoutError:
+            raise
+        except StorageError as exc:
             self.metrics["write_failures"] += 1
             self._warn(
                 {
