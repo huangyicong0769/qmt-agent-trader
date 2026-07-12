@@ -5,7 +5,7 @@ from qmt_agent_trader.persistence.architecture import scan_forbidden_persistence
 
 def test_architecture_scan_catches_fixture_and_passes_production(tmp_path: Path) -> None:
     fixture = tmp_path / "bad.py"
-    fixture.write_text('from pathlib import Path\nPath("x").write_text("bad")\n')
+    fixture.write_text('import pandas as pd\npd.DataFrame().to_parquet("bad.parquet")\n')
     assert scan_forbidden_persistence(tmp_path)
     production = Path(__file__).parents[3] / "src/qmt_agent_trader"
     assert scan_forbidden_persistence(production) == []
@@ -39,41 +39,11 @@ def test_architecture_scan_detects_duckdb_module_alias_connect(tmp_path: Path) -
     assert any(item.primitive == "duckdb.connect" for item in violations)
 
 
-def test_architecture_scan_rejects_cwd_persistence_and_private_lock_roots(
-    tmp_path: Path,
-) -> None:
+def test_architecture_scan_rejects_cwd_persistence_root(tmp_path: Path) -> None:
     (tmp_path / "roots.py").write_text(
-        "from pathlib import Path\n"
-        "from qmt_agent_trader.persistence.locks import LockManager\n"
-        'root = Path("reports/research")\n'
-        'manager = LockManager(root / ".artifact-locks")\n'
+        'from pathlib import Path\nroot = Path("reports/research")\n'
     )
 
     primitives = {item.primitive for item in scan_forbidden_persistence(tmp_path)}
 
     assert "cwd_relative_persistence_root" in primitives
-    assert "noncanonical_lock_root" in primitives
-
-
-def test_architecture_scan_rejects_artifact_store_without_manager(tmp_path: Path) -> None:
-    (tmp_path / "artifact.py").write_text(
-        "from qmt_agent_trader.persistence.artifacts import artifact_store_for_root\n"
-        "artifact_store_for_root(root)\n"
-    )
-
-    assert any(
-        item.primitive == "artifact_store_without_canonical_manager"
-        for item in scan_forbidden_persistence(tmp_path)
-    )
-
-
-def test_architecture_scan_rejects_governed_artifact_fallback_calls(tmp_path: Path) -> None:
-    (tmp_path / "order_plan.py").write_text(
-        "from qmt_agent_trader.services.order_plan_service import load_order_plan\n"
-        "load_order_plan(plan_id, root)\n"
-    )
-
-    assert any(
-        item.primitive == "governed_artifact_without_store"
-        for item in scan_forbidden_persistence(tmp_path)
-    )

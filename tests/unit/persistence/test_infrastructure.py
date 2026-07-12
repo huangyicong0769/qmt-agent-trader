@@ -73,6 +73,18 @@ def test_paths_are_absolute_cwd_independent_and_do_not_create_directories(
     assert not project.exists()
 
 
+def test_paths_reject_external_data_and_log_roots(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    with pytest.raises(ValueError, match="inside project_root"):
+        PersistencePaths.from_settings(
+            Settings(project_root=project, data_dir=tmp_path / "external-data")
+        )
+    with pytest.raises(ValueError, match="inside project_root"):
+        PersistencePaths.from_settings(
+            Settings(project_root=project, log_dir=tmp_path / "external-logs")
+        )
+
+
 def test_storage_errors_have_safe_structured_attributes(tmp_path: Path) -> None:
     secret = "token-super-secret"
     cause = RuntimeError(secret)
@@ -256,9 +268,7 @@ def test_jsonl_rollback_failure_remains_structured_and_secret_safe(
         raise OSError("rollback-secret-value")
 
     monkeypatch.setattr("qmt_agent_trader.persistence.atomic_files.os.write", short_write)
-    monkeypatch.setattr(
-        "qmt_agent_trader.persistence.atomic_files.os.ftruncate", rollback_failure
-    )
+    monkeypatch.setattr("qmt_agent_trader.persistence.atomic_files.os.ftruncate", rollback_failure)
     with pytest.raises(StorageError) as caught:
         store.append_jsonl(stream, {"event": "partial"})
     assert caught.value.recoverable is False
@@ -374,12 +384,13 @@ def test_data_lake_and_ledger_reject_inconsistent_injected_coordination(
 
 
 def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None:
-    coordinator = DatabaseCoordinator(
-        tmp_path / "control.duckdb", LockManager(tmp_path / "locks")
-    )
+    coordinator = DatabaseCoordinator(tmp_path / "control.duckdb", LockManager(tmp_path / "locks"))
     registry = MigrationRegistry(coordinator)
     good = Migration(
-        "core-001", "core", 1, "create sample",
+        "core-001",
+        "core",
+        1,
+        "create sample",
         lambda con: con.execute("CREATE TABLE sample(value INTEGER)"),
         implementation="create-sample-v1",
     )
@@ -388,14 +399,21 @@ def test_migrations_dry_run_idempotency_and_failed_audit(tmp_path: Path) -> None
     assert registry.apply([good]) == []
 
     changed = Migration(
-        "core-001", "core", 1, "create sample", lambda con: None,
+        "core-001",
+        "core",
+        1,
+        "create sample",
+        lambda con: None,
         implementation="changed-implementation",
     )
     with pytest.raises(StorageConflictError, match="checksum"):
         registry.apply([changed])
 
     bad = Migration(
-        "core-002", "core", 2, "fail",
+        "core-002",
+        "core",
+        2,
+        "fail",
         lambda con: (_ for _ in ()).throw(RuntimeError("migration broke")),
         implementation="always-fail-v1",
     )
@@ -414,19 +432,19 @@ def test_migration_requires_non_empty_immutable_implementation() -> None:
         Migration("missing-001", "core", 1, "missing", lambda connection: None)
     with pytest.raises(ValueError, match="implementation"):
         Migration(
-            "empty-001", "core", 1, "empty", lambda connection: None,
+            "empty-001",
+            "core",
+            1,
+            "empty",
+            lambda connection: None,
             implementation="",
         )
 
     def closure(value: int) -> object:
         return lambda connection: connection.execute("SELECT ?", [value])
 
-    first = Migration(
-        "closure-001", "core", 1, "closure", closure(1), implementation="closure-v1"
-    )
-    second = Migration(
-        "closure-001", "core", 1, "closure", closure(2), implementation="closure-v2"
-    )
+    first = Migration("closure-001", "core", 1, "closure", closure(1), implementation="closure-v1")
+    second = Migration("closure-001", "core", 1, "closure", closure(2), implementation="closure-v2")
     assert first.checksum != second.checksum
 
 
@@ -458,9 +476,7 @@ def test_migration_dry_run_has_no_storage_side_effects(tmp_path: Path) -> None:
 def test_destructive_migration_requires_explicit_approval_for_plan_and_apply(
     tmp_path: Path,
 ) -> None:
-    coordinator = DatabaseCoordinator(
-        tmp_path / "control.duckdb", LockManager(tmp_path / "locks")
-    )
+    coordinator = DatabaseCoordinator(tmp_path / "control.duckdb", LockManager(tmp_path / "locks"))
     registry = MigrationRegistry(coordinator)
     migration = Migration(
         "drop-001",
@@ -528,9 +544,7 @@ def test_concurrent_migration_is_applied_once(tmp_path: Path) -> None:
 def test_current_schema_version_propagates_unexpected_storage_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    coordinator = DatabaseCoordinator(
-        tmp_path / "control.duckdb", LockManager(tmp_path / "locks")
-    )
+    coordinator = DatabaseCoordinator(tmp_path / "control.duckdb", LockManager(tmp_path / "locks"))
 
     def fail(*args: object, **kwargs: object) -> object:
         raise StorageError(

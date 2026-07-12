@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -304,7 +305,6 @@ class StorageOperations:
         return PersistencePaths(**values)
 
     def locks_report(self) -> list[dict[str, Any]]:
-        now = datetime.now(tz=UTC).timestamp()
         result: list[dict[str, Any]] = []
         known = {
             self.locks.lock_path_for_resource(store.lock_resource): store.name
@@ -314,11 +314,10 @@ class StorageOperations:
             str(self.paths.control_db_path.resolve()).encode()
         ).hexdigest()
         known[self.paths.locks_root / f"database-{database_digest}.lock"] = "control_db"
-        known[self.paths.locks_root / "backup-barrier.lock"] = "backup_barrier"
+        known[self.paths.locks_root / "writer-admission.lock"] = "writer_admission"
         if not self.paths.locks_root.exists():
             return result
         for path in sorted(self.paths.locks_root.glob("*.lock")):
-            age = max(0.0, now - path.stat().st_mtime)
             active = _lock_is_active(path)
             resource = known.get(path)
             result.append(
@@ -327,12 +326,17 @@ class StorageOperations:
                     "resource": path.stem,
                     "known_resource": resource,
                     "resource_status": "known" if resource is not None else "unknown",
-                    "age_seconds": age,
-                    "stale": age > 3600 and not active,
-                    "stale_basis": "mtime_only_no_owner_evidence",
                     "active": active,
                 }
             )
+        maintenance = self.paths.locks_root / "maintenance.active"
+        if maintenance.exists():
+            result.append(_marker_report(maintenance, marker_type="maintenance"))
+        writers_root = self.paths.locks_root / "writers"
+        result.extend(
+            _marker_report(path, marker_type="writer")
+            for path in sorted(writers_root.glob("*.json"))
+        )
         return result
 
     def quarantine(self, store: str, record: str) -> QuarantineReceipt:
@@ -519,6 +523,44 @@ def _lock_is_active(path: Path) -> bool:
     else:
         lock.release()
         return False
+
+
+def _marker_report(path: Path, *, marker_type: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        pid = int(payload["pid"])
+        host = str(payload["host"])
+        active = host != socket.gethostname() or _pid_is_alive(pid)
+        return {
+            "path": str(path),
+            "resource": payload.get("resource"),
+            "known_resource": None,
+            "resource_status": marker_type,
+            "active": active,
+            "pid": pid,
+            "operation": payload.get("operation"),
+            "started_at": payload.get("started_at"),
+            "host": host,
+        }
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        return {
+            "path": str(path),
+            "resource": None,
+            "known_resource": None,
+            "resource_status": f"invalid_{marker_type}_marker",
+            "active": None,
+            "error": type(exc).__name__,
+        }
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _verify_versioned_json(

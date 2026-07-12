@@ -54,4 +54,9 @@ class PersistencePaths:
 
 
 def _under(project: Path, configured: Path) -> Path:
-    return (configured if configured.is_absolute() else project / configured).expanduser().resolve()
+    resolved = (
+        (configured if configured.is_absolute() else project / configured).expanduser().resolve()
+    )
+    if resolved != project and project not in resolved.parents:
+        raise ValueError("persistence roots must remain inside project_root")
+    return resolved

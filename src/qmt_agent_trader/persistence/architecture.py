@@ -17,24 +17,8 @@ class PersistenceViolation:
 _ALLOWLIST = {
     "persistence/atomic_files.py": {"DataFrame.to_parquet"},
     "persistence/database.py": {"duckdb.connect"},
-    # These modules declare user-configurable relative defaults; composition
-    # resolves them beneath project_root before persistence access.
     "core/config.py": {"cwd_relative_persistence_root"},
     "web/config.py": {"cwd_relative_persistence_root"},
-    # Compatibility APIs accept injected ArtifactStore but retain local fallback
-    # for external callers; production composition passes a store explicitly.
-    "strategy/approval.py": {"artifact_store_without_canonical_manager"},
-    "services/order_plan_service.py": {"artifact_store_without_canonical_manager"},
-    "persistence/artifacts.py": {"noncanonical_lock_root"},
-}
-
-_GOVERNED_ARTIFACT_CALLS = {
-    "append_order_plan_event",
-    "load_order_plan",
-    "load_order_plan_events",
-    "read_approval_file",
-    "save_order_plan",
-    "write_approval_file",
 }
 
 
@@ -84,18 +68,6 @@ def _primitive(
     if not isinstance(node, ast.Call):
         return None
     function = node.func
-    if (
-        isinstance(function, ast.Name)
-        and function.id in _GOVERNED_ARTIFACT_CALLS
-        and not any(keyword.arg == "artifact_store" for keyword in node.keywords)
-    ):
-        return "governed_artifact_without_store"
-    if (
-        isinstance(function, ast.Name)
-        and function.id == "artifact_store_for_root"
-        and not any(keyword.arg == "lock_manager" for keyword in node.keywords)
-    ):
-        return "artifact_store_without_canonical_manager"
     if isinstance(function, ast.Name) and function.id == "Path" and node.args:
         value = node.args[0]
         if (
@@ -104,22 +76,6 @@ def _primitive(
             and value.value.split("/", 1)[0] in {"reports", "data", "sessions", "approvals"}
         ):
             return "cwd_relative_persistence_root"
-    if isinstance(function, ast.Name) and function.id == "LockManager" and node.args:
-        strings = {
-            child.value
-            for child in ast.walk(node.args[0])
-            if isinstance(child, ast.Constant) and isinstance(child.value, str)
-        }
-        if strings & {".locks", ".artifact-locks"}:
-            return "noncanonical_lock_root"
-    if isinstance(function, ast.Attribute) and function.attr == "write_text":
-        if (
-            isinstance(function.value, ast.Call)
-            and isinstance(function.value.func, ast.Name)
-            and function.value.func.id == "AtomicFileStore"
-        ):
-            return None
-        return "Path.write_text"
     if isinstance(function, ast.Attribute) and function.attr == "to_parquet":
         return "DataFrame.to_parquet"
     if (

@@ -551,4 +551,5 @@ def test_locks_report_maps_catalog_resources_and_marks_unknown(
     assert report[str(known_path)]["known_resource"] == "sessions"
     assert report[str(unknown_path)]["known_resource"] is None
     assert report[str(unknown_path)]["resource_status"] == "unknown"
-    assert report[str(known_path)]["stale"] is False
+    assert report[str(known_path)]["active"] is False
+    assert "stale" not in report[str(known_path)]
