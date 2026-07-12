@@ -4,6 +4,7 @@ import json
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -638,6 +639,29 @@ def test_order_plan_quarantine_moves_manifest_content_and_events(
     assert not event_path.exists()
     assert (unit_root / "manifest.json").is_file()
     assert (unit_root / "auxiliary" / ".events" / event_path.name).is_file()
+
+
+def test_event_only_quarantine_uses_order_plan_artifact_root_lock(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event_root = operations.paths.order_plans_root / ".events"
+    event_path = event_root / ("0" * 64 + ".jsonl")
+    event_path.parent.mkdir(parents=True)
+    event_path.write_bytes(b'{"broken"')
+    resources: list[str] = []
+    original = operations.locks.resource_lock
+
+    @contextmanager
+    def recording(resource):
+        resources.append(str(resource))
+        with original(resource) as lock:
+            yield lock
+
+    monkeypatch.setattr(operations.locks, "resource_lock", recording)
+
+    operations.quarantine("order_plan_events", event_path.name)
+
+    assert f"artifact-store:{operations.paths.order_plans_root.resolve()}" in resources
 
 
 def test_shared_health_payload_recursively_scrubs_all_diagnostics() -> None:

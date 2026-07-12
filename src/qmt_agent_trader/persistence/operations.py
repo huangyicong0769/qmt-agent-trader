@@ -402,7 +402,10 @@ class StorageOperations:
             / f"{source.name}.{datetime.now(tz=UTC).strftime('%Y%m%dT%H%M%S.%fZ')}.quarantine"
         )
         manifest_path = target.with_suffix(target.suffix + ".json")
-        with self.locks.resource_lock(source):
+        quarantine_lock: str | Path = source
+        if definition.verifier_id == "order_plan_event_stream_v1":
+            quarantine_lock = f"artifact-store:{self.paths.order_plans_root.resolve()}"
+        with self.locks.resource_lock(quarantine_lock):
             validation = self._verify_store_file(definition, source, deep=True)
             if not any(item.severity == "error" for item in validation):
                 raise StorageValidationError(
