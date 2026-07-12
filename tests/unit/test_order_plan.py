@@ -274,6 +274,7 @@ def test_event_append_cannot_recreate_stream_after_complete_quarantine(
     content.write_bytes(b"tampered")
     entered = threading.Event()
     release = threading.Event()
+    append_attempting = threading.Event()
     append_done = threading.Event()
     append_errors: list[Exception] = []
     original = store._quarantine_assume_locked
@@ -296,6 +297,7 @@ def test_event_append_cannot_recreate_stream_after_complete_quarantine(
     assert entered.wait(timeout=5)
 
     def append_after_quarantine() -> None:
+        append_attempting.set()
         try:
             append_order_plan_event(
                 plan.order_plan_id,
@@ -310,7 +312,8 @@ def test_event_append_cannot_recreate_stream_after_complete_quarantine(
 
     append_thread = threading.Thread(target=append_after_quarantine)
     append_thread.start()
-    assert not append_done.wait(timeout=0.1)
+    assert append_attempting.wait(timeout=5)
+    assert not append_done.is_set()
     release.set()
     quarantine_thread.join(timeout=5)
     append_thread.join(timeout=5)
@@ -318,3 +321,60 @@ def test_event_append_cannot_recreate_stream_after_complete_quarantine(
     assert append_done.is_set()
     assert append_errors and isinstance(append_errors[0], StorageValidationError)
     assert not event_path.exists()
+
+
+def test_event_read_waits_for_complete_quarantine(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    content = save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="RISK_CHECKED",
+        actor="test",
+        artifact_store=store,
+    )
+    event_path = next((tmp_path / ".events").glob("*.jsonl"))
+    content.write_bytes(b"tampered")
+    entered = threading.Event()
+    release = threading.Event()
+    read_attempting = threading.Event()
+    read_done = threading.Event()
+    read_result: list[list[OrderPlanEvent]] = []
+    original = store._quarantine_assume_locked
+
+    def paused_quarantine(**kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(**kwargs)
+
+    monkeypatch.setattr(store, "_quarantine_assume_locked", paused_quarantine)
+    quarantine_thread = threading.Thread(
+        target=lambda: store.quarantine(
+            artifact_id=plan.order_plan_id,
+            expected_relative_path=f"{plan.order_plan_id}.json",
+            quarantine_root=tmp_path / "quarantine",
+            auxiliary_paths=(event_path,),
+        )
+    )
+    quarantine_thread.start()
+    assert entered.wait(timeout=5)
+
+    def read_during_quarantine() -> None:
+        read_attempting.set()
+        read_result.append(
+            load_order_plan_events(plan.order_plan_id, artifact_store=store)
+        )
+        read_done.set()
+
+    read_thread = threading.Thread(target=read_during_quarantine)
+    read_thread.start()
+    assert read_attempting.wait(timeout=5)
+    assert not read_done.is_set()
+    release.set()
+    quarantine_thread.join(timeout=5)
+    read_thread.join(timeout=5)
+
+    assert read_done.is_set()
+    assert read_result == [[]]

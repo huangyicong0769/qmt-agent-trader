@@ -26,6 +26,7 @@ from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
     append_order_plan_event,
     build_sample_paper_order_plan,
+    load_order_plan_events,
     save_order_plan,
 )
 from qmt_agent_trader.services.research_report_service import save_research_report
@@ -676,6 +677,64 @@ def test_event_only_quarantine_uses_order_plan_artifact_root_lock(
     operations.quarantine("order_plan_events", event_path.name)
 
     assert f"artifact-store:{operations.paths.order_plans_root.resolve()}" in resources
+
+
+def test_event_store_verify_and_append_share_one_root_snapshot(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    store = artifact_store_for_root(
+        operations.paths.order_plans_root, lock_manager=operations.locks
+    )
+    save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="RISK_CHECKED",
+        actor="test",
+        artifact_store=store,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    append_attempting = threading.Event()
+    append_done = threading.Event()
+    verify_results = []
+    from qmt_agent_trader.persistence import operations as operations_module
+
+    original_verify = operations_module.verify_order_plan_event_stream
+
+    def paused_verify(path, *, expected_order_plan_id=None):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_verify(path, expected_order_plan_id=expected_order_plan_id)
+
+    monkeypatch.setattr(operations_module, "verify_order_plan_event_stream", paused_verify)
+    verify_thread = threading.Thread(
+        target=lambda: verify_results.append(operations.verify(deep=True))
+    )
+    verify_thread.start()
+    assert entered.wait(timeout=5)
+
+    def append_during_verify() -> None:
+        append_attempting.set()
+        append_order_plan_event(
+            plan.order_plan_id,
+            event_type="PAPER_ACCEPTED",
+            actor="test",
+            artifact_store=store,
+        )
+        append_done.set()
+
+    append_thread = threading.Thread(target=append_during_verify)
+    append_thread.start()
+    assert append_attempting.wait(timeout=5)
+    assert not append_done.is_set()
+    release.set()
+    verify_thread.join(timeout=5)
+    append_thread.join(timeout=5)
+
+    assert verify_results and verify_results[0].healthy
+    assert append_done.is_set()
+    assert len(load_order_plan_events(plan.order_plan_id, artifact_store=store)) == 2
 
 
 def test_shared_health_payload_recursively_scrubs_all_diagnostics() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -443,6 +444,22 @@ class ArtifactStore:
             if self.manifest_path_for(artifact_id) != manifest_path:
                 return None
             canonical = self.path_for(relative_path).relative_to(self.root).as_posix()
+            manifest_root = self.root / self._MANIFEST_DIRECTORY
+            for other_path in manifest_root.glob("*.json"):
+                if other_path == manifest_path:
+                    continue
+                try:
+                    other_payload = json.loads(other_path.read_text(encoding="utf-8"))
+                    other_relative = other_payload.get("relative_path")
+                    if not isinstance(other_relative, str):
+                        continue
+                    other_canonical = (
+                        self.path_for(other_relative).relative_to(self.root).as_posix()
+                    )
+                except Exception:
+                    continue
+                if other_canonical == canonical:
+                    return None
         except Exception:
             return None
         return RecoveredManifestBinding(
@@ -548,6 +565,7 @@ class ArtifactStore:
             ):
                 content_path.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(quarantined_content, content_path)
+            shutil.rmtree(unit_root, ignore_errors=True)
             raise
         return ArtifactQuarantineReceipt(
             artifact_id=artifact_id,
@@ -672,6 +690,7 @@ class ArtifactStore:
             if moved_content and quarantined_content is not None and quarantined_content.exists():
                 content_path.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(quarantined_content, content_path)
+            shutil.rmtree(unit_root, ignore_errors=True)
             raise
         return ArtifactQuarantineReceipt(
             artifact_id=artifact_id,

@@ -166,9 +166,6 @@ def load_order_plan(
     else:
         order_plan_id = identifier
     relative_path = f"{order_plan_id}.json"
-    artifact_path = store.path_for(relative_path)
-    if not artifact_path.exists():
-        raise ValueError(f"order plan not found: {identifier}")
     raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
     try:
         plan = OrderPlan.model_validate_json(raw)

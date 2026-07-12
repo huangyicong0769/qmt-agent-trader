@@ -307,6 +307,28 @@ def test_quarantine_unparseable_manifest_does_not_guess_orphan_content(
     assert sidecar["content_state"] == "UNKNOWN_NOT_MOVED"
 
 
+def test_quarantine_ambiguous_invalid_manifest_does_not_move_shared_content(
+    store: ArtifactStore, tmp_path: Path
+) -> None:
+    valid = store.create("reports/shared.json", b"shared", metadata=_metadata("owner"))
+    duplicate = store.manifest_path_for("duplicate")
+    payload = __import__("json").loads(valid.manifest_path.read_text())
+    payload["artifact_id"] = "duplicate"
+    payload["byte_length"] = "invalid"
+    duplicate.write_text(__import__("json").dumps(payload))
+
+    quarantined = store.quarantine_relative_path(
+        duplicate.relative_to(store.root), quarantine_root=tmp_path / "quarantine"
+    )
+
+    assert quarantined is not None
+    assert quarantined.quarantined_content_path is None
+    assert valid.path.read_bytes() == b"shared"
+    assert store.verify("owner", expected_relative_path="reports/shared.json").verified
+    sidecar = __import__("json").loads(quarantined.sidecar_path.read_text())
+    assert sidecar["binding_state"] == "UNRECOVERABLE"
+
+
 def test_quarantine_sidecar_failure_rolls_back_complete_unit(
     store: ArtifactStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -330,3 +352,5 @@ def test_quarantine_sidecar_failure_rolls_back_complete_unit(
 
     assert receipt.path.read_bytes() == b"tampered"
     assert receipt.manifest_path.is_file()
+    quarantine_root = tmp_path / "quarantine"
+    assert not quarantine_root.exists() or not any(quarantine_root.iterdir())

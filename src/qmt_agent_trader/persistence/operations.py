@@ -443,7 +443,12 @@ class StorageOperations:
             digest, size = _hash(source), source.stat().st_size
             os.replace(source, target)
             try:
-                self.atomic.write_json(
+                write_sidecar = (
+                    self.atomic.write_json_assume_locked
+                    if definition.verifier_id == "order_plan_event_stream_v1"
+                    else self.atomic.write_json
+                )
+                write_sidecar(
                     manifest_path,
                     {
                         "schema_version": 1,
