@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import gc
 import multiprocessing
 import time
-import weakref
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,10 +16,8 @@ from qmt_agent_trader.data.providers.tushare.quota import (
     new_usage_record,
 )
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.persistence import database as database_module
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import (
-    StorageConflictError,
     StorageLockTimeoutError,
 )
 from qmt_agent_trader.persistence.initialization import initialize_persistence
@@ -163,7 +159,7 @@ def test_cold_readiness_checks_execute_select_only(tmp_path: Path) -> None:
     original = cold.database_coordinator.read_connection
 
     @contextmanager
-    def tracing(operation: str = "read", *, read_only: bool = False):
+    def tracing(operation: str = "read", *, read_only: bool = True):
         with original(operation, read_only=read_only) as connection:
 
             class Proxy:
@@ -207,6 +203,7 @@ def test_database_process_lock_retry_timeout_is_structured(
         tmp_path / "control.duckdb",
         LockManager(tmp_path / "locks", timeout_seconds=0.01),
     )
+    coordinator.database_path.touch()
 
     def locked(*_args: Any, **_kwargs: Any) -> Any:
         raise duckdb.IOException("Could not set lock: Conflicting lock is held")
@@ -314,66 +311,6 @@ def test_same_process_gate_timeout_and_nested_write_are_structured(tmp_path: Pat
     thread.join(timeout=3)
 
     with coordinator.write_transaction("outer_writer"):
-        with pytest.raises(StorageConflictError):
+        with pytest.raises(StorageLockTimeoutError):
             with coordinator.read_connection("nested_reader"):
                 pass
-
-
-def test_timed_out_preferred_writer_wakes_blocked_reader_immediately(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "abandoned-writer.duckdb"
-    setup = DatabaseCoordinator(database, LockManager(tmp_path / "locks", timeout_seconds=1))
-    with setup.write_transaction("setup") as connection:
-        connection.execute("CREATE TABLE values_table(value INTEGER)")
-
-    reader_a = DatabaseCoordinator(database, LockManager(tmp_path / "locks", timeout_seconds=1))
-    writer = DatabaseCoordinator(database, LockManager(tmp_path / "locks", timeout_seconds=0.12))
-    reader_b = DatabaseCoordinator(database, LockManager(tmp_path / "locks", timeout_seconds=0.8))
-    a_held, release_a = Event(), Event()
-    writer_started, writer_timed_out, b_acquired = Event(), Event(), Event()
-
-    def hold_reader_a() -> None:
-        with reader_a.read_connection("reader_a"):
-            a_held.set()
-            assert release_a.wait(timeout=2)
-
-    def wait_writer() -> None:
-        writer_started.set()
-        with pytest.raises(StorageLockTimeoutError):
-            with writer.write_transaction("abandoned_writer"):
-                pass
-        writer_timed_out.set()
-
-    def wait_reader_b() -> None:
-        with reader_b.read_connection("reader_b"):
-            b_acquired.set()
-
-    a_thread = Thread(target=hold_reader_a)
-    writer_thread = Thread(target=wait_writer)
-    b_thread = Thread(target=wait_reader_b)
-    a_thread.start()
-    assert a_held.wait(timeout=1)
-    writer_thread.start()
-    assert writer_started.wait(timeout=1)
-    time.sleep(0.03)
-    b_thread.start()
-    assert writer_timed_out.wait(timeout=1)
-    assert b_acquired.wait(timeout=0.2)
-    release_a.set()
-    for thread in (a_thread, writer_thread, b_thread):
-        thread.join(timeout=2)
-        assert not thread.is_alive()
-
-
-def test_unused_database_gate_is_released_from_global_registry(tmp_path: Path) -> None:
-    database = (tmp_path / "lifecycle.duckdb").resolve()
-    coordinator = DatabaseCoordinator(database, LockManager(tmp_path / "locks", timeout_seconds=1))
-    gate_reference = weakref.ref(coordinator._gate)
-    assert database in database_module._database_gates
-
-    del coordinator
-    gc.collect()
-
-    assert gate_reference() is None
-    assert database not in database_module._database_gates

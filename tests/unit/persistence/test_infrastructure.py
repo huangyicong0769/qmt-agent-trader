@@ -282,6 +282,17 @@ def test_database_coordinator_commit_rollback_and_unlocked_read(tmp_path: Path) 
     assert manager.active_lock_kinds == ()
 
 
+def test_read_connection_does_not_create_missing_database(tmp_path: Path) -> None:
+    database = tmp_path / "missing.duckdb"
+    coordinator = DatabaseCoordinator(database, LockManager(tmp_path / "locks"))
+
+    with pytest.raises(StorageError):
+        with coordinator.read_connection("read_missing"):
+            pass
+
+    assert not database.exists()
+
+
 def test_database_coordinator_serializes_threads_and_processes(tmp_path: Path) -> None:
     database = tmp_path / "control.duckdb"
     locks = tmp_path / "locks"
