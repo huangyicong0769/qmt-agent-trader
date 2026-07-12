@@ -10,13 +10,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from os import write as _marker_write
 from pathlib import Path
 from time import monotonic, sleep
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
 
-from qmt_agent_trader.persistence.errors import StorageConflictError, StorageLockTimeoutError
+from qmt_agent_trader.persistence.errors import (
+    StorageConflictError,
+    StorageCorruptError,
+    StorageLockTimeoutError,
+)
 
 _active_lock_kinds: ContextVar[tuple[str, ...]] = ContextVar("active_lock_kinds", default=())
 
@@ -137,6 +142,8 @@ class LockManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
             {
+                "schema_version": 1,
+                "marker_id": uuid4().hex,
                 "pid": os.getpid(),
                 "host": socket.gethostname(),
                 "operation": operation,
@@ -145,8 +152,23 @@ class LockManager:
             },
             sort_keys=True,
         ).encode()
-        with path.open("xb") as handle:
-            handle.write(payload)
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            written = _marker_write(descriptor, payload)
+            if written != len(payload):
+                raise OSError("short marker write")
+            os.fsync(descriptor)
+        except Exception:
+            os.close(descriptor)
+            path.unlink(missing_ok=True)
+            raise
+        else:
+            os.close(descriptor)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
 
     def _wait_for_active_writers(self) -> None:
         deadline = monotonic() + self.timeout_seconds
@@ -171,8 +193,17 @@ class LockManager:
             payload = json.loads(path.read_text())
             pid = int(payload["pid"])
             host = str(payload["host"])
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            return True
+            if payload.get("schema_version") != 1 or not payload.get("marker_id"):
+                raise ValueError("unsupported marker schema")
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageCorruptError(
+                store_name="locks",
+                path=path,
+                operation="read_marker",
+                reason="storage marker is malformed",
+                suggested_repair="inspect the lock report and remove the marker manually",
+                original_error=exc,
+            ) from exc
         if host != socket.gethostname():
             return True
         try:

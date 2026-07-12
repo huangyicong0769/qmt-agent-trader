@@ -20,6 +20,7 @@ from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import (
     StorageConflictError,
+    StorageCorruptError,
     StorageError,
     StorageLockTimeoutError,
     StorageValidationError,
@@ -170,6 +171,8 @@ def test_dead_local_maintenance_marker_is_recovered_before_writer_admission(
     marker.write_text(
         json.dumps(
             {
+                "schema_version": 1,
+                "marker_id": "dead-marker",
                 "pid": 999_999_999,
                 "host": socket.gethostname(),
                 "operation": "backup",
@@ -181,6 +184,33 @@ def test_dead_local_maintenance_marker_is_recovered_before_writer_admission(
 
     with manager.resource_lock("record"):
         assert not marker.exists()
+
+
+def test_malformed_maintenance_marker_is_reported_as_corrupt(tmp_path: Path) -> None:
+    manager = LockManager(tmp_path / "locks", timeout_seconds=0.01)
+    marker = manager.locks_root / "maintenance.active"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(StorageCorruptError, match="malformed"):
+        with manager.resource_lock(tmp_path / "data.json"):
+            pass
+
+
+def test_short_marker_write_leaves_no_marker(tmp_path: Path, monkeypatch) -> None:
+    manager = LockManager(tmp_path / "locks")
+    real_write = os.write
+
+    def short_write(descriptor: int, payload: bytes) -> int:
+        return real_write(descriptor, payload[:1])
+
+    monkeypatch.setattr("qmt_agent_trader.persistence.locks._marker_write", short_write)
+
+    with pytest.raises(OSError, match="short marker write"):
+        with manager.resource_lock(tmp_path / "record.json"):
+            pass
+
+    assert not list((manager.locks_root / "writers").glob("*.json"))
 
 
 def test_lock_timeout_is_mapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
