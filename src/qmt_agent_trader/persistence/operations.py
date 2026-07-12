@@ -36,6 +36,7 @@ from qmt_agent_trader.persistence.initialization import storage_migrations
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.paths import PersistencePaths
+from qmt_agent_trader.services.order_plan_service import verify_order_plan_event_stream
 
 
 @dataclass(frozen=True)
@@ -466,6 +467,12 @@ class StorageOperations:
     def _verify_store_file(
         self, store: StoreDefinition, path: Path, *, deep: bool
     ) -> list[StorageDiagnostic]:
+        if store.verifier_id == "order_plan_event_stream_v1":
+            verification = verify_order_plan_event_stream(path)
+            return [
+                StorageDiagnostic(store.name, item.code, item.reason, path)
+                for item in verification.corruptions
+            ]
         if store.governed:
             root = store.path
             relative = path.relative_to(root).as_posix()

@@ -22,6 +22,11 @@ from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
+from qmt_agent_trader.services.order_plan_service import (
+    append_order_plan_event,
+    build_sample_paper_order_plan,
+    save_order_plan,
+)
 from qmt_agent_trader.services.research_report_service import save_research_report
 from qmt_agent_trader.web.chat_repository import ChatSessionRepository
 from qmt_agent_trader.web.schemas import ChatSession
@@ -55,6 +60,29 @@ def test_verify_is_read_only_and_deep_detects_corrupt_parquet(
     assert before == after
     assert not result.healthy
     assert any(d.code == "PARQUET_CORRUPT" for d in result.diagnostics)
+
+
+def test_verify_detects_corrupt_order_plan_event_stream(
+    operations: StorageOperations,
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    save_order_plan(plan, operations.paths.order_plans_root)
+    append_order_plan_event(
+        plan.order_plan_id,
+        directory=operations.paths.order_plans_root,
+        event_type="RISK_CHECKED",
+        actor="test",
+    )
+    event_path = next((operations.paths.order_plans_root / ".events").glob("*.jsonl"))
+    event_path.write_bytes(event_path.read_bytes() + b'{"broken"')
+
+    result = operations.verify(deep=True)
+
+    assert not result.healthy
+    assert any(
+        item.component == "order_plan_events" and item.code == "TRUNCATED_TAIL"
+        for item in result.diagnostics
+    )
 
 
 def test_verify_reports_immutable_pending_migrations_without_mutation(

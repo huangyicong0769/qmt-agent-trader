@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -51,6 +52,79 @@ class OrderPlanEvent(BaseModel):
     actor: str
     created_at: str = Field(default_factory=shanghai_now_iso)
     details: dict[str, object] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OrderPlanEventCorruption:
+    code: str
+    reason: str
+    line_number: int | None = None
+
+
+@dataclass(frozen=True)
+class OrderPlanEventVerification:
+    healthy: bool
+    tail_truncated: bool
+    corruptions: tuple[OrderPlanEventCorruption, ...]
+    event_count: int
+    order_plan_ids: frozenset[str]
+    events: tuple[OrderPlanEvent, ...]
+
+
+def verify_order_plan_event_stream(
+    path: Path,
+    *,
+    expected_order_plan_id: str | None = None,
+) -> OrderPlanEventVerification:
+    """Decode and validate one immutable snapshot of an order-plan event stream."""
+    raw = path.read_bytes() if path.exists() else b""
+    tail_truncated = bool(raw and not raw.endswith(b"\n"))
+    corruptions: list[OrderPlanEventCorruption] = []
+    if tail_truncated:
+        corruptions.append(
+            OrderPlanEventCorruption("TRUNCATED_TAIL", "event stream lacks final newline")
+        )
+    events: list[OrderPlanEvent] = []
+    for line_number, line in enumerate(raw.splitlines(), start=1):
+        try:
+            events.append(OrderPlanEvent.model_validate(json.loads(line)))
+        except Exception as exc:
+            corruptions.append(
+                OrderPlanEventCorruption(
+                    "INVALID_RECORD", f"{type(exc).__name__}: {exc}", line_number
+                )
+            )
+    order_plan_ids = frozenset(event.order_plan_id for event in events)
+    if len(order_plan_ids) > 1:
+        corruptions.append(
+            OrderPlanEventCorruption("MIXED_ORDER_PLAN_ID", "stream contains multiple ids")
+        )
+    detected_id = next(iter(order_plan_ids), None)
+    if expected_order_plan_id is not None and detected_id not in {None, expected_order_plan_id}:
+        corruptions.append(
+            OrderPlanEventCorruption("ORDER_PLAN_ID_MISMATCH", "unexpected order_plan_id")
+        )
+    if detected_id is not None:
+        expected_stem = hashlib.sha256(detected_id.encode("utf-8")).hexdigest()
+        if path.stem != expected_stem:
+            corruptions.append(
+                OrderPlanEventCorruption(
+                    "FILENAME_ID_MISMATCH", "filename does not bind order_plan_id"
+                )
+            )
+    event_ids = [event.event_id for event in events]
+    if len(event_ids) != len(set(event_ids)):
+        corruptions.append(
+            OrderPlanEventCorruption("DUPLICATE_EVENT_ID", "event_id is not unique")
+        )
+    return OrderPlanEventVerification(
+        healthy=not corruptions,
+        tail_truncated=tail_truncated,
+        corruptions=tuple(corruptions),
+        event_count=len(events),
+        order_plan_ids=order_plan_ids,
+        events=tuple(events),
+    )
 
 
 def save_order_plan(
@@ -140,8 +214,10 @@ def load_order_plan_events(
     with store.lock_manager.resource_lock(path):
         if not path.exists():
             return []
-        raw = path.read_bytes()
-        if raw and not raw.endswith(b"\n"):
+        verification = verify_order_plan_event_stream(
+            path, expected_order_plan_id=order_plan_id
+        )
+        if verification.tail_truncated:
             raise StorageCorruptError(
                 store_name="order_plan_events",
                 path=path,
@@ -149,19 +225,15 @@ def load_order_plan_events(
                 reason="order plan event stream has a truncated tail",
                 suggested_repair="inspect and restore the event stream before execution",
             )
-        events: list[OrderPlanEvent] = []
-        for line in raw.splitlines():
-            try:
-                events.append(OrderPlanEvent.model_validate(json.loads(line)))
-            except Exception as exc:
-                raise StorageCorruptError(
-                    store_name="order_plan_events",
-                    path=path,
-                    operation="read",
-                    reason="order plan event stream contains an invalid record",
-                    original_error=exc,
-                ) from exc
-        return events
+        if not verification.healthy:
+            reason = "; ".join(item.code for item in verification.corruptions)
+            raise StorageCorruptError(
+                store_name="order_plan_events",
+                path=path,
+                operation="read",
+                reason=f"order plan event stream is corrupt: {reason}",
+            )
+        return list(verification.events)
 
 
 def _event_path(store: ArtifactStore, order_plan_id: str) -> Path:

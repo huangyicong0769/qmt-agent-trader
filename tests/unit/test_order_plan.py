@@ -15,6 +15,7 @@ from qmt_agent_trader.services.order_plan_service import (
     load_order_plan,
     load_order_plan_events,
     save_order_plan,
+    verify_order_plan_event_stream,
 )
 
 
@@ -175,3 +176,47 @@ def test_order_plan_event_truncated_tail_fails_closed(tmp_path) -> None:
 
     with pytest.raises(StorageCorruptError, match="truncated tail"):
         load_order_plan_events(plan.order_plan_id, tmp_path)
+
+    verification = verify_order_plan_event_stream(
+        event_path, expected_order_plan_id=plan.order_plan_id
+    )
+    assert not verification.healthy
+    assert verification.tail_truncated
+
+
+def test_order_plan_event_verifier_rejects_duplicate_event_identity(tmp_path) -> None:
+    plan = make_plan()
+    save_order_plan(plan, tmp_path)
+    append_order_plan_event(
+        plan.order_plan_id,
+        directory=tmp_path,
+        event_type="RISK_CHECKED",
+        actor="test",
+    )
+    event_path = next((tmp_path / ".events").glob("*.jsonl"))
+    event_path.write_bytes(event_path.read_bytes() * 2)
+
+    verification = verify_order_plan_event_stream(
+        event_path, expected_order_plan_id=plan.order_plan_id
+    )
+    assert not verification.healthy
+    assert verification.event_count == 2
+    assert any(item.code == "DUPLICATE_EVENT_ID" for item in verification.corruptions)
+
+
+def test_order_plan_event_verifier_rejects_filename_binding_mismatch(tmp_path) -> None:
+    plan = make_plan()
+    save_order_plan(plan, tmp_path)
+    append_order_plan_event(
+        plan.order_plan_id,
+        directory=tmp_path,
+        event_type="RISK_CHECKED",
+        actor="test",
+    )
+    event_path = next((tmp_path / ".events").glob("*.jsonl"))
+    mismatched = event_path.with_name("0" * 64 + ".jsonl")
+    event_path.rename(mismatched)
+
+    verification = verify_order_plan_event_stream(mismatched)
+    assert not verification.healthy
+    assert any(item.code == "FILENAME_ID_MISMATCH" for item in verification.corruptions)

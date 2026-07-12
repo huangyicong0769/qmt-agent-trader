@@ -186,6 +186,18 @@ class StoreCatalog:
                 True,
             ),
             StoreDefinition(
+                "order_plan_events",
+                "jsonl",
+                paths.order_plans_root / ".events",
+                "OrderPlanService",
+                "governance-events",
+                1,
+                True,
+                str(paths.order_plans_root),
+                "copy",
+                verifier_id="order_plan_event_stream_v1",
+            ),
+            StoreDefinition(
                 "backtest_reports",
                 "artifact",
                 paths.reports_root / "backtests",
