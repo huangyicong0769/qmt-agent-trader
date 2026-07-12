@@ -227,7 +227,7 @@ class VersionedRecordRepository(Generic[T]):
         validated = self.model.model_validate(payload)
         canonical = validated.model_dump(mode="json")
         disk = {**canonical, "content_hash": self._hash(canonical)}
-        self.atomic_store.write_json(path, disk, fault_hook=self.fault_hook)
+        self.atomic_store.write_json_assume_locked(path, disk, fault_hook=self.fault_hook)
         return self._load_locked(path)
 
     def _validate_identity(self, record_id: str, record: T, path: Path) -> None:

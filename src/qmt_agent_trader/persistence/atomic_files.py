@@ -31,18 +31,65 @@ class AtomicFileStore:
         self.lock_manager = lock_manager
 
     def write_bytes(
-        self, path: Path, content: bytes, *, create_only: bool = False,
+        self,
+        path: Path,
+        content: bytes,
+        *,
+        create_only: bool = False,
         validator: Callable[[bytes], bool | None] | None = None,
         fault_hook: FaultHook | None = None,
     ) -> None:
-        self._write(path, content, create_only=create_only, validator=validator,
-                    fault_hook=fault_hook)
+        with self.lock_manager.resource_lock(path):
+            self.write_bytes_assume_locked(
+                path,
+                content,
+                create_only=create_only,
+                validator=validator,
+                fault_hook=fault_hook,
+            )
+
+    def write_bytes_assume_locked(
+        self,
+        path: Path,
+        content: bytes,
+        *,
+        create_only: bool = False,
+        validator: Callable[[bytes], bool | None] | None = None,
+        fault_hook: FaultHook | None = None,
+    ) -> None:
+        self._write(
+            path, content, create_only=create_only, validator=validator, fault_hook=fault_hook
+        )
 
     def write_text(self, path: Path, content: str, *, create_only: bool = False) -> None:
-        self._write(path, content.encode("utf-8"), create_only=create_only)
+        self.write_bytes(path, content.encode("utf-8"), create_only=create_only)
 
     def write_json(
-        self, path: Path, value: Any, *, create_only: bool = False,
+        self,
+        path: Path,
+        value: Any,
+        *,
+        create_only: bool = False,
+        validator: Validator | None = None,
+        model: type[BaseModel] | None = None,
+        fault_hook: FaultHook | None = None,
+    ) -> None:
+        with self.lock_manager.resource_lock(path):
+            self.write_json_assume_locked(
+                path,
+                value,
+                create_only=create_only,
+                validator=validator,
+                model=model,
+                fault_hook=fault_hook,
+            )
+
+    def write_json_assume_locked(
+        self,
+        path: Path,
+        value: Any,
+        *,
+        create_only: bool = False,
         validator: Validator | None = None,
         model: type[BaseModel] | None = None,
         fault_hook: FaultHook | None = None,
@@ -50,22 +97,56 @@ class AtomicFileStore:
         value = _model_value(value, model, path, "write_json")
         _validate(value, validator, path, "write_json")
         content = json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2).encode() + b"\n"
-        self._write(path, content, create_only=create_only,
-                    validator=lambda raw: _validate_json(raw, validator, model),
-                    fault_hook=fault_hook)
+        self._write(
+            path,
+            content,
+            create_only=create_only,
+            validator=lambda raw: _validate_json(raw, validator, model),
+            fault_hook=fault_hook,
+        )
 
     def write_yaml(
-        self, path: Path, value: Any, *, create_only: bool = False,
+        self,
+        path: Path,
+        value: Any,
+        *,
+        create_only: bool = False,
+        validator: Validator | None = None,
+        model: type[BaseModel] | None = None,
+    ) -> None:
+        with self.lock_manager.resource_lock(path):
+            self.write_yaml_assume_locked(
+                path,
+                value,
+                create_only=create_only,
+                validator=validator,
+                model=model,
+            )
+
+    def write_yaml_assume_locked(
+        self,
+        path: Path,
+        value: Any,
+        *,
+        create_only: bool = False,
         validator: Validator | None = None,
         model: type[BaseModel] | None = None,
     ) -> None:
         value = _model_value(value, model, path, "write_yaml")
         _validate(value, validator, path, "write_yaml")
         content = yaml.safe_dump(value, sort_keys=True).encode()
-        self._write(path, content, create_only=create_only,
-                    validator=lambda raw: _validate_yaml(raw, validator, model))
+        self._write(
+            path,
+            content,
+            create_only=create_only,
+            validator=lambda raw: _validate_yaml(raw, validator, model),
+        )
 
     def write_parquet(self, path: Path, frame: pd.DataFrame) -> None:
+        with self.lock_manager.resource_lock(path):
+            self.write_parquet_assume_locked(path, frame)
+
+    def write_parquet_assume_locked(self, path: Path, frame: pd.DataFrame) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = _temp_path(path)
         try:
@@ -81,8 +162,11 @@ class AtomicFileStore:
             raise
         except Exception as exc:
             raise StorageError(
-                store_name="atomic_files", path=path, operation="write_parquet",
-                reason="atomic write failed", original_error=exc,
+                store_name="atomic_files",
+                path=path,
+                operation="write_parquet",
+                reason="atomic write failed",
+                original_error=exc,
             ) from exc
         finally:
             temp.unlink(missing_ok=True)
@@ -93,20 +177,31 @@ class AtomicFileStore:
         with self.lock_manager.resource_lock(path):
             current = json.loads(path.read_text()) if path.exists() else None
             result = update(current)
-            self.write_json(path, result, validator=validator)
+            self.write_json_assume_locked(path, result, validator=validator)
             return result
 
-    def append_jsonl(
-        self, path: Path, record: Any, *, fsync: bool = True
-    ) -> None:
+    def append_jsonl(self, path: Path, record: Any, *, fsync: bool = True) -> None:
         encoded = _encode_jsonl(record, compact=True)
         if b"\n" in encoded[:-1]:
             raise StorageValidationError(
-                store_name="atomic_files", path=path, operation="append_jsonl",
+                store_name="atomic_files",
+                path=path,
+                operation="append_jsonl",
                 reason="record encoded to more than one line",
             )
         with self.lock_manager.resource_lock(path):
             self._append_encoded_jsonl(path, encoded, fsync=fsync)
+
+    def append_jsonl_assume_locked(self, path: Path, record: Any, *, fsync: bool = True) -> None:
+        encoded = _encode_jsonl(record, compact=True)
+        if b"\n" in encoded[:-1]:
+            raise StorageValidationError(
+                store_name="atomic_files",
+                path=path,
+                operation="append_jsonl",
+                reason="record encoded to more than one line",
+            )
+        self._append_encoded_jsonl(path, encoded, fsync=fsync)
 
     def rotate_and_append_jsonl(
         self,
@@ -152,22 +247,31 @@ class AtomicFileStore:
                     rollback_error=rollback_exc,
                 ) from rollback_exc
             raise StorageError(
-                store_name="atomic_files", path=path, operation="append_jsonl",
+                store_name="atomic_files",
+                path=path,
+                operation="append_jsonl",
                 reason="append failed and original length was restored",
-                recoverable=True, original_error=exc,
+                recoverable=True,
+                original_error=exc,
             ) from exc
         finally:
             os.close(descriptor)
 
     def _write(
-        self, path: Path, content: bytes, *, create_only: bool,
+        self,
+        path: Path,
+        content: bytes,
+        *,
+        create_only: bool,
         validator: Callable[[bytes], bool | None] | None = None,
         fault_hook: FaultHook | None = None,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         if create_only and path.exists():
             raise StorageConflictError(
-                store_name="atomic_files", path=path, operation="create",
+                store_name="atomic_files",
+                path=path,
+                operation="create",
                 reason="target already exists",
             )
         temp = _temp_path(path)
@@ -182,7 +286,9 @@ class AtomicFileStore:
                 os.close(descriptor)
             if validator is not None and validator(temp.read_bytes()) is False:
                 raise StorageValidationError(
-                    store_name="atomic_files", path=path, operation="validate",
+                    store_name="atomic_files",
+                    path=path,
+                    operation="validate",
                     reason="write validation failed",
                 )
             if fault_hook is not None:
@@ -192,8 +298,11 @@ class AtomicFileStore:
                     os.link(temp, path)
                 except FileExistsError as exc:
                     raise StorageConflictError(
-                        store_name="atomic_files", path=path, operation="create",
-                        reason="target already exists", original_error=exc,
+                        store_name="atomic_files",
+                        path=path,
+                        operation="create",
+                        reason="target already exists",
+                        original_error=exc,
                     ) from exc
             else:
                 os.replace(temp, path)
@@ -202,8 +311,11 @@ class AtomicFileStore:
             raise
         except Exception as exc:
             raise StorageError(
-                store_name="atomic_files", path=path, operation="write",
-                reason="atomic write failed", original_error=exc,
+                store_name="atomic_files",
+                path=path,
+                operation="write",
+                reason="atomic write failed",
+                original_error=exc,
             ) from exc
         finally:
             temp.unlink(missing_ok=True)
@@ -214,37 +326,36 @@ def _validate(value: Any, validator: Validator | None, path: Path, operation: st
         valid = True if validator is None else validator(value)
     except Exception as exc:
         raise StorageValidationError(
-            store_name="atomic_files", path=path, operation=operation,
-            reason="schema validation failed", original_error=exc,
+            store_name="atomic_files",
+            path=path,
+            operation=operation,
+            reason="schema validation failed",
+            original_error=exc,
         ) from exc
     if valid is False:
         raise StorageValidationError(
-            store_name="atomic_files", path=path, operation=operation,
+            store_name="atomic_files",
+            path=path,
+            operation=operation,
             reason="schema validation failed",
         )
 
 
-def _validate_json(
-    raw: bytes, validator: Validator | None, model: type[BaseModel] | None
-) -> bool:
+def _validate_json(raw: bytes, validator: Validator | None, model: type[BaseModel] | None) -> bool:
     value = json.loads(raw)
     if model is not None:
         model.model_validate(value)
     return validator is None or validator(value) is not False
 
 
-def _validate_yaml(
-    raw: bytes, validator: Validator | None, model: type[BaseModel] | None
-) -> bool:
+def _validate_yaml(raw: bytes, validator: Validator | None, model: type[BaseModel] | None) -> bool:
     value = yaml.safe_load(raw)
     if model is not None:
         model.model_validate(value)
     return validator is None or validator(value) is not False
 
 
-def _model_value(
-    value: Any, model: type[BaseModel] | None, path: Path, operation: str
-) -> Any:
+def _model_value(value: Any, model: type[BaseModel] | None, path: Path, operation: str) -> Any:
     try:
         if model is not None:
             return model.model_validate(value).model_dump(mode="json")
@@ -253,8 +364,11 @@ def _model_value(
         return value
     except ValidationError as exc:
         raise StorageValidationError(
-            store_name="atomic_files", path=path, operation=operation,
-            reason="model validation failed", original_error=exc,
+            store_name="atomic_files",
+            path=path,
+            operation=operation,
+            reason="model validation failed",
+            original_error=exc,
         ) from exc
 
 

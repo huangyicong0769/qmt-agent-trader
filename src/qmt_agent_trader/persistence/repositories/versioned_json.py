@@ -260,7 +260,7 @@ class VersionedJsonRegistry(Generic[T]):
             json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
             + b"\n"
         )
-        self.atomic_store.write_bytes(
+        self.atomic_store.write_bytes_assume_locked(
             self.path,
             content,
             validator=lambda raw: self._validate_encoded_payload(raw, payload),

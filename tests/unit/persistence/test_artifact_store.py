@@ -49,6 +49,27 @@ def test_create_writes_exact_content_and_manifest_and_verifies_hash(
     assert store.verify("run_1").verified is True
 
 
+def test_read_verified_hashes_and_returns_the_same_bytes(
+    store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"verified"
+    receipt = store.create("reports/run_1.json", content, metadata=_metadata())
+    original_read = Path.read_bytes
+    reads = 0
+
+    def changing_read(path: Path) -> bytes:
+        nonlocal reads
+        if path == receipt.path:
+            reads += 1
+            return content if reads == 1 else b"replaced-after-verification"
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", changing_read)
+
+    assert store.read_verified("run_1") == content
+    assert reads == 1
+
+
 def test_same_artifact_id_or_target_name_cannot_overwrite(store: ArtifactStore) -> None:
     store.create("reports/run_1.json", b"one", metadata=_metadata())
 

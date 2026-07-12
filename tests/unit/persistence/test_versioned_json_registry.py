@@ -139,7 +139,7 @@ def test_versioned_registry_rejects_unknown_schema_without_rewriting(tmp_path: P
 
 
 class _FailBeforeReplaceStore(AtomicFileStore):
-    def write_bytes(
+    def write_bytes_assume_locked(
         self,
         path: Path,
         content: bytes,
@@ -151,7 +151,7 @@ class _FailBeforeReplaceStore(AtomicFileStore):
         def fail(_stage: str, _temp: Path) -> None:
             raise OSError("injected before replace")
 
-        super().write_bytes(
+        super().write_bytes_assume_locked(
             path,
             content,
             create_only=create_only,

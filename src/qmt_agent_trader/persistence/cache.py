@@ -112,7 +112,7 @@ class ContentAddressedCache:
         path = self.path_for(namespace, key)
         try:
             with self.atomic_store.lock_manager.resource_lock(path):
-                self.atomic_store.write_json(
+                self.atomic_store.write_json_assume_locked(
                     path,
                     envelope,
                     validator=lambda item: self._valid_envelope(item, key),

@@ -5,16 +5,10 @@ import pyarrow.parquet as pq
 import pytest
 from filelock import FileLock
 
-from qmt_agent_trader.data import atomic_io
-from qmt_agent_trader.data import storage as storage_module
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence import atomic_files
+from qmt_agent_trader.persistence.errors import StorageError, StorageLockTimeoutError
 from qmt_agent_trader.persistence.initialization import initialize_persistence
-
-DataLakeLockTimeoutError = getattr(
-    storage_module,
-    "DataLakeLockTimeoutError",
-    type("MissingDataLakeLockTimeoutError", (RuntimeError,), {}),
-)
 
 
 def test_duckdb_parquet_roundtrip(tmp_path) -> None:
@@ -92,7 +86,7 @@ def test_write_parquet_failure_preserves_existing_file_and_cleans_temp(
 
     monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_after_write)
 
-    with pytest.raises(RuntimeError, match="simulated interrupted write"):
+    with pytest.raises(StorageError, match="atomic write failed"):
         lake.write_parquet(pd.DataFrame([{"value": "new"}]), "raw", "atomic")
 
     assert pd.read_parquet(path).to_dict("records") == [{"value": "old"}]
@@ -111,7 +105,7 @@ def test_write_parquet_validation_failure_preserves_existing_file(
 
     monkeypatch.setattr(pq, "ParquetFile", reject_new_file)
 
-    with pytest.raises(OSError, match="row-group validation failure"):
+    with pytest.raises(StorageError, match="atomic write failed"):
         lake.write_parquet(pd.DataFrame([{"value": "new"}]), "raw", "validated")
 
     assert pd.read_parquet(path).to_dict("records") == [{"value": "old"}]
@@ -127,9 +121,9 @@ def test_write_parquet_replace_failure_preserves_existing_file(
     def fail_replace(*_args, **_kwargs):
         raise OSError("simulated replace failure")
 
-    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
+    monkeypatch.setattr(atomic_files.os, "replace", fail_replace)
 
-    with pytest.raises(OSError, match="replace failure"):
+    with pytest.raises(StorageError, match="atomic write failed"):
         lake.write_parquet(pd.DataFrame([{"value": "new"}]), "raw", "replace")
 
     assert pd.read_parquet(path).to_dict("records") == [{"value": "old"}]
@@ -173,7 +167,7 @@ def test_incremental_lock_timeout_preserves_existing_file(tmp_path) -> None:
     )
     lock = FileLock(str(lake.lock_manager.lock_path_for_resource(path)))
 
-    with lock, pytest.raises(DataLakeLockTimeoutError):
+    with lock, pytest.raises(StorageLockTimeoutError):
         lake.write_incremental_parquet(
             pd.DataFrame([{"id": 2, "value": "new"}]),
             "raw",
@@ -282,6 +276,7 @@ def test_read_parquet_filtered_returns_empty_for_missing_dataset(tmp_path) -> No
 
 def test_read_parquet_filtered_pushes_date_symbol_and_column_filters(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake, migrate_legacy_ledger=False)
     lake.write_parquet(
         pd.DataFrame(
             [
@@ -311,6 +306,7 @@ def test_read_parquet_filtered_pushes_date_symbol_and_column_filters(tmp_path) -
 
 def test_read_parquet_filtered_handles_string_and_date_like_trade_dates(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake, migrate_legacy_ledger=False)
     lake.write_parquet(
         pd.DataFrame(
             [

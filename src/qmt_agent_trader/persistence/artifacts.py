@@ -213,18 +213,31 @@ class ArtifactStore:
         *,
         expected_relative_path: str | Path | None = None,
     ) -> bytes:
-        verification = self.verify(
-            artifact_id,
-            expected_relative_path=expected_relative_path,
-        )
-        if not verification.verified:
-            raise StorageValidationError(
-                store_name="artifacts",
-                path=verification.path,
-                operation="read_verified",
-                reason=verification.code.lower(),
+        resource = f"artifact-store:{self.root}"
+        with self.lock_manager.resource_lock(resource):
+            manifest = self._validated_manifest(
+                artifact_id,
+                expected_relative_path=expected_relative_path,
             )
-        return verification.path.read_bytes()
+            path = self.path_for(manifest.relative_path)
+            try:
+                content = path.read_bytes()
+            except OSError as exc:
+                raise StorageValidationError(
+                    store_name="artifacts",
+                    path=path,
+                    operation="read_verified",
+                    reason="missing_artifact",
+                    original_error=exc,
+                ) from exc
+            if hashlib.sha256(content).hexdigest() != manifest.content_hash:
+                raise StorageValidationError(
+                    store_name="artifacts",
+                    path=path,
+                    operation="read_verified",
+                    reason="hash_mismatch",
+                )
+            return content
 
     def _validated_manifest(
         self,
