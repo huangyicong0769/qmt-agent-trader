@@ -2,13 +2,22 @@ import pandas as pd
 import pytest
 
 from qmt_agent_trader.backtest.service import (
-    compare_backtest_reports,
+    compare_backtest_reports as _compare_backtest_reports,
+)
+from qmt_agent_trader.backtest.service import (
     run_backtest_report,
     run_single_symbol_backtest,
 )
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.errors import StorageValidationError
 from qmt_agent_trader.persistence.initialization import initialize_persistence
+from qmt_agent_trader.persistence.locks import LockManager
+
+
+def compare_backtest_reports(reports_dir, **kwargs):
+    return _compare_backtest_reports(
+        reports_dir, lock_manager=LockManager(reports_dir.parent / "locks"), **kwargs
+    )
 
 
 def test_run_single_symbol_backtest_uses_next_day_fill(tmp_path) -> None:

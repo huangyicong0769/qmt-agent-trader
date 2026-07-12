@@ -11,6 +11,9 @@ from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.providers.tushare.quota import new_usage_record
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
+from qmt_agent_trader.persistence.locks import LockManager
+from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.strategy.approval import read_approval_file
 from qmt_agent_trader.strategy.models import SavedStrategy, StrategySource, StrategySpec
 
@@ -165,9 +168,13 @@ def test_strategy_approve_resumes_after_registry_attach_failure(monkeypatch, tmp
     runner = CliRunner()
     first = runner.invoke(app, ["strategy", "approve", "--strategy-id", "strat_resume"])
     approval_path = tmp_path / "approvals/strat_resume_0.1.0.approval.yaml"
-    first_approval = read_approval_file(approval_path)
+    paths = PersistencePaths.from_settings(settings)
+    approval_store = artifact_store_for_root(
+        paths.approvals_root, lock_manager=LockManager(paths.locks_root)
+    )
+    first_approval = read_approval_file(approval_path, artifact_store=approval_store)
     second = runner.invoke(app, ["strategy", "approve", "--strategy-id", "strat_resume"])
-    resumed_approval = read_approval_file(approval_path)
+    resumed_approval = read_approval_file(approval_path, artifact_store=approval_store)
 
     assert first.exit_code != 0
     assert second.exit_code == 0

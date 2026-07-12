@@ -120,7 +120,7 @@ def run_backtest_report(
 
 
 def compare_backtest_reports(
-    reports_dir: Path, *, limit: int = 10, lock_manager: LockManager | None = None
+    reports_dir: Path, *, lock_manager: LockManager, limit: int = 10
 ) -> dict[str, object]:
     if not reports_dir.exists():
         return {"status": "empty", "runs": []}
@@ -137,7 +137,7 @@ def compare_backtest_reports(
 
 
 def _load_governed_backtest_report(
-    path: Path, reports_dir: Path, *, lock_manager: LockManager | None = None
+    path: Path, reports_dir: Path, *, lock_manager: LockManager
 ) -> dict[str, object]:
     store = artifact_store_for_root(reports_dir, lock_manager=lock_manager)
     run_id = path.stem

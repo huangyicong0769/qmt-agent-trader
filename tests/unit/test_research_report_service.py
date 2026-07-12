@@ -3,11 +3,28 @@ import json
 import pytest
 
 from qmt_agent_trader.persistence.errors import StorageValidationError
+from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.services.research_report_service import (
-    compare_research_reports,
-    evaluate_research_gate,
-    save_research_report,
+    compare_research_reports as _compare_research_reports,
 )
+from qmt_agent_trader.services.research_report_service import (
+    evaluate_research_gate,
+)
+from qmt_agent_trader.services.research_report_service import (
+    save_research_report as _save_research_report,
+)
+
+
+def save_research_report(reports_dir, **kwargs):
+    return _save_research_report(
+        reports_dir, lock_manager=LockManager(reports_dir.parent / "locks"), **kwargs
+    )
+
+
+def compare_research_reports(reports_dir, **kwargs):
+    return _compare_research_reports(
+        reports_dir, lock_manager=LockManager(reports_dir.parent / "locks"), **kwargs
+    )
 
 
 def test_save_research_report_marks_artifact_as_research_only(tmp_path) -> None:

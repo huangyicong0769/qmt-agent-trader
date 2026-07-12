@@ -1,13 +1,33 @@
 import pytest
 
 from qmt_agent_trader.core.types import ApprovalStatus
+from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.errors import StorageConflictError, StorageValidationError
+from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.strategy.approval import (
     StrategyApproval,
-    read_approval_file,
     transition_status,
-    write_approval_file,
 )
+from qmt_agent_trader.strategy.approval import (
+    read_approval_file as _read_approval_file,
+)
+from qmt_agent_trader.strategy.approval import (
+    write_approval_file as _write_approval_file,
+)
+
+
+def write_approval_file(approval, directory):
+    store = artifact_store_for_root(
+        directory, lock_manager=LockManager(directory / ".test-locks")
+    )
+    return _write_approval_file(approval, directory, artifact_store=store)
+
+
+def read_approval_file(path):
+    store = artifact_store_for_root(
+        path.parent, lock_manager=LockManager(path.parent / ".test-locks")
+    )
+    return _read_approval_file(path, artifact_store=store)
 
 
 def test_strategy_approval_state_machine() -> None:

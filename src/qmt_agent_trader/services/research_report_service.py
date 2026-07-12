@@ -20,7 +20,7 @@ def save_research_report(
     metadata: dict[str, object] | None = None,
     agent_notes: str | None = None,
     infrastructure_requests: list[str] | None = None,
-    lock_manager: LockManager | None = None,
+    lock_manager: LockManager,
 ) -> dict[str, object]:
     """Persist an immutable research artifact and return a compact receipt."""
     run_id = new_id("research")
@@ -90,7 +90,7 @@ def _metadata_id(metadata: dict[str, object] | None, *keys: str) -> str | None:
 
 
 def compare_research_reports(
-    reports_dir: Path, *, limit: int = 10, lock_manager: LockManager | None = None
+    reports_dir: Path, *, lock_manager: LockManager, limit: int = 10
 ) -> dict[str, object]:
     """Return compact summaries of recent research artifacts."""
     if not reports_dir.exists():
@@ -119,7 +119,7 @@ def _load_json_object(path: Path) -> dict[str, object]:
 
 
 def _load_governed_report(
-    path: Path, reports_dir: Path, *, lock_manager: LockManager | None = None
+    path: Path, reports_dir: Path, *, lock_manager: LockManager
 ) -> dict[str, object]:
     store = artifact_store_for_root(reports_dir, lock_manager=lock_manager)
     run_id = path.stem

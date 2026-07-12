@@ -66,12 +66,18 @@ def test_verify_detects_corrupt_order_plan_event_stream(
     operations: StorageOperations,
 ) -> None:
     plan = build_sample_paper_order_plan("s1")
-    save_order_plan(plan, operations.paths.order_plans_root)
+    plan_store = artifact_store_for_root(
+        operations.paths.order_plans_root, lock_manager=operations.locks
+    )
+    save_order_plan(
+        plan, operations.paths.order_plans_root, artifact_store=plan_store
+    )
     append_order_plan_event(
         plan.order_plan_id,
         directory=operations.paths.order_plans_root,
         event_type="RISK_CHECKED",
         actor="test",
+        artifact_store=plan_store,
     )
     event_path = next((operations.paths.order_plans_root / ".events").glob("*.jsonl"))
     event_path.write_bytes(event_path.read_bytes() + b'{"broken"')
@@ -109,7 +115,7 @@ def test_transient_report_cache_and_tool_payload_are_excluded_but_governed_repor
     cache.write_text('{"cache": true}')
     payload.write_text('{"transport": true}')
     report_root = operations.paths.reports_root / "research"
-    artifact_store_for_root(report_root).create(
+    artifact_store_for_root(report_root, lock_manager=operations.locks).create(
         "research_run.json",
         b'{"governed": true}',
         metadata=ArtifactMetadata(
@@ -609,12 +615,18 @@ def test_order_plan_quarantine_moves_manifest_content_and_events(
     operations: StorageOperations,
 ) -> None:
     plan = build_sample_paper_order_plan("s1")
-    content_path = save_order_plan(plan, operations.paths.order_plans_root)
+    plan_store = artifact_store_for_root(
+        operations.paths.order_plans_root, lock_manager=operations.locks
+    )
+    content_path = save_order_plan(
+        plan, operations.paths.order_plans_root, artifact_store=plan_store
+    )
     append_order_plan_event(
         plan.order_plan_id,
         directory=operations.paths.order_plans_root,
         event_type="RISK_CHECKED",
         actor="test",
+        artifact_store=plan_store,
     )
     event_path = next((operations.paths.order_plans_root / ".events").glob("*.jsonl"))
     content_path.write_bytes(b"tampered")

@@ -18,6 +18,7 @@ from qmt_agent_trader.agent.errors import SandboxPathError, SandboxSecurityError
 from qmt_agent_trader.agent.schemas import SandboxTestResult
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
+from qmt_agent_trader.persistence.errors import StorageValidationError
 from qmt_agent_trader.persistence.locks import LockManager
 
 # ── Forbidden patterns ───────────────────────────────────────────────────────
@@ -105,9 +106,10 @@ class CodeSandbox:
             )
         self.generated_root = generated_root.resolve()
         self.generated_root.mkdir(parents=True, exist_ok=True)
-        self.artifact_store = artifact_store_for_root(
-            self.generated_root,
-            lock_manager=lock_manager,
+        self.artifact_store = (
+            artifact_store_for_root(self.generated_root, lock_manager=lock_manager)
+            if lock_manager is not None
+            else None
         )
 
         global _ALLOWED_WRITE_ROOTS
@@ -152,6 +154,13 @@ class CodeSandbox:
                 "static scan failed:\n" + "\n".join(f"  - {i}" for i in issues)
             )
         target = self.validate_path(relative_path)
+        if self.artifact_store is None:
+            raise StorageValidationError(
+                store_name="generated_code",
+                path=self.generated_root,
+                operation="write_candidate_file",
+                reason="canonical lock manager is required for governed writes",
+            )
         receipt = self.artifact_store.create(
             target.relative_to(self.generated_root),
             content.encode("utf-8"),

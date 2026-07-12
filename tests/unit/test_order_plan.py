@@ -4,19 +4,54 @@ from pydantic import ValidationError
 from qmt_agent_trader.broker.order import Order
 from qmt_agent_trader.broker.order_plan import OrderPlan, OrderPlanApproval, RiskChecks
 from qmt_agent_trader.core.types import ApprovalStatus, OrderType, Side
+from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.errors import (
     StorageConflictError,
     StorageCorruptError,
     StorageValidationError,
 )
+from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.services.order_plan_service import (
     OrderPlanEvent,
-    append_order_plan_event,
-    load_order_plan,
-    load_order_plan_events,
-    save_order_plan,
     verify_order_plan_event_stream,
 )
+from qmt_agent_trader.services.order_plan_service import (
+    append_order_plan_event as _append_order_plan_event,
+)
+from qmt_agent_trader.services.order_plan_service import (
+    load_order_plan as _load_order_plan,
+)
+from qmt_agent_trader.services.order_plan_service import (
+    load_order_plan_events as _load_order_plan_events,
+)
+from qmt_agent_trader.services.order_plan_service import (
+    save_order_plan as _save_order_plan,
+)
+
+
+def _store(root):
+    return artifact_store_for_root(root, lock_manager=LockManager(root / ".test-locks"))
+
+
+def save_order_plan(plan, directory):
+    return _save_order_plan(plan, directory, artifact_store=_store(directory))
+
+
+def load_order_plan(identifier, directory=None):
+    root = directory or __import__("pathlib").Path(identifier).parent
+    return _load_order_plan(identifier, root, artifact_store=_store(root))
+
+
+def append_order_plan_event(order_plan_id, *, directory, **kwargs):
+    return _append_order_plan_event(
+        order_plan_id, directory=directory, artifact_store=_store(directory), **kwargs
+    )
+
+
+def load_order_plan_events(order_plan_id, directory):
+    return _load_order_plan_events(
+        order_plan_id, directory, artifact_store=_store(directory)
+    )
 
 
 def make_plan(status: ApprovalStatus = ApprovalStatus.APPROVED) -> OrderPlan:

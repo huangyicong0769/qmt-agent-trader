@@ -469,9 +469,8 @@ class ArtifactStore:
 def artifact_store_for_root(
     root: Path,
     *,
-    lock_manager: LockManager | None = None,
+    lock_manager: LockManager,
 ) -> ArtifactStore:
     """Build the shared store for an explicitly injected domain root."""
     resolved_root = root.expanduser().resolve()
-    manager = lock_manager or LockManager(resolved_root.parent / ".artifact-locks")
-    return ArtifactStore(resolved_root, AtomicFileStore(manager), manager)
+    return ArtifactStore(resolved_root, AtomicFileStore(lock_manager), lock_manager)

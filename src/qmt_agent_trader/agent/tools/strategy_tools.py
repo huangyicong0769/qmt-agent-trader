@@ -1113,7 +1113,7 @@ def _generate_research_report(input_data: dict[str, Any], context: ToolContext) 
         lines.append("")
 
     content = "\n".join(lines)
-    if sb is not None:
+    if sb is not None and sb.artifact_store is not None:
         receipt = sb.artifact_store.create(
             f"reports/{exp_id}/{report_id}.md",
             content.encode("utf-8"),

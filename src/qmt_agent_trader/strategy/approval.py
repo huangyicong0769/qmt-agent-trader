@@ -12,7 +12,6 @@ from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.persistence.artifacts import (
     ArtifactMetadata,
     ArtifactStore,
-    artifact_store_for_root,
 )
 from qmt_agent_trader.persistence.errors import StorageConflictError, StorageValidationError
 
@@ -57,10 +56,10 @@ def write_approval_file(
     approval: StrategyApproval,
     directory: Path,
     *,
-    artifact_store: ArtifactStore | None = None,
+    artifact_store: ArtifactStore,
 ) -> Path:
     filename = f"{approval.strategy_id}_{approval.strategy_version}.approval.yaml"
-    store = artifact_store or artifact_store_for_root(directory)
+    store = artifact_store
     content = yaml.safe_dump(
         approval.model_dump(mode="json"), sort_keys=False, allow_unicode=True
     ).encode("utf-8")
@@ -92,9 +91,9 @@ def write_approval_file(
 def read_approval_file(
     path: Path,
     *,
-    artifact_store: ArtifactStore | None = None,
+    artifact_store: ArtifactStore,
 ) -> StrategyApproval:
-    store = artifact_store or artifact_store_for_root(path.parent)
+    store = artifact_store
     artifact_id = _approval_artifact_id(path.name)
     raw = store.read_verified(artifact_id, expected_relative_path=path.name)
     try:

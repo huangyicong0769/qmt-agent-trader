@@ -7,10 +7,13 @@ from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools.strategy_tools import generate_research_report_tool
 from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
+from qmt_agent_trader.persistence.locks import LockManager
 
 
 def _write_governed_run(reports: Path, run_id: str, payload: dict[str, object]) -> None:
-    artifact_store_for_root(reports).create(
+    artifact_store_for_root(
+        reports, lock_manager=LockManager(reports.parent / "locks")
+    ).create(
         f"{run_id}.json",
         json.dumps(payload).encode(),
         metadata=ArtifactMetadata(

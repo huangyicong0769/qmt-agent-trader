@@ -17,7 +17,6 @@ from qmt_agent_trader.core.types import ApprovalStatus, OrderType, Side
 from qmt_agent_trader.persistence.artifacts import (
     ArtifactMetadata,
     ArtifactStore,
-    artifact_store_for_root,
 )
 from qmt_agent_trader.persistence.errors import StorageCorruptError
 
@@ -131,9 +130,9 @@ def save_order_plan(
     plan: OrderPlan,
     directory: Path,
     *,
-    artifact_store: ArtifactStore | None = None,
+    artifact_store: ArtifactStore,
 ) -> Path:
-    store = artifact_store or artifact_store_for_root(directory)
+    store = artifact_store
     content = plan.model_dump_json(indent=2).encode("utf-8")
     receipt = store.create(
         f"{plan.order_plan_id}.json",
@@ -152,7 +151,7 @@ def load_order_plan(
     identifier: str,
     directory: Path = Path("order_plans"),
     *,
-    artifact_store: ArtifactStore | None = None,
+    artifact_store: ArtifactStore,
 ) -> OrderPlan:
     path = Path(identifier)
     if path.exists():
@@ -161,7 +160,9 @@ def load_order_plan(
     else:
         selected_directory = directory
         order_plan_id = identifier
-    store = artifact_store or artifact_store_for_root(selected_directory)
+    store = artifact_store
+    if store.root != selected_directory.expanduser().resolve():
+        raise ValueError("artifact store root does not match order plan directory")
     relative_path = f"{order_plan_id}.json"
     artifact_path = store.path_for(relative_path)
     if not artifact_path.exists():
@@ -183,9 +184,9 @@ def append_order_plan_event(
     event_type: str,
     actor: str,
     details: dict[str, object] | None = None,
-    artifact_store: ArtifactStore | None = None,
+    artifact_store: ArtifactStore,
 ) -> OrderPlanEvent:
-    store = artifact_store or artifact_store_for_root(directory)
+    store = artifact_store
     verification = store.verify(
         order_plan_id,
         expected_relative_path=f"{order_plan_id}.json",
@@ -207,9 +208,9 @@ def load_order_plan_events(
     order_plan_id: str,
     directory: Path = Path("order_plans"),
     *,
-    artifact_store: ArtifactStore | None = None,
+    artifact_store: ArtifactStore,
 ) -> list[OrderPlanEvent]:
-    store = artifact_store or artifact_store_for_root(directory)
+    store = artifact_store
     path = _event_path(store, order_plan_id)
     with store.lock_manager.resource_lock(path):
         if not path.exists():
