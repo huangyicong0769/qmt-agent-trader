@@ -537,12 +537,12 @@ def test_run_tushare_fetch_live_writes_new_layout_and_metadata(tmp_path) -> None
     ]
     assert lake.dataset_path("raw", "tushare/daily_basic").exists()
     assert not lake.dataset_path("raw", "tushare_daily_basic").exists()
-    state = lake.query_parquet("SELECT * FROM data_fetch_state_v2").to_dict(orient="records")
+    state = lake.query_catalog("SELECT * FROM data_fetch_state_v2").to_dict(orient="records")
     assert state[0]["dataset_id"] == "tushare.daily_basic"
     assert state[0]["coverage_start"] == "20240101"
     assert state[0]["coverage_end"] == "20240131"
     assert not (lake.root / "metadata" / "tushare_usage_ledger.parquet").exists()
-    usage = lake.query_parquet(
+    usage = lake.query_catalog(
         "SELECT status, execution_mode FROM tushare_usage_events_v1 ORDER BY status"
     )
     assert set(usage["status"]) == {"PLANNED", "SUCCESS"}

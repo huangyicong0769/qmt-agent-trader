@@ -443,7 +443,7 @@ class UniverseResolver:
             if not path.exists():
                 continue
             escaped_path = str(path).replace("'", "''")
-            frame = self.lake.query_parquet(
+            frame = self.lake.query_external(
                 f"""
                 WITH source AS (
                     SELECT *

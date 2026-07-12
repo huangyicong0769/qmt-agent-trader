@@ -407,7 +407,7 @@ def test_tushare_fetcher_writes_new_raw_layout_and_metadata(tmp_path) -> None:
     assert lake.dataset_path("raw", "tushare/daily_basic").exists()
     assert not lake.dataset_path("raw", "tushare_daily_basic").exists()
     assert client.calls[0][0] == "daily_basic"
-    state = lake.query_parquet("SELECT * FROM data_fetch_state_v2").to_dict(orient="records")
+    state = lake.query_catalog("SELECT * FROM data_fetch_state_v2").to_dict(orient="records")
     assert state[0]["dataset_id"] == "tushare.daily_basic"
 
 
@@ -439,7 +439,7 @@ def test_tushare_fetcher_records_point_parameter_coverage(tmp_path) -> None:
     )
 
     assert result.status == "updated"
-    state = lake.query_parquet("SELECT * FROM data_fetch_state_v2").to_dict(orient="records")
+    state = lake.query_catalog("SELECT * FROM data_fetch_state_v2").to_dict(orient="records")
     assert state[0]["coverage_start"] == "20240102"
     assert state[0]["coverage_end"] == "20240102"
 

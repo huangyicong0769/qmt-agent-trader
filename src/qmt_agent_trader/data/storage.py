@@ -263,13 +263,14 @@ class DataLake:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
 
-    def query_parquet(self, sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
-        connection = (
-            self.database_coordinator.transient_read_connection("query_parquet")
-            if "read_parquet(" in sql.lower()
-            else self.connect()
-        )
-        with connection as con:
+    def query_external(self, sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+        """Query explicit external sources in an isolated in-memory DuckDB engine."""
+        with self.database_coordinator.transient_read_connection("query_external") as con:
+            return con.execute(sql, params or {}).fetchdf()
+
+    def query_catalog(self, sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+        """Query registered views and control tables in the canonical catalog database."""
+        with self.connect() as con:
             return con.execute(sql, params or {}).fetchdf()
 
     def register_parquet(self, table_name: str, layer: str, name: str) -> None:

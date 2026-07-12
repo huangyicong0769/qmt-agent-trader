@@ -18,7 +18,7 @@ def test_duckdb_parquet_roundtrip(tmp_path) -> None:
     loaded = lake.read_parquet("raw", "bars")
     assert loaded.to_dict("records") == [{"symbol": "000001.SZ", "close": 10.0}]
     lake.register_parquet("bars", "raw", "bars")
-    queried = lake.query_parquet("select symbol, close from bars")
+    queried = lake.query_catalog("select symbol, close from bars")
     assert queried.iloc[0]["symbol"] == "000001.SZ"
 
 

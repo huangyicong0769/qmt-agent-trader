@@ -465,7 +465,7 @@ def _read_limited_raw_bars(
             ORDER BY {_bar_date_key_sql("trade_date")} {sort_direction}, ts_code ASC
             LIMIT {int(limit)}
         """
-        frame = lake.query_parquet(sql, params)
+        frame = lake.query_external(sql, params)
         if not frame.empty:
             frames.append(frame)
     if not frames:
@@ -474,7 +474,7 @@ def _read_limited_raw_bars(
 
 
 def _available_bar_columns(lake: DataLake, escaped_path: str) -> set[str]:
-    schema = lake.query_parquet(f"DESCRIBE SELECT * FROM read_parquet('{escaped_path}')")
+    schema = lake.query_external(f"DESCRIBE SELECT * FROM read_parquet('{escaped_path}')")
     return {str(item) for item in schema["column_name"].tolist()}
 
 
