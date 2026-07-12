@@ -377,30 +377,25 @@ class StorageOperations:
         if definition.governed:
             artifact_store = artifact_store_for_root(root, lock_manager=self.locks)
             relative = source.relative_to(root).as_posix()
-            diagnostic = next(
-                (
-                    item
-                    for item in artifact_store.diagnose()
-                    if item.relative_path == relative and item.artifact_id is not None
-                ),
-                None,
-            )
-            if diagnostic is not None and diagnostic.artifact_id is not None:
-                auxiliary: tuple[Path, ...] = ()
-                if definition.name == "order_plans":
-                    event_path = root / ".events" / (
-                        hashlib.sha256(diagnostic.artifact_id.encode()).hexdigest() + ".jsonl"
+            auxiliary_factory = None
+            if definition.name == "order_plans":
+
+                def order_plan_auxiliary(artifact_id: str) -> tuple[Path, ...]:
+                    event_path = (
+                        root
+                        / ".events"
+                        / (hashlib.sha256(artifact_id.encode()).hexdigest() + ".jsonl")
                     )
-                    auxiliary = (event_path,) if event_path.is_file() else ()
-                receipt = artifact_store.quarantine(
-                    artifact_id=diagnostic.artifact_id,
-                    expected_relative_path=relative,
-                    quarantine_root=self.paths.quarantine_root / store,
-                    auxiliary_paths=auxiliary,
-                )
-                return QuarantineReceipt(
-                    receipt.quarantined_content_path, receipt.sidecar_path
-                )
+                    return (event_path,) if event_path.is_file() else ()
+
+                auxiliary_factory = order_plan_auxiliary
+            receipt = artifact_store.quarantine_relative_path(
+                relative,
+                quarantine_root=self.paths.quarantine_root / store,
+                auxiliary_paths=auxiliary_factory,
+            )
+            if receipt is not None:
+                return QuarantineReceipt(receipt.quarantined_content_path, receipt.sidecar_path)
         target_root = self.paths.quarantine_root / store
         target = (
             target_root
@@ -678,6 +673,7 @@ def _registry_validator(store: StoreDefinition, path: Path) -> Any:
 
         def identity(item: Any) -> str:
             return str(item.strategy_id)
+
     manager = LockManager(path.parent / ".verify-locks")
     return VersionedJsonRegistry(
         path=path,
@@ -701,26 +697,31 @@ def _record_validator(store: StoreDefinition, record_kind: str, path: Path) -> A
         from qmt_agent_trader.agent.todos import TodoListRecord
 
         model = TodoListRecord
+
         def identity(record: Any) -> str:
             return hashlib.sha256(record.session_id.encode()).hexdigest()[:16]
     elif record_kind == "experiments":
         from qmt_agent_trader.agent.schemas import ExperimentRecord
 
         model = ExperimentRecord
+
         def identity(record: Any) -> str:
             return str(record.experiment_id)
     elif record_kind == "sessions":
         from qmt_agent_trader.web.schemas import ChatSession
 
         model = ChatSession
+
         def identity(record: Any) -> str:
             return str(record.session_id)
     else:
         from qmt_agent_trader.universe.registry import UniverseStoredRecord
 
         model = UniverseStoredRecord
+
         def identity(record: Any) -> str:
             return str(record.spec.universe_id)
+
     return VersionedRecordRepository(
         path.parent,
         model,

@@ -357,101 +357,148 @@ class ArtifactStore:
     ) -> ArtifactQuarantineReceipt:
         """Move a corrupt governed artifact and its manifest as one recoverable unit."""
         with self.lock_manager.resource_lock(self._resource):
-            manifest = self._validated_manifest_assume_locked(
-                artifact_id, expected_relative_path=expected_relative_path
+            return self._quarantine_assume_locked(
+                artifact_id=artifact_id,
+                expected_relative_path=expected_relative_path,
+                quarantine_root=quarantine_root,
+                auxiliary_paths=auxiliary_paths,
             )
-            content_path = self.path_for(manifest.relative_path)
-            manifest_path = self.manifest_path_for(artifact_id)
-            diagnostics = tuple(
-                item
-                for item in self.diagnose_assume_locked()
-                if item.artifact_id == artifact_id
-                or item.relative_path == manifest.relative_path
+
+    def quarantine_relative_path(
+        self,
+        relative_path: str | Path,
+        *,
+        quarantine_root: Path,
+        auxiliary_paths: Callable[[str], tuple[Path, ...]] | None = None,
+    ) -> ArtifactQuarantineReceipt | None:
+        """Resolve diagnostics and quarantine under one artifact-root lock.
+
+        ``None`` means the unhealthy path is an orphan without a manifest and
+        therefore has no content/manifest unit to split.
+        """
+        relative = self.path_for(relative_path).relative_to(self.root).as_posix()
+        with self.lock_manager.resource_lock(self._resource):
+            diagnostic = next(
+                (item for item in self.diagnose_assume_locked() if item.relative_path == relative),
+                None,
             )
-            if not diagnostics:
+            if diagnostic is None:
                 raise StorageValidationError(
                     store_name="artifacts",
-                    path=content_path,
+                    path=self.path_for(relative),
                     operation="quarantine",
                     reason="authoritative artifact is healthy",
                 )
-            artifact_digest = hashlib.sha256(artifact_id.encode()).hexdigest()
-            unit_name = f"{self.now().replace(':', '')}-{artifact_digest}"
-            unit_root = quarantine_root.expanduser().resolve() / unit_name
-            quarantined_content = unit_root / "content" / manifest.relative_path
-            quarantined_manifest = unit_root / "manifest.json"
-            sidecar = unit_root / "QUARANTINE.json"
-            quarantined_content.parent.mkdir(parents=True, exist_ok=False)
-            moved_content = False
-            moved_manifest = False
-            moved_auxiliary: list[tuple[Path, Path]] = []
-            try:
-                os.replace(content_path, quarantined_content)
-                moved_content = True
-                os.replace(manifest_path, quarantined_manifest)
-                moved_manifest = True
-                for auxiliary in auxiliary_paths:
-                    resolved = auxiliary.expanduser().resolve()
-                    if self.root not in resolved.parents or not resolved.is_file():
-                        raise StorageValidationError(
-                            store_name="artifacts",
-                            path=resolved,
-                            operation="quarantine",
-                            reason="auxiliary path is outside artifact root or missing",
-                        )
-                    target = unit_root / "auxiliary" / resolved.relative_to(self.root)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(resolved, target)
-                    moved_auxiliary.append((resolved, target))
-                self.atomic_store.write_json_assume_locked(
-                    sidecar,
-                    {
-                        "schema_version": 1,
-                        "artifact_id": artifact_id,
-                        "original_content_path": str(content_path),
-                        "original_manifest_path": str(manifest_path),
-                        "content_sha256": hashlib.sha256(
-                            quarantined_content.read_bytes()
-                        ).hexdigest(),
-                        "manifest_sha256": hashlib.sha256(
-                            quarantined_manifest.read_bytes()
-                        ).hexdigest(),
-                        "auxiliary_paths": [
-                            {
-                                "original_path": str(original),
-                                "quarantine_path": str(target),
-                                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-                            }
-                            for original, target in moved_auxiliary
-                        ],
-                        "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
-                        "quarantined_at": self.now(),
-                    },
-                    create_only=True,
-                )
-            except Exception:
-                sidecar.unlink(missing_ok=True)
-                for original, target in reversed(moved_auxiliary):
-                    if target.exists():
-                        original.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(target, original)
-                if moved_manifest and quarantined_manifest.exists():
-                    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(quarantined_manifest, manifest_path)
-                if moved_content and quarantined_content.exists():
-                    content_path.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(quarantined_content, content_path)
-                raise
-            return ArtifactQuarantineReceipt(
-                artifact_id=artifact_id,
-                original_content_path=content_path,
-                original_manifest_path=manifest_path,
-                quarantined_content_path=quarantined_content,
-                quarantined_manifest_path=quarantined_manifest,
-                sidecar_path=sidecar,
-                diagnostics=diagnostics,
-                quarantined_auxiliary_paths=tuple(target for _, target in moved_auxiliary),
+            if diagnostic.artifact_id is None:
+                return None
+            extra = auxiliary_paths(diagnostic.artifact_id) if auxiliary_paths else ()
+            return self._quarantine_assume_locked(
+                artifact_id=diagnostic.artifact_id,
+                expected_relative_path=relative,
+                quarantine_root=quarantine_root,
+                auxiliary_paths=extra,
             )
+
+    def _quarantine_assume_locked(
+        self,
+        *,
+        artifact_id: str,
+        expected_relative_path: str | Path | None,
+        quarantine_root: Path,
+        auxiliary_paths: tuple[Path, ...],
+    ) -> ArtifactQuarantineReceipt:
+        manifest = self._validated_manifest_assume_locked(
+            artifact_id, expected_relative_path=expected_relative_path
+        )
+        content_path = self.path_for(manifest.relative_path)
+        manifest_path = self.manifest_path_for(artifact_id)
+        diagnostics = tuple(
+            item
+            for item in self.diagnose_assume_locked()
+            if item.artifact_id == artifact_id or item.relative_path == manifest.relative_path
+        )
+        if not diagnostics:
+            raise StorageValidationError(
+                store_name="artifacts",
+                path=content_path,
+                operation="quarantine",
+                reason="authoritative artifact is healthy",
+            )
+        artifact_digest = hashlib.sha256(artifact_id.encode()).hexdigest()
+        unit_name = f"{self.now().replace(':', '')}-{artifact_digest}"
+        unit_root = quarantine_root.expanduser().resolve() / unit_name
+        quarantined_content = unit_root / "content" / manifest.relative_path
+        quarantined_manifest = unit_root / "manifest.json"
+        sidecar = unit_root / "QUARANTINE.json"
+        quarantined_content.parent.mkdir(parents=True, exist_ok=False)
+        moved_content = False
+        moved_manifest = False
+        moved_auxiliary: list[tuple[Path, Path]] = []
+        try:
+            os.replace(content_path, quarantined_content)
+            moved_content = True
+            os.replace(manifest_path, quarantined_manifest)
+            moved_manifest = True
+            for auxiliary in auxiliary_paths:
+                resolved = auxiliary.expanduser().resolve()
+                if self.root not in resolved.parents or not resolved.is_file():
+                    raise StorageValidationError(
+                        store_name="artifacts",
+                        path=resolved,
+                        operation="quarantine",
+                        reason="auxiliary path is outside artifact root or missing",
+                    )
+                target = unit_root / "auxiliary" / resolved.relative_to(self.root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(resolved, target)
+                moved_auxiliary.append((resolved, target))
+            self.atomic_store.write_json_assume_locked(
+                sidecar,
+                {
+                    "schema_version": 1,
+                    "artifact_id": artifact_id,
+                    "original_content_path": str(content_path),
+                    "original_manifest_path": str(manifest_path),
+                    "content_sha256": hashlib.sha256(quarantined_content.read_bytes()).hexdigest(),
+                    "manifest_sha256": hashlib.sha256(
+                        quarantined_manifest.read_bytes()
+                    ).hexdigest(),
+                    "auxiliary_paths": [
+                        {
+                            "original_path": str(original),
+                            "quarantine_path": str(target),
+                            "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                        }
+                        for original, target in moved_auxiliary
+                    ],
+                    "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
+                    "quarantined_at": self.now(),
+                },
+                create_only=True,
+            )
+        except Exception:
+            sidecar.unlink(missing_ok=True)
+            for original, target in reversed(moved_auxiliary):
+                if target.exists():
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(target, original)
+            if moved_manifest and quarantined_manifest.exists():
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(quarantined_manifest, manifest_path)
+            if moved_content and quarantined_content.exists():
+                content_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(quarantined_content, content_path)
+            raise
+        return ArtifactQuarantineReceipt(
+            artifact_id=artifact_id,
+            original_content_path=content_path,
+            original_manifest_path=manifest_path,
+            quarantined_content_path=quarantined_content,
+            quarantined_manifest_path=quarantined_manifest,
+            sidecar_path=sidecar,
+            diagnostics=diagnostics,
+            quarantined_auxiliary_paths=tuple(target for _, target in moved_auxiliary),
+        )
 
     @property
     def _resource(self) -> str:
