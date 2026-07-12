@@ -23,6 +23,7 @@ def test_catalog_names_every_real_store_and_excludes_operational_roots(tmp_path:
         "universes",
         "approvals",
         "order_plans",
+        "order_plan_events",
         "backtest_reports",
         "research_reports",
         "audit",

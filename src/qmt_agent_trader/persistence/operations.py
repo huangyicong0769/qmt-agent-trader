@@ -612,99 +612,95 @@ def _verify_versioned_json(
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("root must be an object")
-        if payload.get("schema_version") != 2:
-            return [
-                StorageDiagnostic(store.name, "SCHEMA_MISMATCH", "schema_version must be 2", path)
-            ]
-        revision = payload.get("revision")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-            return [
-                StorageDiagnostic(
-                    store.name, "REVISION_INVALID", "revision must be non-negative", path
-                )
-            ]
-        claimed = payload.get("content_hash")
-        unhashed = {key: value for key, value in payload.items() if key != "content_hash"}
         if record_kind is None:
-            expected = hashlib.sha256(
-                json.dumps(
-                    unhashed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
-            ).hexdigest()
+            _registry_validator(store, path).validate_payload(payload)
         else:
-            expected = hashlib.sha256(
-                json.dumps(
-                    unhashed, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-                ).encode()
-            ).hexdigest()
-        if claimed != expected:
-            return [StorageDiagnostic(store.name, "HASH_MISMATCH", "content hash mismatch", path)]
-        identity = _record_identity(record_kind, payload)
-        if identity is not None and identity != path.stem:
-            return [
-                StorageDiagnostic(
-                    store.name, "IDENTITY_MISMATCH", "record identity does not match filename", path
-                )
-            ]
-        _validate_current_payload(store.name, payload)
-    except (
-        OSError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        ValueError,
-        TypeError,
-        KeyError,
-    ) as exc:
+            _record_validator(store, record_kind, path).validate_payload(
+                payload, record_id=path.stem, path=path
+            )
+    except StorageSchemaMismatchError as exc:
+        return [StorageDiagnostic(store.name, "SCHEMA_MISMATCH", exc.reason, path)]
+    except StorageCorruptError as exc:
+        return [StorageDiagnostic(store.name, "HASH_MISMATCH", exc.reason, path)]
+    except StorageValidationError as exc:
+        code = "IDENTITY_MISMATCH" if "identity" in exc.reason else "INVALID_CONTENT"
+        return [StorageDiagnostic(store.name, code, exc.reason, path)]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
         return [StorageDiagnostic(store.name, "INVALID_CONTENT", type(exc).__name__, path)]
     return []
 
 
-def _validate_current_payload(store_name: str, payload: dict[str, Any]) -> None:
-    if store_name == "factor_registry":
-        from qmt_agent_trader.factors.registry import _load_file_factor
+def _registry_validator(store: StoreDefinition, path: Path) -> Any:
+    from qmt_agent_trader.persistence.repositories.versioned_json import VersionedJsonRegistry
 
-        identities = [_load_file_factor(item).factor_id for item in payload["items"]]
-    elif store_name == "strategy_registry":
+    if store.name == "factor_registry":
+        from qmt_agent_trader.factors.registry import SavedFactor, _load_file_factor
+
+        loader: Any = _load_file_factor
+        dumper: Any = SavedFactor.to_dict
+
+        def identity(item: Any) -> str:
+            return str(item.factor_id)
+    else:
         from qmt_agent_trader.strategy.registry import _load_file_strategy
 
-        identities = [_load_file_strategy(item).strategy_id for item in payload["items"]]
-    else:
-        identities = []
-        model: Any = None
-        if store_name == "todos":
-            from qmt_agent_trader.agent.todos import TodoListRecord
+        loader = _load_file_strategy
 
-            model = TodoListRecord
-        elif store_name == "experiments":
-            from qmt_agent_trader.agent.schemas import ExperimentRecord
+        def dumper(item: Any) -> dict[str, Any]:
+            return dict(item.model_dump(mode="json"))
 
-            model = ExperimentRecord
-        elif store_name == "sessions":
-            from qmt_agent_trader.web.schemas import ChatSession
-
-            model = ChatSession
-        elif store_name == "universes":
-            from qmt_agent_trader.universe.registry import UniverseStoredRecord
-
-            model = UniverseStoredRecord
-        if model is not None:
-            model.model_validate(
-                {key: value for key, value in payload.items() if key != "content_hash"}
-            )
-    if len(identities) != len(set(identities)):
-        raise ValueError("registry item identities must be unique")
+        def identity(item: Any) -> str:
+            return str(item.strategy_id)
+    manager = LockManager(path.parent / ".verify-locks")
+    return VersionedJsonRegistry(
+        path=path,
+        item_loader=loader,
+        item_dumper=dumper,
+        item_identity=identity,
+        lock_manager=manager,
+        atomic_store=AtomicFileStore(manager),
+        store_name=store.name,
+    )
 
 
-def _record_identity(record_kind: str | None, payload: dict[str, Any]) -> str | None:
-    if record_kind == "sessions":
-        return str(payload["session_id"])
-    if record_kind == "experiments":
-        return str(payload["experiment_id"])
-    if record_kind == "universes":
-        return str(payload["spec"]["universe_id"])
+def _record_validator(store: StoreDefinition, record_kind: str, path: Path) -> Any:
+    from qmt_agent_trader.persistence.repositories.versioned_record import (
+        VersionedRecordRepository,
+    )
+
+    identity: Any = None
+    model: Any
     if record_kind == "todos":
-        return hashlib.sha256(str(payload["session_id"]).encode("utf-8")).hexdigest()[:16]
-    return None
+        from qmt_agent_trader.agent.todos import TodoListRecord
+
+        model = TodoListRecord
+        def identity(record: Any) -> str:
+            return hashlib.sha256(record.session_id.encode()).hexdigest()[:16]
+    elif record_kind == "experiments":
+        from qmt_agent_trader.agent.schemas import ExperimentRecord
+
+        model = ExperimentRecord
+        def identity(record: Any) -> str:
+            return str(record.experiment_id)
+    elif record_kind == "sessions":
+        from qmt_agent_trader.web.schemas import ChatSession
+
+        model = ChatSession
+        def identity(record: Any) -> str:
+            return str(record.session_id)
+    else:
+        from qmt_agent_trader.universe.registry import UniverseStoredRecord
+
+        model = UniverseStoredRecord
+        def identity(record: Any) -> str:
+            return str(record.spec.universe_id)
+    return VersionedRecordRepository(
+        path.parent,
+        model,
+        store_name=store.name,
+        locks_root=path.parent / ".verify-locks",
+        identity=identity,
+    )
 
 
 def as_json(value: Any) -> Any:

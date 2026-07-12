@@ -187,6 +187,10 @@ class VersionedRecordRepository(Generic[T]):
                 reason="record JSON is unreadable",
                 original_error=exc,
             ) from exc
+        return self.validate_payload(payload, record_id=path.stem, path=path)
+
+    def validate_payload(self, payload: Any, *, record_id: str, path: Path) -> T:
+        """Validate an already-decoded record with the exact runtime rules."""
         if not isinstance(payload, dict):
             raise StorageValidationError(
                 store_name=self.store_name,
@@ -201,8 +205,9 @@ class VersionedRecordRepository(Generic[T]):
                 operation="load",
                 reason="record schema_version is required",
             )
-        raw_hash = payload.pop("content_hash", None)
-        expected = self._hash(payload)
+        unhashed = {key: value for key, value in payload.items() if key != "content_hash"}
+        raw_hash = payload.get("content_hash")
+        expected = self._hash(unhashed)
         if raw_hash != expected:
             raise StorageCorruptError(
                 store_name=self.store_name,
@@ -211,7 +216,7 @@ class VersionedRecordRepository(Generic[T]):
                 reason="record content hash mismatch",
             )
         try:
-            return self.model.model_validate(payload)
+            record = self.model.model_validate(unhashed)
         except ValidationError as exc:
             raise StorageValidationError(
                 store_name=self.store_name,
@@ -220,6 +225,8 @@ class VersionedRecordRepository(Generic[T]):
                 reason="record schema validation failed",
                 original_error=exc,
             ) from exc
+        self._validate_identity(record_id, record, path)
+        return record
 
     def _write_locked(self, path: Path, record: T, *, revision: int) -> T:
         payload = record.model_dump(mode="json")

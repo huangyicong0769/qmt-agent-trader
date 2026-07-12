@@ -132,6 +132,10 @@ class VersionedJsonRegistry(Generic[T]):
         raise self._schema_error(f"unsupported registry schema version: {version}")
 
     def _parse_v2(self, payload: dict[str, Any]) -> RegistrySnapshot[T]:
+        return self.validate_payload(payload)
+
+    def validate_payload(self, payload: dict[str, Any]) -> RegistrySnapshot[T]:
+        """Validate an already-decoded payload with the exact runtime rules."""
         if set(payload) != _V2_FIELDS:
             raise self._schema_error("v2 registry fields do not match the schema")
         revision = payload["revision"]
