@@ -188,7 +188,7 @@ def _date_bounds(lake: DataLake) -> dict[str, str]:
             continue
         escaped = str(path).replace("'", "''")
         frames.append(
-            lake.query_parquet(
+            lake.query_external(
                 f"""
                 SELECT
                     min({_date_key_sql("trade_date")}) AS start_date,
@@ -208,7 +208,7 @@ def _sample_symbols(lake: DataLake, *, start: str, end: str, limit: int) -> list
         if not path.exists():
             continue
         escaped = str(path).replace("'", "''")
-        frame = lake.query_parquet(
+        frame = lake.query_external(
             f"""
             SELECT DISTINCT ts_code
             FROM read_parquet('{escaped}')
