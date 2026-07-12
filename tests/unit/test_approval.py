@@ -44,7 +44,7 @@ def test_approval_yaml_is_create_only_hashed_and_preserves_human_fields(tmp_path
     assert read_approval_file(path).approved_by == "human-reviewer"
 
 
-def test_read_adopts_legacy_approval_and_retry_preserves_original_timestamp(tmp_path) -> None:
+def test_read_rejects_unmanifested_approval_without_mutation(tmp_path) -> None:
     approval = StrategyApproval(
         strategy_id="strategy_legacy",
         strategy_name="Legacy",
@@ -63,14 +63,9 @@ def test_read_adopts_legacy_approval_and_retry_preserves_original_timestamp(tmp_
     original = yaml.safe_dump(approval.model_dump(mode="json"), sort_keys=False).encode()
     path.write_bytes(original)
 
-    adopted = read_approval_file(path)
-    retried = write_approval_file(
-        approval.model_copy(update={"approved_at": "2026-07-11T09:00:00+08:00"}),
-        tmp_path,
-    )
+    with pytest.raises(StorageValidationError, match="manifest is missing"):
+        read_approval_file(path)
 
-    assert adopted.approved_at == "2026-07-10T08:00:00+08:00"
-    assert retried == path
     assert path.read_bytes() == original
 
 
@@ -78,7 +73,7 @@ def test_invalid_legacy_approval_is_structured_and_not_adopted(tmp_path) -> None
     path = tmp_path / "broken_1.0.approval.yaml"
     path.write_text("approved_by: [", encoding="utf-8")
 
-    with pytest.raises(StorageValidationError, match="legacy approval is invalid"):
+    with pytest.raises(StorageValidationError, match="manifest is missing"):
         read_approval_file(path)
 
     assert not (tmp_path / ".manifests").exists()
@@ -95,6 +90,6 @@ def test_legacy_approval_filename_must_match_parsed_identity(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(StorageValidationError, match="filename identity"):
+    with pytest.raises(StorageValidationError, match="manifest is missing"):
         read_approval_file(path)
     assert not (tmp_path / ".manifests").exists()

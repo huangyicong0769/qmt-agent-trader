@@ -74,7 +74,7 @@ class VersionedRecordRepository(Generic[T]):
                 if missing is not None:
                     return missing()
                 raise FileNotFoundError(path)
-            record = self._load_locked(path, migrate=True)
+            record = self._load_locked(path)
             self._validate_identity(record_id, record, path)
             return record
 
@@ -101,11 +101,7 @@ class VersionedRecordRepository(Generic[T]):
     ) -> T:
         path = self.path_for(record_id)
         with self.lock_manager.resource_lock(path):
-            current = (
-                missing()
-                if not path.exists() and missing
-                else self._load_locked(path, migrate=True)
-            )
+            current = missing() if not path.exists() and missing else self._load_locked(path)
             revision = int(getattr(current, "revision", 0))
             if expected_revision is not None and expected_revision != revision:
                 raise StorageRevisionConflictError(
@@ -127,7 +123,7 @@ class VersionedRecordRepository(Generic[T]):
     ) -> T:
         path = self.path_for(record_id)
         with self.lock_manager.resource_lock(path):
-            current = self._load_locked(path, migrate=True) if path.exists() else None
+            current = self._load_locked(path) if path.exists() else None
             revision = int(getattr(current, "revision", 0)) if current is not None else 0
             if expected_revision is not None and expected_revision != revision:
                 raise StorageRevisionConflictError(
@@ -155,7 +151,7 @@ class VersionedRecordRepository(Generic[T]):
         with self.lock_manager.resource_lock(path):
             # Validate first: quarantine is explicit but only applies to bad records.
             try:
-                self._load_locked(path, migrate=False)
+                self._load_locked(path)
             except (StorageCorruptError, StorageValidationError):
                 pass
             else:
@@ -180,7 +176,7 @@ class VersionedRecordRepository(Generic[T]):
             path.unlink()
             return True
 
-    def _load_locked(self, path: Path, *, migrate: bool) -> T:
+    def _load_locked(self, path: Path) -> T:
         try:
             payload = json.loads(path.read_bytes())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -199,25 +195,12 @@ class VersionedRecordRepository(Generic[T]):
                 reason="record root must be an object",
             )
         if "schema_version" not in payload:
-            if not migrate:
-                raise StorageValidationError(
-                    store_name=self.store_name,
-                    path=path,
-                    operation="load",
-                    reason="legacy record has no schema version",
-                )
-            try:
-                legacy = self.model.model_validate(payload)
-            except ValidationError as exc:
-                raise StorageValidationError(
-                    store_name=self.store_name,
-                    path=path,
-                    operation="migrate",
-                    reason="legacy record is invalid",
-                    original_error=exc,
-                ) from exc
-            self._validate_identity(path.stem, legacy, path)
-            return self._write_locked(path, legacy, revision=1)
+            raise StorageValidationError(
+                store_name=self.store_name,
+                path=path,
+                operation="load",
+                reason="record schema_version is required",
+            )
         raw_hash = payload.pop("content_hash", None)
         expected = self._hash(payload)
         if raw_hash != expected:
@@ -245,7 +228,7 @@ class VersionedRecordRepository(Generic[T]):
         canonical = validated.model_dump(mode="json")
         disk = {**canonical, "content_hash": self._hash(canonical)}
         self.atomic_store.write_json(path, disk, fault_hook=self.fault_hook)
-        return self._load_locked(path, migrate=False)
+        return self._load_locked(path)
 
     def _validate_identity(self, record_id: str, record: T, path: Path) -> None:
         if self.identity is not None and self.identity(record) != record_id:

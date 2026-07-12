@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from qmt_agent_trader.core.ids import new_id, shanghai_now_iso
 
@@ -28,36 +28,6 @@ class ChatSession(BaseModel):
     updated_at: str = Field(default_factory=shanghai_now_iso)
     messages: list[ChatMessage] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_legacy_ui_session(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "sid" not in value:
-            return value
-        sid = str(value["sid"])
-        messages = []
-        for raw in value.get("messages", []):
-            if not isinstance(raw, dict):
-                continue
-            messages.append(
-                {
-                    "session_id": sid,
-                    "role": raw.get("role", "info"),
-                    "content": str(raw.get("content", "")),
-                    "metadata": raw.get("metadata", {}),
-                }
-            )
-        return {
-            "session_id": sid,
-            "title": str(value.get("name") or "New research chat"),
-            "messages": messages,
-            "context": {
-                "legacy_ui": {
-                    "counter": value.get("counter", 0),
-                    "preview": str(value.get("preview", "")),
-                }
-            },
-        }
 
 
 class AdvancedOptions(BaseModel):

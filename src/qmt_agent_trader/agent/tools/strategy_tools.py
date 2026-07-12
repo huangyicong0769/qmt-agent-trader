@@ -347,9 +347,8 @@ def _save_strategy_candidate(input_data: dict[str, Any], context: ToolContext) -
     registry = _strategy_registry()
     existing = registry.get_strategy(spec.strategy_id)
     if existing is not None:
-        if (
-            existing.source == StrategySource.AGENT_GENERATED
-            and (existing.implementation_ref == "spec:draft" or existing.code_path is None)
+        if existing.source == StrategySource.AGENT_GENERATED and (
+            existing.implementation_ref == "spec:draft" or existing.code_path is None
         ):
             stored = registry.attach_generated_implementation(
                 spec.strategy_id,
@@ -503,8 +502,7 @@ run_strategy_static_checks_tool: AgentTool = tool(
     ToolSpec(
         name="run_strategy_static_checks",
         description=(
-            "检查候选策略代码是否包含未来函数、危险 import、broker/gateway "
-            "或 live trading 调用。"
+            "检查候选策略代码是否包含未来函数、危险 import、broker/gateway 或 live trading 调用。"
         ),
         input_schema={
             "type": "object",
@@ -740,8 +738,7 @@ def _with_backtest_evidence_status(payload: dict[str, Any]) -> dict[str, Any]:
                 "domain_status": DomainStatus.FAILED.value,
                 "evidence_status": EvidenceStatus.INVALID.value,
                 "recommendation_status": RecommendationStatus.DO_NOT_RECOMMEND.value,
-                "message": payload.get("message")
-                or "Backtest executed, but diagnostics failed.",
+                "message": payload.get("message") or "Backtest executed, but diagnostics failed.",
             }
         )
         return enriched
@@ -841,7 +838,7 @@ def _factor_id_from_missing_columns_error(message: str) -> str | None:
     prefix = "factor '"
     if not message.startswith(prefix):
         return None
-    return message[len(prefix):].split("'", 1)[0]
+    return message[len(prefix) :].split("'", 1)[0]
 
 
 def _missing_columns_from_error(message: str) -> list[str]:
@@ -917,11 +914,7 @@ def _parse_backtest_strategy_spec(
         return None
 
     payload = dict(spec_data)
-    factors = (
-        payload.get("factors")
-        or payload.get("selected_factors")
-        or payload.get("factor_ids")
-    )
+    factors = payload.get("factors") or payload.get("selected_factors") or payload.get("factor_ids")
     if factors is not None and "factors" not in payload:
         payload["factors"] = factors
 
@@ -1018,10 +1011,7 @@ run_backtest_tool: AgentTool = tool(
 
 def _generate_research_report(input_data: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     exp_id = (
-        input_data.get("experiment_id")
-        or context.experiment_id
-        or context.session_id
-        or "unknown"
+        input_data.get("experiment_id") or context.experiment_id or context.session_id or "unknown"
     )
     run_ids = input_data.get("run_ids", [])
     sections = input_data.get("include_sections", ["summary", "metrics"])
@@ -1189,9 +1179,7 @@ generate_research_report_tool: AgentTool = tool(
 
 
 def build_strategy_tools(deps: AgentToolDependencies) -> list[AgentTool]:
-    definitions: list[
-        tuple[AgentTool, Callable[[dict[str, Any], ToolContext], dict[str, Any]]]
-    ] = [
+    definitions: list[tuple[AgentTool, Callable[[dict[str, Any], ToolContext], dict[str, Any]]]] = [
         (create_strategy_spec_tool, _create_strategy_spec),
         (generate_strategy_code_tool, _generate_strategy_code),
         (list_strategy_candidates_tool, _list_strategy_candidates),
@@ -1430,28 +1418,8 @@ def _load_run_artifact(run_id: str) -> dict[str, Any] | None:
         )
         store = artifact_store_for_root(root, lock_manager=manager)
         try:
-            if store.manifest_path_for(run_id).exists():
-                raw = store.read_verified(run_id, expected_relative_path=path.name)
-                payload = json.loads(raw)
-            else:
-                def validate_legacy(content: bytes) -> bool:
-                    candidate = json.loads(content)
-                    return (
-                        isinstance(candidate, dict)
-                        and str(candidate.get("run_id")) == run_id
-                    )
-
-                receipt = store.adopt(
-                    path.name,
-                    metadata=ArtifactMetadata(
-                        artifact_id=run_id,
-                        artifact_type="legacy_run_report",
-                        producer="agent.tools.strategy_tools.legacy_report_adoption",
-                        related_run_id=run_id,
-                    ),
-                    validator=validate_legacy,
-                )
-                payload = json.loads(receipt.content)
+            raw = store.read_verified(run_id, expected_relative_path=path.name)
+            payload = json.loads(raw)
         except Exception as exc:
             return {
                 "run_id": run_id,
@@ -2080,9 +2048,7 @@ def _backtest_timeout_seconds_for_call(
     symbol_count = len(symbols) if symbols else 5000
     estimated_rows = span_days * symbol_count
     variable = (
-        (estimated_rows + 99_999)
-        // 100_000
-        * settings.research_tool_timeout_seconds_per_100k_rows
+        (estimated_rows + 99_999) // 100_000 * settings.research_tool_timeout_seconds_per_100k_rows
     )
     return int(
         min(

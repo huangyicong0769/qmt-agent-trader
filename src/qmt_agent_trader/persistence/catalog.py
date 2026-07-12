@@ -23,7 +23,6 @@ class StoreDefinition:
     lock_resource: str
     backup: str
     governed: bool = False
-    legacy_policy: Literal["reject_unmanifested", "allow_valid_legacy"] = "allow_valid_legacy"
     verifier_id: str = "generic"
 
 
@@ -163,17 +162,6 @@ class StoreCatalog:
                 verifier_id="versioned_record_universes_v2",
             ),
             StoreDefinition(
-                "legacy_universes",
-                "json",
-                data / "universes/registry",
-                "UniverseRegistry migration",
-                "legacy-authoritative",
-                1,
-                False,
-                str(data / "universes/registry"),
-                "copy",
-            ),
-            StoreDefinition(
                 "approvals",
                 "artifact",
                 paths.approvals_root,
@@ -208,7 +196,6 @@ class StoreCatalog:
                 str(paths.reports_root / "backtests"),
                 "copy",
                 True,
-                "reject_unmanifested",
             ),
             StoreDefinition(
                 "research_reports",
@@ -221,7 +208,6 @@ class StoreCatalog:
                 str(paths.reports_root / "research"),
                 "copy",
                 True,
-                "reject_unmanifested",
             ),
             StoreDefinition(
                 "audit",
@@ -245,7 +231,6 @@ class StoreCatalog:
                 str(paths.project_root / "src/qmt_agent_trader/agent/generated"),
                 "copy",
                 True,
-                "reject_unmanifested",
             ),
         )
         return cls(definitions)

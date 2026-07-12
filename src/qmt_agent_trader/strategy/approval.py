@@ -96,49 +96,22 @@ def read_approval_file(
 ) -> StrategyApproval:
     store = artifact_store or artifact_store_for_root(path.parent)
     artifact_id = _approval_artifact_id(path.name)
-    if store.manifest_path_for(artifact_id).exists():
-        raw = store.read_verified(artifact_id, expected_relative_path=path.name)
-    else:
-        def validate_legacy(content: bytes) -> bool:
-            candidate = StrategyApproval.model_validate(yaml.safe_load(content))
-            if _approval_filename(candidate) != path.name:
-                raise ValueError("approval filename identity does not match parsed strategy")
-            return True
-
-        try:
-            receipt = store.adopt(
-                path.name,
-                metadata=ArtifactMetadata(
-                    artifact_id=artifact_id,
-                    artifact_type="strategy_approval",
-                    producer="strategy.approval.legacy_adoption",
-                ),
-                validator=validate_legacy,
-            )
-        except StorageValidationError as exc:
-            reason = (
-                "approval filename identity does not match parsed strategy"
-                if "filename identity" in exc.reason
-                else "legacy approval is invalid"
-            )
-            raise StorageValidationError(
-                store_name="approvals", path=path, operation="adopt_legacy",
-                reason=reason, original_error=exc,
-            ) from exc
-        raw = receipt.content
+    raw = store.read_verified(artifact_id, expected_relative_path=path.name)
     try:
         approval = StrategyApproval.model_validate(yaml.safe_load(raw))
     except Exception as exc:
         raise StorageValidationError(
             store_name="approvals",
             path=path,
-            operation="adopt_legacy",
-            reason="legacy approval is invalid",
+            operation="read",
+            reason="approval is invalid",
             original_error=exc,
         ) from exc
     if _approval_filename(approval) != path.name:
         raise StorageValidationError(
-            store_name="approvals", path=path, operation="read",
+            store_name="approvals",
+            path=path,
+            operation="read",
             reason="approval filename identity does not match parsed strategy",
         )
     return approval

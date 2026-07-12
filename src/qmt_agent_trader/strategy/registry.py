@@ -51,7 +51,6 @@ class StrategyRegistry:
             item_loader=_load_file_strategy,
             item_dumper=lambda item: item.model_dump(mode="json"),
             item_identity=lambda item: item.strategy_id,
-            legacy_items_key="strategies",
             lock_manager=manager,
             atomic_store=store,
             store_name="strategy_registry",

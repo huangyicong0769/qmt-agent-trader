@@ -97,24 +97,24 @@ def test_order_plan_events_append_without_mutating_original_plan(tmp_path) -> No
     assert all(event.order_plan_id == plan.order_plan_id for event in events)
 
 
-def test_load_adopts_existing_legacy_order_plan_without_changing_bytes(tmp_path) -> None:
+def test_load_rejects_unmanifested_order_plan_without_changing_bytes(tmp_path) -> None:
     plan = make_plan()
     path = tmp_path / f"{plan.order_plan_id}.json"
     original = plan.model_dump_json(indent=2).encode("utf-8")
     path.write_bytes(original)
 
-    loaded = load_order_plan(plan.order_plan_id, tmp_path)
+    with pytest.raises(StorageValidationError, match="manifest is missing"):
+        load_order_plan(plan.order_plan_id, tmp_path)
 
-    assert loaded.order_plan_id == plan.order_plan_id
     assert path.read_bytes() == original
-    assert len(list((tmp_path / ".manifests").glob("*.json"))) == 1
+    assert not (tmp_path / ".manifests").exists()
 
 
 def test_invalid_legacy_order_plan_is_structured_and_not_adopted(tmp_path) -> None:
     path = tmp_path / "op_broken.json"
     path.write_text("{broken", encoding="utf-8")
 
-    with pytest.raises(StorageValidationError, match="legacy order plan is invalid"):
+    with pytest.raises(StorageValidationError, match="manifest is missing"):
         load_order_plan("op_broken", tmp_path)
 
     assert not (tmp_path / ".manifests").exists()

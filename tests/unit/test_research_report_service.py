@@ -61,7 +61,7 @@ def test_compare_research_reports_returns_compact_summaries(tmp_path) -> None:
     assert compared["infrastructure_requests"] == ["add borrow/liquidity diagnostics"]
 
 
-def test_compare_adopts_legacy_report_and_blocks_tampered_governed_report(tmp_path) -> None:
+def test_compare_rejects_unmanifested_report_without_mutation(tmp_path) -> None:
     reports_dir = tmp_path / "reports" / "research"
     reports_dir.mkdir(parents=True)
     legacy_path = reports_dir / "research_legacy.json"
@@ -75,14 +75,9 @@ def test_compare_adopts_legacy_report_and_blocks_tampered_governed_report(tmp_pa
     ).encode()
     legacy_path.write_bytes(original)
 
-    compared = compare_research_reports(reports_dir)
-    assert compared["status"] == "compared"
-    assert legacy_path.read_bytes() == original
-    assert len(list((reports_dir / ".manifests").glob("*.json"))) == 1
-
-    legacy_path.write_bytes(b'{"run_id":"research_legacy","tampered":true}')
-    with pytest.raises(StorageValidationError, match="hash_mismatch"):
+    with pytest.raises(StorageValidationError, match="manifest is missing"):
         compare_research_reports(reports_dir)
+    assert legacy_path.read_bytes() == original
 
 
 def test_evaluate_research_gate_passes_complete_sensitivity_evidence() -> None:

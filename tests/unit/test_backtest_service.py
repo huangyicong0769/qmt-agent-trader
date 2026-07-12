@@ -8,10 +8,12 @@ from qmt_agent_trader.backtest.service import (
 )
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.persistence.errors import StorageValidationError
+from qmt_agent_trader.persistence.initialization import initialize_persistence
 
 
 def test_run_single_symbol_backtest_uses_next_day_fill(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake, migrate_legacy_ledger=False)
     lake.write_parquet(
         pd.DataFrame(
             [
@@ -50,6 +52,7 @@ def test_run_single_symbol_backtest_uses_next_day_fill(tmp_path) -> None:
 
 def test_run_backtest_report_persists_report(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    initialize_persistence(lake, migrate_legacy_ledger=False)
     lake.write_parquet(
         pd.DataFrame(
             [
@@ -94,15 +97,13 @@ def test_run_backtest_report_persists_report(tmp_path) -> None:
     assert {"leakage_valid", "min_observations", "min_trade_count"} <= check_names
 
 
-def test_compare_backtests_adopts_legacy_and_rejects_tampering(tmp_path) -> None:
+def test_compare_backtests_rejects_unmanifested_report(tmp_path) -> None:
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()
     path = reports_dir / "bt_legacy.json"
     original = b'{"run_id":"bt_legacy","performance_report":{}}'
     path.write_bytes(original)
 
-    assert compare_backtest_reports(reports_dir)["status"] == "compared"
-    assert path.read_bytes() == original
-    path.write_bytes(b'{"run_id":"bt_legacy","performance_report":{"evil":1}}')
-    with pytest.raises(StorageValidationError, match="hash_mismatch"):
+    with pytest.raises(StorageValidationError, match="manifest is missing"):
         compare_backtest_reports(reports_dir)
+    assert path.read_bytes() == original

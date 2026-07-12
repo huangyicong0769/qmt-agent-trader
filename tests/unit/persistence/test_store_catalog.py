@@ -21,7 +21,6 @@ def test_catalog_names_every_real_store_and_excludes_operational_roots(tmp_path:
         "experiments",
         "sessions",
         "universes",
-        "legacy_universes",
         "approvals",
         "order_plans",
         "backtest_reports",
@@ -32,7 +31,6 @@ def test_catalog_names_every_real_store_and_excludes_operational_roots(tmp_path:
     assert set(by_name) == expected
     assert by_name["factor_registry"].path == paths.data_root / "factors/registry.json"
     assert by_name["universes"].path == paths.registries_root / "universes"
-    assert by_name["legacy_universes"].path == paths.data_root / "universes/registry"
     assert by_name["generated_code"].path == (
         paths.project_root / "src/qmt_agent_trader/agent/generated"
     )

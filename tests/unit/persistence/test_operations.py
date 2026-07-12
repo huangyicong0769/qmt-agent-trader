@@ -485,17 +485,17 @@ def test_quarantine_manifest_failure_rolls_source_back(
     assert not list((operations.paths.quarantine_root / "sessions").glob("*.quarantine"))
 
 
-def test_quarantine_respects_allow_valid_legacy_artifact_policy(
+def test_quarantine_accepts_unmanifested_governed_artifact(
     operations: StorageOperations,
 ) -> None:
     legacy = operations.paths.approvals_root / "legacy.approval.yaml"
     legacy.parent.mkdir(parents=True)
     legacy.write_text("status: APPROVED\n")
 
-    with pytest.raises(StorageValidationError, match="valid"):
-        operations.quarantine("approvals", legacy.name)
+    receipt = operations.quarantine("approvals", legacy.name)
 
-    assert legacy.exists()
+    assert receipt.path.exists()
+    assert not legacy.exists()
 
 
 def test_quarantine_accepts_manifest_hash_corrupt_artifact(

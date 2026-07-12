@@ -12,7 +12,6 @@ from typing import Any, Generic, TypeVar, cast
 from qmt_agent_trader.core.ids import shanghai_now_iso
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.errors import (
-    StorageConflictError,
     StorageCorruptError,
     StorageRevisionConflictError,
     StorageSchemaMismatchError,
@@ -45,7 +44,6 @@ class VersionedJsonRegistry(Generic[T]):
         item_loader: Callable[[dict[str, Any]], T],
         item_dumper: Callable[[T], dict[str, Any]],
         item_identity: Callable[[T], str],
-        legacy_items_key: str,
         lock_manager: LockManager,
         atomic_store: AtomicFileStore,
         store_name: str,
@@ -54,19 +52,14 @@ class VersionedJsonRegistry(Generic[T]):
         self.item_loader = item_loader
         self.item_dumper = item_dumper
         self.item_identity = item_identity
-        self.legacy_items_key = legacy_items_key
         self.lock_manager = lock_manager
         self.atomic_store = atomic_store
         self.store_name = store_name
 
-    @property
-    def legacy_backup_path(self) -> Path:
-        return self.path.with_name(f"{self.path.name}.v1.bak")
-
     def load_snapshot(self) -> RegistrySnapshot[T]:
-        """Load and validate the latest snapshot, migrating valid v1 data under lock."""
+        """Load and validate the latest current-schema snapshot without mutation."""
         with self.lock_manager.resource_lock(self.path):
-            return self._load_locked(migrate_legacy=True)
+            return self._load_locked()
 
     def mutate(
         self,
@@ -76,15 +69,13 @@ class VersionedJsonRegistry(Generic[T]):
     ) -> RegistrySnapshot[T]:
         """Apply ``operation`` to the latest data and atomically persist revision+1."""
         with self.lock_manager.resource_lock(self.path):
-            current = self._load_locked(migrate_legacy=True)
+            current = self._load_locked()
             if expected_revision is not None and expected_revision != current.revision:
                 raise StorageRevisionConflictError(
                     store_name=self.store_name,
                     path=self.path,
                     operation="mutate",
-                    reason=(
-                        f"expected revision {expected_revision}, found {current.revision}"
-                    ),
+                    reason=(f"expected revision {expected_revision}, found {current.revision}"),
                     recoverable=True,
                     suggested_repair="reload the latest snapshot and retry the mutation",
                 )
@@ -102,7 +93,7 @@ class VersionedJsonRegistry(Generic[T]):
                 items=dumped,
             )
             self._write_payload(payload)
-            verified = self._load_locked(migrate_legacy=False)
+            verified = self._load_locked()
             if (
                 verified.revision != current.revision + 1
                 or verified.content_hash != payload["content_hash"]
@@ -117,7 +108,7 @@ class VersionedJsonRegistry(Generic[T]):
                 )
             return verified
 
-    def _load_locked(self, *, migrate_legacy: bool) -> RegistrySnapshot[T]:
+    def _load_locked(self) -> RegistrySnapshot[T]:
         if not self.path.exists():
             return self._empty_snapshot()
         try:
@@ -137,10 +128,6 @@ class VersionedJsonRegistry(Generic[T]):
             raise self._schema_error("registry root must be an object")
         if payload.get("schema_version") == 2:
             return self._parse_v2(cast(dict[str, Any], payload))
-        if payload.get("version") == 1:
-            if not migrate_legacy:
-                raise self._schema_error("legacy registry remained after migration")
-            return self._migrate_v1_locked(raw, cast(dict[str, Any], payload))
         version = payload.get("schema_version", payload.get("version", "missing"))
         raise self._schema_error(f"unsupported registry schema version: {version}")
 
@@ -190,63 +177,6 @@ class VersionedJsonRegistry(Generic[T]):
             content_hash=content_hash,
             items=items,
         )
-
-    def _migrate_v1_locked(
-        self,
-        raw: bytes,
-        payload: dict[str, Any],
-    ) -> RegistrySnapshot[T]:
-        if set(payload) != {"version", self.legacy_items_key}:
-            raise self._schema_error("legacy registry fields do not match the v1 schema")
-        raw_items = payload[self.legacy_items_key]
-        if not isinstance(raw_items, list):
-            raise self._schema_error("legacy registry records must be a list")
-        items = self._load_items(raw_items, operation="migrate_v1")
-        dumped = self._dump_and_validate_items(items, operation="migrate_v1")
-        backup = self.legacy_backup_path
-        if backup.exists():
-            try:
-                existing = backup.read_bytes()
-            except OSError as exc:
-                raise StorageCorruptError(
-                    store_name=self.store_name,
-                    path=backup,
-                    operation="migrate_v1",
-                    reason="legacy registry backup is unreadable",
-                    original_error=exc,
-                ) from exc
-            if existing != raw:
-                raise StorageConflictError(
-                    store_name=self.store_name,
-                    path=backup,
-                    operation="migrate_v1",
-                    reason="legacy registry backup already exists with different content",
-                )
-        else:
-            self.atomic_store.write_bytes(
-                backup,
-                raw,
-                create_only=True,
-                validator=lambda value: isinstance(json.loads(value), dict),
-            )
-        migrated = self._payload(revision=1, updated_at=shanghai_now_iso(), items=dumped)
-        self._write_payload(migrated)
-        installed = self._load_locked(migrate_legacy=False)
-        if (
-            installed.schema_version != 2
-            or installed.revision != 1
-            or installed.content_hash != migrated["content_hash"]
-            or installed.items != items
-        ):
-            raise StorageCorruptError(
-                store_name=self.store_name,
-                path=self.path,
-                operation="verify_migration",
-                reason="installed v2 registry does not match the verified migration payload",
-                recoverable=False,
-                suggested_repair="restore and migrate the immutable v1 backup",
-            )
-        return installed
 
     def _empty_snapshot(self) -> RegistrySnapshot[T]:
         payload = self._payload(revision=0, updated_at="", items=[])
@@ -339,8 +269,7 @@ class VersionedJsonRegistry(Generic[T]):
     def _validate_encoded_payload(self, raw: bytes, expected: dict[str, Any]) -> bool:
         decoded = cast(dict[str, Any], json.loads(raw))
         return (
-            decoded == expected
-            and self._parse_v2(decoded).content_hash == expected["content_hash"]
+            decoded == expected and self._parse_v2(decoded).content_hash == expected["content_hash"]
         )
 
     def _schema_error(self, reason: str) -> StorageSchemaMismatchError:

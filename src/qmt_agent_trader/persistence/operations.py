@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -165,12 +164,6 @@ class StorageOperations:
                 for artifact_diagnostic in artifact_store_for_root(
                     root, lock_manager=self.locks
                 ).diagnose():
-                    if (
-                        artifact_diagnostic.code == "ORPHAN_ARTIFACT"
-                        and store.legacy_policy == "allow_valid_legacy"
-                        and _parse_valid_legacy_artifact(root / artifact_diagnostic.relative_path)
-                    ):
-                        continue
                     diagnostics.append(
                         StorageDiagnostic(
                             store.name,
@@ -479,12 +472,6 @@ class StorageOperations:
             ]
             if not matching:
                 return []
-            if (
-                store.legacy_policy == "allow_valid_legacy"
-                and all(item.code == "ORPHAN_ARTIFACT" for item in matching)
-                and _parse_valid_legacy_artifact(path)
-            ):
-                return []
             return [
                 StorageDiagnostic(store.name, item.code, item.reason, path) for item in matching
             ]
@@ -597,21 +584,6 @@ def _record_identity(record_kind: str | None, payload: dict[str, Any]) -> str | 
     if record_kind == "todos":
         return hashlib.sha256(str(payload["session_id"]).encode("utf-8")).hexdigest()[:16]
     return None
-
-
-def _parse_valid_legacy_artifact(path: Path) -> bool:
-    try:
-        if path.suffix == ".json":
-            json.loads(path.read_text(encoding="utf-8"))
-        elif path.suffix in {".yaml", ".yml"}:
-            yaml.safe_load(path.read_text(encoding="utf-8"))
-        elif path.suffix == ".py":
-            ast.parse(path.read_text(encoding="utf-8"))
-        else:
-            return bool(path.read_text(encoding="utf-8").strip())
-    except Exception:
-        return False
-    return True
 
 
 def as_json(value: Any) -> Any:

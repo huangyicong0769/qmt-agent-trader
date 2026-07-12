@@ -6,7 +6,7 @@ import pytest
 
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import compute_factor_frame
-from qmt_agent_trader.persistence.errors import StorageValidationError
+from qmt_agent_trader.persistence.errors import StorageSchemaMismatchError
 
 
 def _bars() -> pd.DataFrame:
@@ -259,7 +259,7 @@ def test_unsaved_file_factor_is_not_available(tmp_path) -> None:
     assert registry.get_factor("draft_factor") is None
 
 
-def test_factor_registry_migrates_v1_without_persisting_builtins(tmp_path) -> None:
+def test_factor_registry_rejects_v1_without_mutation(tmp_path) -> None:
     root = tmp_path / "registry"
     root.mkdir()
     path = root / "registry.json"
@@ -283,13 +283,12 @@ def test_factor_registry_migrates_v1_without_persisting_builtins(tmp_path) -> No
     }
     path.write_text(json.dumps(legacy), encoding="utf-8")
 
-    registry = FactorRegistry(root)
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    original = path.read_bytes()
 
-    assert registry.get_factor("legacy_factor") is not None
-    assert payload["schema_version"] == 2
-    assert [item["factor_id"] for item in payload["items"]] == ["legacy_factor"]
-    assert json.loads((root / "registry.json.v1.bak").read_text()) == legacy
+    with pytest.raises(StorageSchemaMismatchError):
+        FactorRegistry(root)
+
+    assert path.read_bytes() == original
 
 
 def test_factor_registry_rejects_persisted_builtin_records_structurally(tmp_path) -> None:
@@ -303,5 +302,5 @@ def test_factor_registry_rejects_persisted_builtin_records_structurally(tmp_path
         encoding="utf-8",
     )
 
-    with pytest.raises(StorageValidationError, match="validation"):
+    with pytest.raises(StorageSchemaMismatchError):
         FactorRegistry(root)

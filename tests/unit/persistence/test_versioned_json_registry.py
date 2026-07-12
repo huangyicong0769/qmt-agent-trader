@@ -46,7 +46,6 @@ def _repository(
         item_loader=_load_item,
         item_dumper=_dump_item,
         item_identity=lambda item: item.identity,
-        legacy_items_key="records",
         lock_manager=manager,
         atomic_store=store or AtomicFileStore(manager),
         store_name="test_registry",
@@ -94,20 +93,16 @@ def test_versioned_registry_rejects_duplicate_identity(tmp_path: Path) -> None:
         repository.mutate(lambda _items: [_Item("a", 1), _Item("a", 2)])
 
 
-def test_versioned_registry_migrates_v1_once_and_preserves_backup(tmp_path: Path) -> None:
+def test_versioned_registry_rejects_v1_without_modifying_it(tmp_path: Path) -> None:
     path = tmp_path / "registry.json"
     original = {"version": 1, "records": [{"identity": "old", "value": 7}]}
     path.write_text(json.dumps(original), encoding="utf-8")
     repository = _repository(path)
 
-    first = repository.load_snapshot()
-    second = repository.load_snapshot()
+    with pytest.raises(StorageSchemaMismatchError):
+        repository.load_snapshot()
 
-    assert first == second
-    assert first.revision == 1
-    assert first.items == (_Item("old", 7),)
-    assert json.loads(repository.legacy_backup_path.read_text(encoding="utf-8")) == original
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert json.loads(path.read_text(encoding="utf-8")) == original
 
 
 def test_versioned_registry_rejects_corrupt_and_hash_invalid_snapshots(tmp_path: Path) -> None:
@@ -178,117 +173,3 @@ def test_versioned_registry_fault_before_replace_preserves_previous_snapshot(
         failing.mutate(lambda items: [*items, _Item("b", 2)])
 
     assert repository.load_snapshot() == original
-
-
-class _FailLegacyBackupStore(AtomicFileStore):
-    def write_bytes(
-        self,
-        path: Path,
-        content: bytes,
-        *,
-        create_only: bool = False,
-        validator: Any = None,
-        fault_hook: Any = None,
-    ) -> None:
-        def fail(_stage: str, _temp: Path) -> None:
-            raise OSError("injected backup failure")
-
-        super().write_bytes(
-            path,
-            content,
-            create_only=create_only,
-            validator=validator,
-            fault_hook=fail if path.name.endswith(".v1.bak") else fault_hook,
-        )
-
-
-class _FailV2ValidationStore(AtomicFileStore):
-    def write_bytes(
-        self,
-        path: Path,
-        content: bytes,
-        *,
-        create_only: bool = False,
-        validator: Any = None,
-        fault_hook: Any = None,
-    ) -> None:
-        super().write_bytes(
-            path,
-            content,
-            create_only=create_only,
-            validator=(lambda _raw: False) if path.name == "registry.json" else validator,
-            fault_hook=fault_hook,
-        )
-
-
-class _RestoreV1AfterReplaceStore(AtomicFileStore):
-    def write_bytes(
-        self,
-        path: Path,
-        content: bytes,
-        *,
-        create_only: bool = False,
-        validator: Any = None,
-        fault_hook: Any = None,
-    ) -> None:
-        previous = path.read_bytes() if path.name == "registry.json" else None
-        super().write_bytes(
-            path,
-            content,
-            create_only=create_only,
-            validator=validator,
-            fault_hook=fault_hook,
-        )
-        if previous is not None:
-            path.write_bytes(previous)
-
-
-def _write_v1(path: Path) -> bytes:
-    raw = json.dumps(
-        {"version": 1, "records": [{"identity": "old", "value": 7}]}
-    ).encode()
-    path.write_bytes(raw)
-    return raw
-
-
-def test_v1_backup_failure_preserves_official_legacy_snapshot(tmp_path: Path) -> None:
-    path = tmp_path / "registry.json"
-    original = _write_v1(path)
-    manager = LockManager(tmp_path / "locks", timeout_seconds=2)
-    repository = _repository(path, store=_FailLegacyBackupStore(manager))
-
-    with pytest.raises(Exception, match="atomic write failed"):
-        repository.load_snapshot()
-
-    assert path.read_bytes() == original
-    assert not repository.legacy_backup_path.exists()
-
-
-def test_v1_v2_validation_failure_preserves_official_legacy_snapshot(tmp_path: Path) -> None:
-    path = tmp_path / "registry.json"
-    original = _write_v1(path)
-    manager = LockManager(tmp_path / "locks", timeout_seconds=2)
-    repository = _repository(path, store=_FailV2ValidationStore(manager))
-
-    with pytest.raises(StorageValidationError):
-        repository.load_snapshot()
-
-    assert path.read_bytes() == original
-    assert repository.legacy_backup_path.read_bytes() == original
-    assert _repository(path).load_snapshot().items == (_Item("old", 7),)
-
-
-def test_v1_migration_rereads_installed_file_before_reporting_success(tmp_path: Path) -> None:
-    path = tmp_path / "registry.json"
-    original = _write_v1(path)
-    manager = LockManager(tmp_path / "locks", timeout_seconds=2)
-    repository = _repository(path, store=_RestoreV1AfterReplaceStore(manager))
-
-    with pytest.raises(StorageSchemaMismatchError):
-        repository.load_snapshot()
-
-    assert path.read_bytes() == original
-    assert repository.legacy_backup_path.read_bytes() == original
-    recovered = _repository(path).load_snapshot()
-    assert recovered.items == (_Item("old", 7),)
-    assert _repository(path).load_snapshot() == recovered

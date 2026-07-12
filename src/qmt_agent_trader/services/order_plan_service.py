@@ -18,7 +18,6 @@ from qmt_agent_trader.persistence.artifacts import (
     ArtifactStore,
     artifact_store_for_root,
 )
-from qmt_agent_trader.persistence.errors import StorageValidationError
 
 
 def build_sample_paper_order_plan(strategy_id: str) -> OrderPlan:
@@ -92,42 +91,10 @@ def load_order_plan(
     artifact_path = store.path_for(relative_path)
     if not artifact_path.exists():
         raise ValueError(f"order plan not found: {identifier}")
-    if store.manifest_path_for(order_plan_id).exists():
-        raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
-    else:
-        def validate_legacy(content: bytes) -> bool:
-            candidate = OrderPlan.model_validate_json(content)
-            if candidate.order_plan_id != order_plan_id:
-                raise ValueError("order plan id does not match repository path")
-            return True
-
-        try:
-            receipt = store.adopt(
-                relative_path,
-                metadata=ArtifactMetadata(
-                    artifact_id=order_plan_id,
-                    artifact_type="order_plan",
-                    producer="services.order_plan_service.legacy_adoption",
-                ),
-                validator=validate_legacy,
-            )
-        except StorageValidationError as exc:
-            raise StorageValidationError(
-                store_name="order_plans", path=artifact_path, operation="adopt_legacy",
-                reason="legacy order plan is invalid", original_error=exc,
-            ) from exc
-        raw = receipt.content
+    raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
     try:
         plan = OrderPlan.model_validate_json(raw)
-    except Exception as exc:
-        if not store.manifest_path_for(order_plan_id).exists():
-            raise StorageValidationError(
-                store_name="order_plans",
-                path=artifact_path,
-                operation="adopt_legacy",
-                reason="legacy order plan is invalid",
-                original_error=exc,
-            ) from exc
+    except Exception:
         raise
     if plan.order_plan_id != order_plan_id:
         raise ValueError("order plan id does not match repository path")

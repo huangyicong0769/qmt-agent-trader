@@ -90,8 +90,7 @@ class SavedFactor:
         data = asdict(self)
         data["required_columns"] = list(self.required_columns)
         data["input_requirements"] = [
-            requirement.model_dump(mode="json")
-            for requirement in self.input_requirements
+            requirement.model_dump(mode="json") for requirement in self.input_requirements
         ]
         return data
 
@@ -130,7 +129,6 @@ class FactorRegistry:
                 item_loader=_load_file_factor,
                 item_dumper=SavedFactor.to_dict,
                 item_identity=lambda item: item.factor_id,
-                legacy_items_key="factors",
                 lock_manager=manager,
                 atomic_store=store,
                 store_name="factor_registry",
@@ -158,28 +156,18 @@ class FactorRegistry:
         factors = self.list_factors()
         if not include_builtins:
             factors = [
-                item
-                for item in factors
-                if not item.implementation_ref.startswith("builtin:")
+                item for item in factors if not item.implementation_ref.startswith("builtin:")
             ]
         needle = str(query or "").strip()
         if not needle:
             return factors
-        return [
-            item
-            for item in factors
-            if needle in item.factor_id or needle in item.name
-        ]
+        return [item for item in factors if needle in item.factor_id or needle in item.name]
 
     def duplicate_names(self) -> dict[str, list[SavedFactor]]:
         by_name: dict[str, list[SavedFactor]] = {}
         for item in self.list_factors():
             by_name.setdefault(item.name, []).append(item)
-        return {
-            name: factors
-            for name, factors in by_name.items()
-            if len(factors) > 1
-        }
+        return {name: factors for name, factors in by_name.items() if len(factors) > 1}
 
     def resolve_factor_id(self, factor_id_or_name: str) -> str | None:
         saved = self.get_factor(factor_id_or_name)
@@ -437,6 +425,7 @@ def _default_requirement_for_column(field: str) -> FactorInputRequirement:
             min_cross_sectional_coverage=0.50,
         ),
     )
+
 
 def _compute_builtin(name: str, bars: pd.DataFrame) -> pd.Series:
     if name == "momentum_20d":

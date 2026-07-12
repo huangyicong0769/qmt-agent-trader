@@ -95,9 +95,7 @@ def test_concurrent_experiment_lesson_event_appends_are_retained(tmp_path: Path)
         ]
         for future in futures:
             future.result()
-    assert set(store.get_experiment(experiment.experiment_id).lessons) == {
-        "event-a", "event-b"
-    }
+    assert set(store.get_experiment(experiment.experiment_id).lessons) == {"event-a", "event-b"}
 
 
 def test_corruption_is_diagnostic_and_explicitly_quarantined(tmp_path: Path) -> None:
@@ -128,9 +126,7 @@ def test_todo_stale_revision_is_rejected(tmp_path: Path) -> None:
         store.add_item("chat_1", title="stale", expected_revision=current.revision)
 
 
-def test_chat_legacy_ui_record_migrates_idempotently_and_is_cwd_independent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_chat_legacy_ui_record_is_rejected_without_mutation(tmp_path: Path) -> None:
     root = tmp_path / "sessions"
     root.mkdir()
     legacy = {
@@ -141,27 +137,25 @@ def test_chat_legacy_ui_record_migrates_idempotently_and_is_cwd_independent(
         "messages": [{"role": "user", "content": "hello", "metadata": {"x": 1}}],
     }
     (root / "s7.json").write_text(json.dumps(legacy), encoding="utf-8")
-    repository = ChatSessionRepository(root)
-    monkeypatch.chdir(tmp_path / "other") if (tmp_path / "other").mkdir() is None else None
-    first = repository.get("s7")
-    second = repository.get("s7")
-    assert first is not None and second is not None
-    assert first.session_id == "s7" and first.title == "Legacy"
-    assert first.context["legacy_ui"] == {"counter": 9, "preview": "hello"}
-    assert first.messages[0].metadata == {"x": 1}
-    assert second.revision == first.revision == 1
+    path = root / "s7.json"
+    original = path.read_bytes()
+
+    with pytest.raises(StorageValidationError, match="schema_version"):
+        ChatSessionRepository(root).get("s7")
+
+    assert path.read_bytes() == original
 
 
 def test_chat_stale_revision_is_rejected(tmp_path: Path) -> None:
     repository = ChatSessionRepository(tmp_path / "sessions")
     first = repository.create(ChatSession(session_id="chat_1"))
     repository.update(
-        "chat_1", lambda session: session.model_copy(update={"title": "new"}),
+        "chat_1",
+        lambda session: session.model_copy(update={"title": "new"}),
         expected_revision=first.revision,
     )
     with pytest.raises(StorageRevisionConflictError):
-        repository.update("chat_1", lambda session: session,
-            expected_revision=first.revision)
+        repository.update("chat_1", lambda session: session, expected_revision=first.revision)
 
 
 def test_universe_concurrent_same_and_distinct_ids_remain_valid(tmp_path: Path) -> None:
@@ -229,7 +223,7 @@ def test_fault_before_replace_preserves_previous_record(tmp_path: Path) -> None:
     assert [item.title for item in restored.items] == ["one"]
 
 
-def test_universe_previous_root_migrates_to_canonical_idempotently(tmp_path: Path) -> None:
+def test_universe_previous_root_is_not_discovered_or_modified(tmp_path: Path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     spec = broad_universe_spec("stock")
     source = tmp_path / "universes" / "registry" / f"{spec.universe_id}.json"
@@ -239,9 +233,6 @@ def test_universe_previous_root_migrates_to_canonical_idempotently(tmp_path: Pat
     )
     original_bytes = source.read_bytes()
     canonical = UniverseRegistry.for_lake(lake)
-    migrated = canonical.load_record(spec.universe_id)
-    assert migrated is not None and migrated.spec == spec
+    assert canonical.load_record(spec.universe_id) is None
     assert source.exists()
     assert source.read_bytes() == original_bytes
-    again = UniverseRegistry.for_lake(lake).load_record(spec.universe_id)
-    assert again is not None and again.revision == migrated.revision == 1
