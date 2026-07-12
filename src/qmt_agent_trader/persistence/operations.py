@@ -19,11 +19,17 @@ import yaml
 
 from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
-from qmt_agent_trader.persistence.catalog import StoreCatalog
+from qmt_agent_trader.persistence.catalog import StoreCatalog, StoreDefinition
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import (
     StorageBackupError,
     StorageConflictError,
+    StorageCorruptError,
+    StorageError,
+    StorageLockTimeoutError,
+    StoragePermissionError,
+    StorageSchemaMismatchError,
+    StorageUnavailableError,
     StorageValidationError,
 )
 from qmt_agent_trader.persistence.initialization import storage_migrations
@@ -120,12 +126,12 @@ class StorageOperations:
                     except Exception as exc:
                         if "does not exist" not in str(exc):
                             raise
-            except Exception as exc:
+            except StorageError as exc:
                 diagnostics.append(
                     StorageDiagnostic(
                         "control_db",
-                        "DUCKDB_CORRUPT",
-                        type(exc).__name__,
+                        _database_diagnostic_code(exc),
+                        exc.reason,
                         self.paths.control_db_path,
                     )
                 )
@@ -177,7 +183,7 @@ class StorageOperations:
             for path in candidates:
                 if not path.is_file() or self.paths.backup_root in path.parents:
                     continue
-                diagnostics.extend(self._verify_file(path, deep=deep))
+                diagnostics.extend(self._verify_store_file(store, path, deep=deep))
         return VerificationResult(
             not any(d.severity == "error" for d in diagnostics), deep, diagnostics
         )
@@ -363,14 +369,8 @@ class StorageOperations:
         )
         manifest_path = target.with_suffix(target.suffix + ".json")
         with self.locks.resource_lock(source):
-            if _record_is_valid(
-                source,
-                definition.kind,
-                definition.governed,
-                definition.legacy_policy,
-                root,
-                self.locks,
-            ):
+            validation = self._verify_store_file(definition, source, deep=True)
+            if not any(item.severity == "error" for item in validation):
                 raise StorageValidationError(
                     store_name="quarantine",
                     path=source,
@@ -466,6 +466,38 @@ class StorageOperations:
             result.append(StorageDiagnostic("file", code, type(exc).__name__, path))
         return result
 
+    def _verify_store_file(
+        self, store: StoreDefinition, path: Path, *, deep: bool
+    ) -> list[StorageDiagnostic]:
+        if store.governed:
+            root = store.path
+            relative = path.relative_to(root).as_posix()
+            matching = [
+                item
+                for item in artifact_store_for_root(root, lock_manager=self.locks).diagnose()
+                if item.relative_path == relative
+            ]
+            if not matching:
+                return []
+            if (
+                store.legacy_policy == "allow_valid_legacy"
+                and all(item.code == "ORPHAN_ARTIFACT" for item in matching)
+                and _parse_valid_legacy_artifact(path)
+            ):
+                return []
+            return [
+                StorageDiagnostic(store.name, item.code, item.reason, path) for item in matching
+            ]
+        if store.verifier_id.startswith("versioned_registry_"):
+            return _verify_versioned_json(path, store, record_kind=None)
+        if store.verifier_id.startswith("versioned_record_"):
+            record_kind = store.verifier_id.removeprefix("versioned_record_").removesuffix("_v2")
+            return _verify_versioned_json(path, store, record_kind=record_kind)
+        return [
+            StorageDiagnostic(store.name, item.code, item.reason, item.path, item.severity)
+            for item in self._verify_file(path, deep=deep)
+        ]
+
 
 def _hash(path: Path) -> str:
     digest = hashlib.sha256()
@@ -473,6 +505,20 @@ def _hash(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _database_diagnostic_code(error: StorageError) -> str:
+    if isinstance(error, StorageLockTimeoutError):
+        return "CONTROL_DB_LOCKED"
+    if isinstance(error, StoragePermissionError):
+        return "CONTROL_DB_PERMISSION_DENIED"
+    if isinstance(error, StorageSchemaMismatchError):
+        return "CONTROL_DB_SCHEMA_MISSING"
+    if isinstance(error, StorageCorruptError):
+        return "CONTROL_DB_CORRUPT"
+    if isinstance(error, StorageUnavailableError):
+        return "CONTROL_DB_UNAVAILABLE"
+    return "CONTROL_DB_ERROR"
 
 
 def _lock_is_active(path: Path) -> bool:
@@ -488,45 +534,69 @@ def _lock_is_active(path: Path) -> bool:
         return False
 
 
-def _record_is_valid(
-    path: Path,
-    kind: str,
-    governed: bool,
-    legacy_policy: str,
-    root: Path,
-    locks: LockManager,
-) -> bool:
+def _verify_versioned_json(
+    path: Path, store: StoreDefinition, *, record_kind: str | None
+) -> list[StorageDiagnostic]:
     try:
-        if governed:
-            diagnostics = artifact_store_for_root(root, lock_manager=locks).diagnose()
-            relative = path.relative_to(root).as_posix()
-            matching = [item for item in diagnostics if item.relative_path == relative]
-            if not matching:
-                return True
-            if legacy_policy == "allow_valid_legacy" and all(
-                item.code == "ORPHAN_ARTIFACT" for item in matching
-            ):
-                return _parse_valid_legacy_artifact(path)
-            return False
-        if kind == "parquet":
-            parquet = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
-            for index in range(parquet.num_row_groups):
-                parquet.read_row_group(index)  # type: ignore[no-untyped-call]
-        elif kind == "json":
-            json.loads(path.read_text(encoding="utf-8"))
-        elif kind == "jsonl":
-            raw = path.read_bytes()
-            if raw and not raw.endswith(b"\n"):
-                return False
-            for line in raw.splitlines():
-                json.loads(line)
-        elif kind == "code":
-            ast.parse(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("root must be an object")
+        if payload.get("schema_version") != 2:
+            return [
+                StorageDiagnostic(store.name, "SCHEMA_MISMATCH", "schema_version must be 2", path)
+            ]
+        revision = payload.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            return [
+                StorageDiagnostic(
+                    store.name, "REVISION_INVALID", "revision must be non-negative", path
+                )
+            ]
+        claimed = payload.get("content_hash")
+        unhashed = {key: value for key, value in payload.items() if key != "content_hash"}
+        if record_kind is None:
+            expected = hashlib.sha256(
+                json.dumps(
+                    unhashed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
         else:
-            yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return True
+            expected = hashlib.sha256(
+                json.dumps(
+                    unhashed, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+        if claimed != expected:
+            return [StorageDiagnostic(store.name, "HASH_MISMATCH", "content hash mismatch", path)]
+        identity = _record_identity(record_kind, payload)
+        if identity is not None and identity != path.stem:
+            return [
+                StorageDiagnostic(
+                    store.name, "IDENTITY_MISMATCH", "record identity does not match filename", path
+                )
+            ]
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as exc:
+        return [StorageDiagnostic(store.name, "INVALID_CONTENT", type(exc).__name__, path)]
+    return []
+
+
+def _record_identity(record_kind: str | None, payload: dict[str, Any]) -> str | None:
+    if record_kind == "sessions":
+        return str(payload["session_id"])
+    if record_kind == "experiments":
+        return str(payload["experiment_id"])
+    if record_kind == "universes":
+        return str(payload["spec"]["universe_id"])
+    if record_kind == "todos":
+        return hashlib.sha256(str(payload["session_id"]).encode("utf-8")).hexdigest()[:16]
+    return None
 
 
 def _parse_valid_legacy_artifact(path: Path) -> bool:

@@ -12,8 +12,11 @@ from typing import Any
 import duckdb
 
 from qmt_agent_trader.persistence.errors import (
+    StorageCorruptError,
     StorageError,
     StorageLockTimeoutError,
+    StoragePermissionError,
+    StorageSchemaMismatchError,
     StorageUnavailableError,
 )
 from qmt_agent_trader.persistence.locks import LockManager
@@ -136,6 +139,36 @@ class DatabaseCoordinator:
         return int(result[0]) if result else 0
 
     def _error(self, operation: str, error: BaseException) -> StorageError:
+        if (
+            isinstance(error, duckdb.PermissionException)
+            or "permission denied" in str(error).lower()
+        ):
+            return StoragePermissionError(
+                store_name=self.store_name,
+                database_path=self.database_path,
+                operation=operation,
+                reason="database permission denied",
+                suggested_repair="correct database path permissions",
+                original_error=error,
+            )
+        if isinstance(error, duckdb.CatalogException):
+            return StorageSchemaMismatchError(
+                store_name=self.store_name,
+                database_path=self.database_path,
+                operation=operation,
+                reason="database schema object is missing or incompatible",
+                suggested_repair="run persistence initialization or migrations",
+                original_error=error,
+            )
+        if any(token in str(error).lower() for token in ("corrupt", "checksum mismatch")):
+            return StorageCorruptError(
+                store_name=self.store_name,
+                database_path=self.database_path,
+                operation=operation,
+                reason="database integrity failure",
+                suggested_repair="restore a verified control database backup",
+                original_error=error,
+            )
         return StorageError(
             store_name=self.store_name,
             database_path=self.database_path,

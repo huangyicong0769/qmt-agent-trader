@@ -23,6 +23,8 @@ from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.research_report_service import save_research_report
+from qmt_agent_trader.web.chat_repository import ChatSessionRepository
+from qmt_agent_trader.web.schemas import ChatSession
 
 
 @pytest.fixture
@@ -118,12 +120,15 @@ def test_composed_generated_code_root_is_verified_and_backed_up(
 def test_backup_excludes_cache_temp_and_locks_and_verifies_hashes(
     operations: StorageOperations,
 ) -> None:
-    official = operations.paths.sessions_root / "s.json"
-    official.parent.mkdir(parents=True)
-    official.write_text('{"schema_version": 1}', encoding="utf-8")
+    repository = ChatSessionRepository(
+        operations.paths.sessions_root,
+        locks_root=operations.paths.locks_root,
+        quarantine_root=operations.paths.quarantine_root / "sessions",
+    )
+    repository.create(ChatSession(session_id="s"))
     operations.paths.cache_root.mkdir(parents=True)
     (operations.paths.cache_root / "skip.json").write_text("cache")
-    operations.paths.locks_root.mkdir(parents=True)
+    operations.paths.locks_root.mkdir(parents=True, exist_ok=True)
     (operations.paths.locks_root / "active.lock").write_text("")
     (operations.paths.data_root / "orphan.tmp").write_text("temp")
 
@@ -137,7 +142,7 @@ def test_backup_excludes_cache_temp_and_locks_and_verifies_hashes(
 
 
 def test_backup_waits_for_active_writer_barrier(operations: StorageOperations) -> None:
-    record = operations.paths.sessions_root / "s.json"
+    record = operations.paths.lake_root / "raw/state.json"
     record.parent.mkdir(parents=True)
     record.write_text('{"value": "before"}')
     acquired = threading.Event()
@@ -157,7 +162,7 @@ def test_backup_waits_for_active_writer_barrier(operations: StorageOperations) -
     thread.join()
 
     assert elapsed >= 0.1
-    backed_up = receipt.path / "files" / "sessions/s.json"
+    backed_up = receipt.path / "files" / record.relative_to(operations.paths.project_root)
     assert json.loads(backed_up.read_text()) == {"value": "after"}
 
 
@@ -238,9 +243,7 @@ def test_real_report_writer_uses_custom_settings_backup_barrier(
 
     def write_report() -> None:
         if writer_kind == "backtest":
-            run_backtest_report(
-                lake, reports_dir=operations.paths.reports_root / "backtests"
-            )
+            run_backtest_report(lake, reports_dir=operations.paths.reports_root / "backtests")
         else:
             save_research_report(
                 operations.paths.reports_root / "research",
@@ -426,6 +429,30 @@ def test_quarantine_rejects_traversal_and_moves_invalid_record(
 
     assert not record.exists()
     assert receipt.path.exists() and receipt.manifest_path.exists()
+
+
+def test_verify_and_quarantine_share_versioned_record_hash_validation(
+    operations: StorageOperations,
+) -> None:
+    repository = ChatSessionRepository(
+        operations.paths.sessions_root,
+        locks_root=operations.paths.locks_root,
+        quarantine_root=operations.paths.quarantine_root / "sessions",
+    )
+    repository.create(ChatSession(session_id="tampered"))
+    record = operations.paths.sessions_root / "tampered.json"
+    payload = json.loads(record.read_text())
+    payload["content_hash"] = "0" * 64
+    record.write_text(json.dumps(payload))
+
+    verification = operations.verify()
+    assert any(
+        diagnostic.component == "sessions" and diagnostic.code == "HASH_MISMATCH"
+        for diagnostic in verification.diagnostics
+    )
+
+    receipt = operations.quarantine("sessions", record.name)
+    assert receipt.path.exists()
 
 
 def test_quarantine_rejects_healthy_parquet(operations: StorageOperations) -> None:

@@ -24,6 +24,7 @@ class StoreDefinition:
     backup: str
     governed: bool = False
     legacy_policy: Literal["reject_unmanifested", "allow_valid_legacy"] = "allow_valid_legacy"
+    verifier_id: str = "generic"
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ class StoreCatalog:
                 True,
                 str(data / "factors/registry.json"),
                 "copy",
+                verifier_id="versioned_registry_v2",
             ),
             StoreDefinition(
                 "strategy_registry",
@@ -110,6 +112,7 @@ class StoreCatalog:
                 True,
                 str(data / "strategies/registry.json"),
                 "copy",
+                verifier_id="versioned_registry_v2",
             ),
             StoreDefinition(
                 "todos",
@@ -121,6 +124,7 @@ class StoreCatalog:
                 True,
                 str(data / "todos"),
                 "copy",
+                verifier_id="versioned_record_todos_v2",
             ),
             StoreDefinition(
                 "experiments",
@@ -132,6 +136,7 @@ class StoreCatalog:
                 True,
                 str(paths.experiments_root),
                 "copy",
+                verifier_id="versioned_record_experiments_v2",
             ),
             StoreDefinition(
                 "sessions",
@@ -143,6 +148,7 @@ class StoreCatalog:
                 True,
                 str(paths.sessions_root),
                 "copy",
+                verifier_id="versioned_record_sessions_v2",
             ),
             StoreDefinition(
                 "universes",
@@ -154,6 +160,7 @@ class StoreCatalog:
                 True,
                 str(paths.registries_root / "universes"),
                 "copy",
+                verifier_id="versioned_record_universes_v2",
             ),
             StoreDefinition(
                 "legacy_universes",
