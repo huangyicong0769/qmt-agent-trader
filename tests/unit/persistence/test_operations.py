@@ -641,6 +641,26 @@ def test_order_plan_quarantine_moves_manifest_content_and_events(
     assert (unit_root / "auxiliary" / ".events" / event_path.name).is_file()
 
 
+def test_governed_quarantine_accepts_missing_content_path(
+    operations: StorageOperations,
+) -> None:
+    root = operations.paths.approvals_root
+    store = artifact_store_for_root(root, lock_manager=operations.locks)
+    created = store.create(
+        "missing.yaml",
+        b"status: APPROVED\n",
+        metadata=ArtifactMetadata(
+            artifact_id="missing-approval", artifact_type="approval", producer="test"
+        ),
+    )
+    created.path.unlink()
+
+    receipt = operations.quarantine("approvals", "missing.yaml")
+
+    assert receipt.path.name == "manifest.json"
+    assert not created.manifest_path.exists()
+
+
 def test_event_only_quarantine_uses_order_plan_artifact_root_lock(
     operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
 ) -> None:

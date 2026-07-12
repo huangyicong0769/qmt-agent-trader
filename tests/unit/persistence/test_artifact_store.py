@@ -243,3 +243,65 @@ def test_quarantine_rejects_healthy_artifact(store: ArtifactStore, tmp_path: Pat
             expected_relative_path="reports/run_1.json",
             quarantine_root=tmp_path / "quarantine",
         )
+
+
+def test_quarantine_missing_content_moves_manifest_only(
+    store: ArtifactStore, tmp_path: Path
+) -> None:
+    receipt = store.create("reports/missing.json", b"content", metadata=_metadata("missing"))
+    receipt.path.unlink()
+
+    quarantined = store.quarantine_relative_path(
+        "reports/missing.json", quarantine_root=tmp_path / "quarantine"
+    )
+
+    assert quarantined is not None
+    assert quarantined.quarantined_content_path is None
+    assert quarantined.quarantined_manifest_path.is_file()
+    sidecar = __import__("json").loads(quarantined.sidecar_path.read_text())
+    assert sidecar["content_state"] == "MISSING_BEFORE_QUARANTINE"
+    assert sidecar["content_sha256"] is None
+    assert not receipt.manifest_path.exists()
+
+
+def test_quarantine_recovers_safe_binding_from_invalid_manifest(
+    store: ArtifactStore, tmp_path: Path
+) -> None:
+    receipt = store.create("reports/recoverable.json", b"content", metadata=_metadata("recover"))
+    payload = __import__("json").loads(receipt.manifest_path.read_text())
+    payload["byte_length"] = "invalid"
+    receipt.manifest_path.write_text(__import__("json").dumps(payload))
+
+    quarantined = store.quarantine_relative_path(
+        receipt.manifest_path.relative_to(store.root),
+        quarantine_root=tmp_path / "quarantine",
+    )
+
+    assert quarantined is not None
+    assert quarantined.quarantined_content_path is not None
+    assert quarantined.quarantined_content_path.read_bytes() == b"content"
+    sidecar = __import__("json").loads(quarantined.sidecar_path.read_text())
+    assert sidecar["binding_state"] == "RECOVERED_FROM_INVALID_MANIFEST"
+
+
+def test_quarantine_unparseable_manifest_does_not_guess_orphan_content(
+    store: ArtifactStore, tmp_path: Path
+) -> None:
+    orphan = store.path_for("reports/orphan.json")
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(b"unrelated")
+    manifest = store.manifest_path_for("broken")
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{broken")
+
+    quarantined = store.quarantine_relative_path(
+        manifest.relative_to(store.root), quarantine_root=tmp_path / "quarantine"
+    )
+
+    assert quarantined is not None
+    assert quarantined.artifact_id is None
+    assert quarantined.quarantined_content_path is None
+    assert orphan.read_bytes() == b"unrelated"
+    sidecar = __import__("json").loads(quarantined.sidecar_path.read_text())
+    assert sidecar["binding_state"] == "UNRECOVERABLE"
+    assert sidecar["content_state"] == "UNKNOWN_NOT_MOVED"

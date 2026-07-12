@@ -68,14 +68,22 @@ class ArtifactDiagnostic(BaseModel):
 
 @dataclass(frozen=True)
 class ArtifactQuarantineReceipt:
-    artifact_id: str
-    original_content_path: Path
+    artifact_id: str | None
+    original_content_path: Path | None
     original_manifest_path: Path
-    quarantined_content_path: Path
+    quarantined_content_path: Path | None
     quarantined_manifest_path: Path
     sidecar_path: Path
     diagnostics: tuple[ArtifactDiagnostic, ...]
     quarantined_auxiliary_paths: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class RecoveredManifestBinding:
+    artifact_id: str
+    relative_path: str
+    manifest_path: Path
+    binding_state: Literal["VALID", "RECOVERED_FROM_INVALID_MANIFEST"]
 
 
 class ArtifactStore:
@@ -386,7 +394,8 @@ class ArtifactStore:
         ``None`` means the unhealthy path is an orphan without a manifest and
         therefore has no content/manifest unit to split.
         """
-        relative = self.path_for(relative_path).relative_to(self.root).as_posix()
+        source = self._resolve_store_relative_path(relative_path)
+        relative = source.relative_to(self.root).as_posix()
         with self.lock_manager.resource_lock(self._resource):
             diagnostic = next(
                 (item for item in self.diagnose_assume_locked() if item.relative_path == relative),
@@ -395,9 +404,16 @@ class ArtifactStore:
             if diagnostic is None:
                 raise StorageValidationError(
                     store_name="artifacts",
-                    path=self.path_for(relative),
+                    path=source,
                     operation="quarantine",
                     reason="authoritative artifact is healthy",
+                )
+            if diagnostic.code == "INVALID_MANIFEST":
+                return self._quarantine_invalid_manifest_assume_locked(
+                    manifest_path=source,
+                    diagnostic=diagnostic,
+                    quarantine_root=quarantine_root,
+                    auxiliary_paths=auxiliary_paths,
                 )
             if diagnostic.artifact_id is None:
                 return None
@@ -408,6 +424,150 @@ class ArtifactStore:
                 quarantine_root=quarantine_root,
                 auxiliary_paths=extra,
             )
+
+    def _recover_manifest_binding_assume_locked(
+        self, manifest_path: Path
+    ) -> RecoveredManifestBinding | None:
+        try:
+            import json
+
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return None
+            artifact_id = payload.get("artifact_id")
+            relative_path = payload.get("relative_path")
+            if not isinstance(artifact_id, str) or not artifact_id:
+                return None
+            if not isinstance(relative_path, str) or not relative_path:
+                return None
+            if self.manifest_path_for(artifact_id) != manifest_path:
+                return None
+            canonical = self.path_for(relative_path).relative_to(self.root).as_posix()
+        except Exception:
+            return None
+        return RecoveredManifestBinding(
+            artifact_id=artifact_id,
+            relative_path=canonical,
+            manifest_path=manifest_path,
+            binding_state="RECOVERED_FROM_INVALID_MANIFEST",
+        )
+
+    def _quarantine_invalid_manifest_assume_locked(
+        self,
+        *,
+        manifest_path: Path,
+        diagnostic: ArtifactDiagnostic,
+        quarantine_root: Path,
+        auxiliary_paths: Callable[[str], tuple[Path, ...]] | None,
+    ) -> ArtifactQuarantineReceipt:
+        binding = self._recover_manifest_binding_assume_locked(manifest_path)
+        artifact_id = binding.artifact_id if binding else None
+        content_path = self.path_for(binding.relative_path) if binding else None
+        content_exists = bool(content_path and content_path.is_file())
+        digest = hashlib.sha256((artifact_id or manifest_path.name).encode()).hexdigest()
+        unit_root = quarantine_root.expanduser().resolve() / (
+            f"{self.now().replace(':', '')}-{digest}"
+        )
+        quarantined_content = (
+            unit_root / "content" / binding.relative_path
+            if binding is not None and content_exists
+            else None
+        )
+        quarantined_manifest = unit_root / "manifest.json"
+        sidecar = unit_root / "QUARANTINE.json"
+        (quarantined_content.parent if quarantined_content else unit_root).mkdir(
+            parents=True, exist_ok=False
+        )
+        moved_content = False
+        moved_manifest = False
+        moved_auxiliary: list[tuple[Path, Path]] = []
+        try:
+            if content_path is not None and quarantined_content is not None:
+                os.replace(content_path, quarantined_content)
+                moved_content = True
+            os.replace(manifest_path, quarantined_manifest)
+            moved_manifest = True
+            extras = auxiliary_paths(artifact_id) if auxiliary_paths and artifact_id else ()
+            for extra in extras:
+                resolved = extra.expanduser().resolve()
+                if self.root not in resolved.parents or not resolved.is_file():
+                    raise StorageValidationError(
+                        store_name="artifacts",
+                        path=resolved,
+                        operation="quarantine",
+                        reason="auxiliary path is outside artifact root or missing",
+                    )
+                target = unit_root / "auxiliary" / resolved.relative_to(self.root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(resolved, target)
+                moved_auxiliary.append((resolved, target))
+            self.atomic_store.write_json_assume_locked(
+                sidecar,
+                {
+                    "schema_version": 1,
+                    "artifact_id": artifact_id,
+                    "binding_state": (
+                        binding.binding_state if binding else "UNRECOVERABLE"
+                    ),
+                    "content_state": (
+                        "PRESENT"
+                        if content_exists
+                        else "MISSING_BEFORE_QUARANTINE"
+                        if binding
+                        else "UNKNOWN_NOT_MOVED"
+                    ),
+                    "original_content_path": str(content_path) if content_path else None,
+                    "original_manifest_path": str(manifest_path),
+                    "content_sha256": (
+                        hashlib.sha256(quarantined_content.read_bytes()).hexdigest()
+                        if quarantined_content
+                        else None
+                    ),
+                    "manifest_sha256": hashlib.sha256(
+                        quarantined_manifest.read_bytes()
+                    ).hexdigest(),
+                    "diagnostics": [diagnostic.model_dump(mode="json")],
+                    "quarantined_at": self.now(),
+                },
+                create_only=True,
+            )
+        except Exception:
+            sidecar.unlink(missing_ok=True)
+            for original, target in reversed(moved_auxiliary):
+                if target.exists():
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(target, original)
+            if moved_manifest and quarantined_manifest.exists():
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(quarantined_manifest, manifest_path)
+            if (
+                moved_content
+                and content_path is not None
+                and quarantined_content is not None
+                and quarantined_content.exists()
+            ):
+                content_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(quarantined_content, content_path)
+            raise
+        return ArtifactQuarantineReceipt(
+            artifact_id=artifact_id,
+            original_content_path=content_path,
+            original_manifest_path=manifest_path,
+            quarantined_content_path=quarantined_content,
+            quarantined_manifest_path=quarantined_manifest,
+            sidecar_path=sidecar,
+            diagnostics=(diagnostic,),
+            quarantined_auxiliary_paths=tuple(target for _, target in moved_auxiliary),
+        )
+
+    def _resolve_store_relative_path(self, relative_path: str | Path) -> Path:
+        raw = Path(relative_path)
+        if raw.is_absolute():
+            raise self._invalid_path(relative_path)
+        candidate = (self.root / raw).resolve()
+        if candidate == self.root or self.root not in candidate.parents:
+            raise self._invalid_path(relative_path)
+        return candidate
 
     def _quarantine_assume_locked(
         self,
@@ -437,16 +597,22 @@ class ArtifactStore:
         artifact_digest = hashlib.sha256(artifact_id.encode()).hexdigest()
         unit_name = f"{self.now().replace(':', '')}-{artifact_digest}"
         unit_root = quarantine_root.expanduser().resolve() / unit_name
-        quarantined_content = unit_root / "content" / manifest.relative_path
+        content_exists = content_path.is_file()
+        quarantined_content = (
+            unit_root / "content" / manifest.relative_path if content_exists else None
+        )
         quarantined_manifest = unit_root / "manifest.json"
         sidecar = unit_root / "QUARANTINE.json"
-        quarantined_content.parent.mkdir(parents=True, exist_ok=False)
+        (quarantined_content.parent if quarantined_content else unit_root).mkdir(
+            parents=True, exist_ok=False
+        )
         moved_content = False
         moved_manifest = False
         moved_auxiliary: list[tuple[Path, Path]] = []
         try:
-            os.replace(content_path, quarantined_content)
-            moved_content = True
+            if quarantined_content is not None:
+                os.replace(content_path, quarantined_content)
+                moved_content = True
             os.replace(manifest_path, quarantined_manifest)
             moved_manifest = True
             for auxiliary in auxiliary_paths:
@@ -467,9 +633,17 @@ class ArtifactStore:
                 {
                     "schema_version": 1,
                     "artifact_id": artifact_id,
+                    "binding_state": "VALID",
+                    "content_state": (
+                        "PRESENT" if content_exists else "MISSING_BEFORE_QUARANTINE"
+                    ),
                     "original_content_path": str(content_path),
                     "original_manifest_path": str(manifest_path),
-                    "content_sha256": hashlib.sha256(quarantined_content.read_bytes()).hexdigest(),
+                    "content_sha256": (
+                        hashlib.sha256(quarantined_content.read_bytes()).hexdigest()
+                        if quarantined_content is not None
+                        else None
+                    ),
                     "manifest_sha256": hashlib.sha256(
                         quarantined_manifest.read_bytes()
                     ).hexdigest(),
@@ -495,7 +669,7 @@ class ArtifactStore:
             if moved_manifest and quarantined_manifest.exists():
                 manifest_path.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(quarantined_manifest, manifest_path)
-            if moved_content and quarantined_content.exists():
+            if moved_content and quarantined_content is not None and quarantined_content.exists():
                 content_path.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(quarantined_content, content_path)
             raise

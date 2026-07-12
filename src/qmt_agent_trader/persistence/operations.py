@@ -387,7 +387,7 @@ class StorageOperations:
             raw.is_absolute()
             or invalid_single_file
             or root.resolve() not in source.parents
-            or not source.is_file()
+            or (not definition.governed and not source.is_file())
         ):
             raise StorageValidationError(
                 store_name="quarantine",
@@ -416,7 +416,11 @@ class StorageOperations:
                 auxiliary_paths=auxiliary_factory,
             )
             if receipt is not None:
-                return QuarantineReceipt(receipt.quarantined_content_path, receipt.sidecar_path)
+                primary = (
+                    receipt.quarantined_content_path
+                    or receipt.quarantined_manifest_path
+                )
+                return QuarantineReceipt(primary, receipt.sidecar_path)
         target_root = self.paths.quarantine_root / store
         target = (
             target_root
