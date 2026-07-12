@@ -6,11 +6,15 @@ import pytest
 
 from qmt_agent_trader.agent.errors import SandboxPathError, SandboxSecurityError
 from qmt_agent_trader.agent.sandbox import CodeSandbox
+from qmt_agent_trader.persistence.locks import LockManager
 
 
 @pytest.fixture
 def sandbox(tmp_path):
-    return CodeSandbox(generated_root=tmp_path / "generated")
+    return CodeSandbox(
+        generated_root=tmp_path / "generated",
+        lock_manager=LockManager(tmp_path / "locks"),
+    )
 
 
 def test_write_inside_sandbox(sandbox: CodeSandbox) -> None:
