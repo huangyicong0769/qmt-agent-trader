@@ -4,7 +4,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 
 import duckdb
 import pandas as pd
@@ -122,6 +122,30 @@ def test_path_and_string_resource_aliases_share_one_lock(tmp_path: Path) -> None
     assert manager.lock_path_for_resource(monkey_relative) == manager.lock_path_for_resource(
         "data.json"
     )
+
+
+def test_different_resources_can_hold_write_locks_concurrently(tmp_path: Path) -> None:
+    manager = LockManager(tmp_path / "locks", timeout_seconds=1)
+    first_entered = Event()
+    second_entered = Event()
+    release = Event()
+
+    def hold(resource: str, entered: Event) -> None:
+        with manager.resource_lock(resource):
+            entered.set()
+            release.wait(timeout=1)
+
+    first = Thread(target=hold, args=("first", first_entered))
+    second = Thread(target=hold, args=("second", second_entered))
+    first.start()
+    assert first_entered.wait(timeout=1)
+    second.start()
+    try:
+        assert second_entered.wait(timeout=0.2)
+    finally:
+        release.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
 
 
 def test_lock_timeout_is_mapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
