@@ -72,6 +72,15 @@ class LockManager:
             )
         maintenance_path = self.locks_root / "maintenance.active"
         with self._lock(self.locks_root / "writer-admission.lock", "admission"):
+            if maintenance_path.exists() and self._marker_is_active(maintenance_path):
+                raise StorageLockTimeoutError(
+                    store_name="locks",
+                    path=maintenance_path,
+                    operation="acquire_backup_lock",
+                    reason="storage maintenance is already active",
+                    recoverable=True,
+                    suggested_repair="retry after the active backup finishes",
+                )
             self._create_marker(
                 maintenance_path,
                 operation="backup",
@@ -86,9 +95,7 @@ class LockManager:
             maintenance_path.unlink(missing_ok=True)
 
     @contextmanager
-    def _writer_admission(
-        self, operation: str, resource: str | Path
-    ) -> Iterator[Path | None]:
+    def _writer_admission(self, operation: str, resource: str | Path) -> Iterator[Path | None]:
         if "backup" in self.active_lock_kinds:
             yield None
             return
@@ -100,7 +107,10 @@ class LockManager:
                 "admission",
                 error_kind=operation,
             ):
-                if not (self.locks_root / "maintenance.active").exists():
+                maintenance = self.locks_root / "maintenance.active"
+                if maintenance.exists() and not self._marker_is_active(maintenance):
+                    maintenance.unlink(missing_ok=True)
+                if not maintenance.exists():
                     marker = self._new_writer_marker(operation, resource)
             if marker is None:
                 if monotonic() >= deadline:

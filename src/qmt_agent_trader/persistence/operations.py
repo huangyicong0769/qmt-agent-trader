@@ -604,6 +604,7 @@ def _verify_versioned_json(
                     store.name, "IDENTITY_MISMATCH", "record identity does not match filename", path
                 )
             ]
+        _validate_current_payload(store.name, payload)
     except (
         OSError,
         UnicodeDecodeError,
@@ -614,6 +615,42 @@ def _verify_versioned_json(
     ) as exc:
         return [StorageDiagnostic(store.name, "INVALID_CONTENT", type(exc).__name__, path)]
     return []
+
+
+def _validate_current_payload(store_name: str, payload: dict[str, Any]) -> None:
+    if store_name == "factor_registry":
+        from qmt_agent_trader.factors.registry import _load_file_factor
+
+        identities = [_load_file_factor(item).factor_id for item in payload["items"]]
+    elif store_name == "strategy_registry":
+        from qmt_agent_trader.strategy.registry import _load_file_strategy
+
+        identities = [_load_file_strategy(item).strategy_id for item in payload["items"]]
+    else:
+        identities = []
+        model: Any = None
+        if store_name == "todos":
+            from qmt_agent_trader.agent.todos import TodoListRecord
+
+            model = TodoListRecord
+        elif store_name == "experiments":
+            from qmt_agent_trader.agent.schemas import ExperimentRecord
+
+            model = ExperimentRecord
+        elif store_name == "sessions":
+            from qmt_agent_trader.web.schemas import ChatSession
+
+            model = ChatSession
+        elif store_name == "universes":
+            from qmt_agent_trader.universe.registry import UniverseStoredRecord
+
+            model = UniverseStoredRecord
+        if model is not None:
+            model.model_validate(
+                {key: value for key, value in payload.items() if key != "content_hash"}
+            )
+    if len(identities) != len(set(identities)):
+        raise ValueError("registry item identities must be unique")
 
 
 def _record_identity(record_kind: str | None, payload: dict[str, Any]) -> str | None:

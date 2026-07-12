@@ -455,6 +455,31 @@ def test_verify_and_quarantine_share_versioned_record_hash_validation(
     assert receipt.path.exists()
 
 
+def test_verify_and_quarantine_share_versioned_record_model_validation(
+    operations: StorageOperations,
+) -> None:
+    repository = ChatSessionRepository(
+        operations.paths.sessions_root,
+        locks_root=operations.paths.locks_root,
+        quarantine_root=operations.paths.quarantine_root / "sessions",
+    )
+    repository.create(ChatSession(session_id="invalid-model"))
+    record = operations.paths.sessions_root / "invalid-model.json"
+    payload = json.loads(record.read_text())
+    payload["messages"] = "not-a-list"
+    payload["content_hash"] = repository.records._hash(
+        {key: value for key, value in payload.items() if key != "content_hash"}
+    )
+    record.write_text(json.dumps(payload))
+
+    verification = operations.verify()
+    assert any(
+        diagnostic.component == "sessions" and diagnostic.code == "INVALID_CONTENT"
+        for diagnostic in verification.diagnostics
+    )
+    assert operations.quarantine("sessions", record.name).path.exists()
+
+
 def test_quarantine_rejects_healthy_parquet(operations: StorageOperations) -> None:
     record = operations.paths.lake_root / "raw/healthy.parquet"
     record.parent.mkdir(parents=True)

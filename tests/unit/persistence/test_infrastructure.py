@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import socket
 from pathlib import Path
 from threading import Event, Thread
 
@@ -158,6 +159,28 @@ def test_different_resources_can_hold_write_locks_concurrently(tmp_path: Path) -
         release.set()
         first.join(timeout=1)
         second.join(timeout=1)
+
+
+def test_dead_local_maintenance_marker_is_recovered_before_writer_admission(
+    tmp_path: Path,
+) -> None:
+    manager = LockManager(tmp_path / "locks", timeout_seconds=0.1)
+    marker = manager.locks_root / "maintenance.active"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "pid": 999_999_999,
+                "host": socket.gethostname(),
+                "operation": "backup",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "resource": "all-authoritative-stores",
+            }
+        )
+    )
+
+    with manager.resource_lock("record"):
+        assert not marker.exists()
 
 
 def test_lock_timeout_is_mapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
