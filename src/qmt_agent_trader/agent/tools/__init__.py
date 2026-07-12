@@ -27,6 +27,7 @@ from qmt_agent_trader.agent.tools.todo_tools import build_todo_tools
 from qmt_agent_trader.agent.tools.universe_tools import build_universe_tools
 from qmt_agent_trader.core.config import Settings, get_settings
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
 from qmt_agent_trader.persistence.paths import PersistencePaths
@@ -53,6 +54,10 @@ def build_agent_registry(
         ),
         lock_manager=data_lake.lock_manager,
     )
+    if sb.artifact_store is None:
+        sb.artifact_store = artifact_store_for_root(
+            sb.generated_root, lock_manager=data_lake.lock_manager
+        )
     atomic_store = AtomicFileStore(data_lake.lock_manager)
     store = ExperimentStore(
         experiment_root.expanduser().resolve(),

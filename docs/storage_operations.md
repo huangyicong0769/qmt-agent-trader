@@ -34,8 +34,10 @@ configured `reports/cache` and transient `reports/tool_payloads` transport
 are also excluded; governed backtest/research reports and agent-generated code
 remain included through their exact composition roots. A
 `SUCCESS.json` marker bound to the manifest hash is written only after exact-set,
-contained-path, size, and hash verification. A failure raises
-`StorageBackupError` and removes staging and incomplete final data.
+contained-path, size, and hash verification. Copy, hash, or snapshot-validation
+failures raise `StorageBackupError`; lock contention remains a structured
+`StorageLockTimeoutError` or `StorageConflictError`. All failures remove staging
+and incomplete final data.
 
 All canonical filesystem and database writers enter the same mutation gate at
 `PersistencePaths.locks_root`; this includes governed artifacts, audit streams,
@@ -59,11 +61,13 @@ Recovery is deliberately manual in v1:
 5. Atomically select the staged root using the deployment's local procedure.
 
 Quarantine is never automatic for authoritative data. The command accepts only
-an exact catalog store and contained record path, takes the record lock before
-type-aware deep validation, rejects healthy Parquet/JSON/JSONL/YAML/code and
-governed artifacts, moves the requested bytes, and writes hash/size/path/time
-evidence. Evidence failure rolls the original bytes back. Tushare's existing repair command remains
-the owner of its specialized ledger history-reset protocol.
+an exact catalog store and contained record path and rejects healthy records.
+Ordinary records use their canonical resource lock. Governed artifacts use the
+artifact-root lock and move content plus manifest as one rollback-safe unit;
+an order plan also moves its corresponding governance event stream. The
+quarantine sidecar records hashes, paths, diagnostics, and time. Evidence
+publication failure rolls the complete unit back. Tushare's existing repair
+command remains the owner of its specialized ledger history-reset protocol.
 
 ## Lock order and limitations
 

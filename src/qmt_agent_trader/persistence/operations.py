@@ -19,6 +19,7 @@ import yaml
 
 from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
+from qmt_agent_trader.persistence.audit import AuditJsonlStore
 from qmt_agent_trader.persistence.catalog import StoreCatalog, StoreDefinition
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import (
@@ -227,7 +228,7 @@ class StorageOperations:
                 create_only=True,
             )
             return BackupReceipt(final, final / "manifest.json")
-        except StorageLockTimeoutError:
+        except (StorageLockTimeoutError, StorageConflictError):
             shutil.rmtree(staging, ignore_errors=True)
             if final.exists() and not (final / "SUCCESS.json").exists():
                 shutil.rmtree(final, ignore_errors=True)
@@ -513,6 +514,27 @@ class StorageOperations:
                 StorageDiagnostic(store.name, item.code, item.reason, path)
                 for item in verification.corruptions
             ]
+        if store.name == "audit" and path.suffix == ".jsonl":
+            audit_verification = AuditJsonlStore(path, self.atomic).verify()
+            diagnostics = [
+                StorageDiagnostic(
+                    store.name,
+                    "INVALID_CONTENT",
+                    item.reason,
+                    path,
+                )
+                for item in audit_verification.corruptions
+            ]
+            if audit_verification.tail_truncated:
+                diagnostics.append(
+                    StorageDiagnostic(
+                        store.name,
+                        "INCOMPLETE_TAIL",
+                        "incomplete final JSONL record",
+                        path,
+                    )
+                )
+            return diagnostics
         if store.governed:
             root = store.path
             relative = path.relative_to(root).as_posix()

@@ -213,6 +213,27 @@ def test_short_marker_write_leaves_no_marker(tmp_path: Path, monkeypatch) -> Non
     assert not list((manager.locks_root / "writers").glob("*.json"))
 
 
+def test_marker_directory_fsync_failure_leaves_no_marker(tmp_path: Path, monkeypatch) -> None:
+    manager = LockManager(tmp_path / "locks")
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("directory fsync failed")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr("qmt_agent_trader.persistence.locks.os.fsync", fail_directory_fsync)
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        with manager.resource_lock(tmp_path / "record.json"):
+            pass
+
+    assert not list((manager.locks_root / "writers").glob("*.json"))
+
+
 def test_lock_timeout_is_mapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manager = LockManager(tmp_path / "locks", timeout_seconds=0.01)
 
