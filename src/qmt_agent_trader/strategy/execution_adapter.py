@@ -109,6 +109,12 @@ class StrategyBacktestResult(BaseModel):
     suggested_repair: dict[str, object] = Field(default_factory=dict)
     unsupported_fields: list[str] = Field(default_factory=list)
     capability_issues: list[dict[str, object]] = Field(default_factory=list)
+    schema_version: str | None = None
+    equity_points: list[dict[str, object]] = Field(default_factory=list)
+    rebalance_points: list[dict[str, object]] = Field(default_factory=list)
+    trade_blotter: list[dict[str, object]] = Field(default_factory=list)
+    data_quality: dict[str, object] = Field(default_factory=dict)
+    cost_attribution: dict[str, object] = Field(default_factory=dict)
 
 
 def run_strategy_backtest(
@@ -265,7 +271,9 @@ def run_strategy_backtest(
         ),
         "trade_count": len(result.trades),
     }
+    canonical_evidence = _canonical_result_evidence(result_dict, metrics)
     report = {
+        "schema_version": "2.0",
         "run_id": run_id,
         "created_at": shanghai_now_iso(),
         "artifact_type": "strategy_backtest",
@@ -287,6 +295,7 @@ def run_strategy_backtest(
         "metrics": metrics,
         "leakage_report": leakage_report,
         "diagnostics": diagnostics,
+        **canonical_evidence,
         "payload": result_dict,
     }
     receipt = artifact_store_for_root(reports_dir, lock_manager=lake.lock_manager).create(
@@ -325,7 +334,32 @@ def run_strategy_backtest(
         missing_fields=dict(panel_metadata.get("missing_fields") or {}),
         warnings=warnings,
         adapter_limitations=adapter_limitations,
+        schema_version="2.0",
+        equity_points=canonical_evidence["equity_points"],
+        rebalance_points=canonical_evidence["rebalance_points"],
+        trade_blotter=canonical_evidence["trade_blotter"],
+        data_quality=canonical_evidence["data_quality"],
+        cost_attribution=canonical_evidence["cost_attribution"],
     )
+
+
+def _canonical_result_evidence(
+    result_dict: dict[str, Any],
+    metrics: dict[str, object],
+) -> dict[str, Any]:
+    return {
+        "equity_points": list(result_dict.get("equity_points") or []),
+        "rebalance_points": list(result_dict.get("rebalance_points") or []),
+        "trade_blotter": list(result_dict.get("trades") or []),
+        "data_quality": dict(result_dict.get("data_quality") or {}),
+        "cost_attribution": {
+            "explicit_cost": float(result_dict.get("total_explicit_cost") or 0.0),
+            "slippage_cost": float(result_dict.get("total_slippage_cost") or 0.0),
+            "same_trade_gross_return": metrics.get("same_trade_gross_return", 0.0),
+            "net_total_return": metrics.get("net_total_return", 0.0),
+            "cost_drag": metrics.get("cost_drag", 0.0),
+        },
+    }
 
 
 def _strategy_spec_from_registry(
