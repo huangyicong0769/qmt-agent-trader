@@ -1,3 +1,4 @@
+import hashlib
 import threading
 from pathlib import Path
 
@@ -269,6 +270,19 @@ def test_order_plan_event_truncated_tail_fails_closed(tmp_path) -> None:
     )
     assert not verification.healthy
     assert verification.tail_truncated
+
+
+def test_existing_empty_order_plan_event_stream_fails_closed(tmp_path: Path) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    save_order_plan(plan, artifact_store=store)
+    event_dir = tmp_path / ".events"
+    event_dir.mkdir()
+    event_path = event_dir / f"{hashlib.sha256(plan.order_plan_id.encode()).hexdigest()}.jsonl"
+    event_path.touch()
+
+    with pytest.raises(StorageCorruptError, match="ORPHAN_EVENT_STREAM"):
+        load_order_plan_events(plan.order_plan_id, artifact_store=store)
 
 
 def test_event_stream_without_order_plan_is_rejected(tmp_path) -> None:

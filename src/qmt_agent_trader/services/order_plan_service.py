@@ -152,7 +152,7 @@ def verify_bound_order_plan_event_stream_assume_locked(
     detected_id = next(iter(stream.order_plan_ids), None)
 
     if detected_id is None:
-        if path.exists() and path.stat().st_size > 0:
+        if path.exists():
             corruptions.append(
                 OrderPlanEventCorruption(
                     "ORPHAN_EVENT_STREAM",
@@ -286,10 +286,7 @@ def load_order_plan(
     order_plan_id = _normalize_order_plan_identifier(identifier, store=store)
     relative_path = f"{order_plan_id}.json"
     raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
-    try:
-        plan = OrderPlan.model_validate_json(raw)
-    except Exception:
-        raise
+    plan = OrderPlan.model_validate_json(raw)
     if plan.order_plan_id != order_plan_id:
         raise StorageValidationError(
             store_name="order_plans",

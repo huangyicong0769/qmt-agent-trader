@@ -119,6 +119,22 @@ def test_storage_verify_rejects_orphan_order_plan_event_stream(
     )
 
 
+def test_storage_verify_rejects_empty_order_plan_event_stream(
+    operations: StorageOperations,
+) -> None:
+    event_dir = operations.paths.order_plans_root / ".events"
+    event_dir.mkdir(parents=True)
+    (event_dir / "empty.jsonl").touch()
+
+    result = operations.verify(deep=True)
+
+    assert not result.healthy
+    assert any(
+        item.component == "order_plan_events" and item.code == "ORPHAN_EVENT_STREAM"
+        for item in result.diagnostics
+    )
+
+
 def test_storage_verify_does_not_report_order_plan_without_event_stream(
     operations: StorageOperations,
 ) -> None:

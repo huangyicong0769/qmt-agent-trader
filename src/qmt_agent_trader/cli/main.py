@@ -66,6 +66,7 @@ from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.operations import StorageOperations, as_json
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
+    OrderPlanEvent,
     append_order_plan_event,
     build_sample_paper_order_plan,
     load_order_plan,
@@ -966,6 +967,7 @@ def trade_risk_check(plan: Annotated[str, typer.Option("--plan")]) -> None:
     order_plan = _load_plan_or_error(plan)
     plans_root = PersistencePaths.from_settings(_settings()).order_plans_root
     artifact_store = _artifact_store(plans_root)
+    _load_plan_events_or_error(order_plan.order_plan_id, artifact_store=artifact_store)
     result = run_order_plan_risk_checks(order_plan)
     payload = {
         "plan": plan,
@@ -989,7 +991,7 @@ def trade_paper(plan: Annotated[str, typer.Option("--plan")]) -> None:
     order_plan = _load_plan_or_error(plan)
     plans_root = PersistencePaths.from_settings(_settings()).order_plans_root
     artifact_store = _artifact_store(plans_root)
-    event_history = load_order_plan_events(
+    event_history = _load_plan_events_or_error(
         order_plan.order_plan_id,
         artifact_store=artifact_store,
     )
@@ -1112,6 +1114,17 @@ def _load_plan_or_error(identifier: str) -> OrderPlan:
             identifier,
             artifact_store=_artifact_store(plans_root),
         )
+    except (StorageError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _load_plan_events_or_error(
+    order_plan_id: str,
+    *,
+    artifact_store: ArtifactStore,
+) -> list[OrderPlanEvent]:
+    try:
+        return load_order_plan_events(order_plan_id, artifact_store=artifact_store)
     except (StorageError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 

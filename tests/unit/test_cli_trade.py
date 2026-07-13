@@ -39,7 +39,7 @@ def test_trade_risk_check_reports_missing_plan_as_bad_parameter(
 
     result = runner.invoke(app, ["trade", "risk-check", "--plan", "missing"])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert "missing" in result.output.lower()
     assert "traceback" not in result.output.lower()
 
@@ -72,6 +72,35 @@ def test_trade_risk_check_reports_tampered_plan_without_side_effects(
 
     assert result.exit_code == 2
     assert "hash_mismatch" in result.output.lower()
+    assert "traceback" not in result.output.lower()
+
+
+def test_trade_risk_check_rejects_corrupt_event_history_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = _configure_project(monkeypatch, tmp_path)
+    paths = PersistencePaths.from_settings(settings)
+    store = _artifact_store(paths.order_plans_root)
+    plan = build_sample_paper_order_plan("s1")
+    save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="PLAN_CREATED",
+        actor="test",
+        artifact_store=store,
+    )
+    event_path = next((paths.order_plans_root / ".events").glob("*.jsonl"))
+    event_path.write_bytes(event_path.read_bytes() + b'{"broken"')
+    monkeypatch.setattr("qmt_agent_trader.cli.main.run_order_plan_risk_checks", _fail_if_called)
+    monkeypatch.setattr("qmt_agent_trader.cli.main.append_order_plan_event", _fail_if_called)
+    monkeypatch.setattr("qmt_agent_trader.cli.main._audit_logger", _fail_if_called)
+    monkeypatch.setattr("typer.rich_utils.MAX_WIDTH", 2000)
+
+    result = runner.invoke(app, ["trade", "risk-check", "--plan", plan.order_plan_id])
+
+    assert result.exit_code == 2
+    assert "truncated tail" in result.output.lower()
     assert "traceback" not in result.output.lower()
 
 
