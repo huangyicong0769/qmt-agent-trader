@@ -1,4 +1,5 @@
 import threading
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -6,7 +7,7 @@ from pydantic import ValidationError
 from qmt_agent_trader.broker.order import Order
 from qmt_agent_trader.broker.order_plan import OrderPlan, OrderPlanApproval, RiskChecks
 from qmt_agent_trader.core.types import ApprovalStatus, OrderType, Side
-from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
+from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.errors import (
     StorageConflictError,
     StorageCorruptError,
@@ -70,6 +71,45 @@ def test_order_plan_save_and_load(tmp_path) -> None:
     assert loaded.order_plan_id == plan.order_plan_id
     assert loaded.plan_hash == plan.plan_hash
     assert len(list((tmp_path / ".manifests").glob("*.json"))) == 1
+
+
+def test_load_order_plan_accepts_relative_filename(tmp_path: Path) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    path = save_order_plan(plan, artifact_store=store)
+
+    loaded = load_order_plan(path.name, artifact_store=store)
+
+    assert loaded.order_plan_id == plan.order_plan_id
+
+
+@pytest.mark.parametrize("identifier", ["plan.yaml", "", "."])
+def test_load_order_plan_rejects_invalid_identifier(
+    tmp_path: Path,
+    identifier: str,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(StorageValidationError, match="identifier"):
+        load_order_plan(identifier, artifact_store=store)
+
+
+def test_load_order_plan_identity_mismatch_is_structured(tmp_path: Path) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    alias = "op_alias"
+    store.create(
+        f"{alias}.json",
+        plan.model_dump_json(indent=2).encode("utf-8"),
+        metadata=ArtifactMetadata(
+            artifact_id=alias,
+            artifact_type="order_plan",
+            producer="tests.unit.test_order_plan",
+        ),
+    )
+
+    with pytest.raises(StorageValidationError, match="does not match repository path"):
+        load_order_plan(alias, artifact_store=store)
 
 
 def test_order_plan_is_create_only_and_verified_before_execution(tmp_path) -> None:
@@ -141,7 +181,7 @@ def test_order_plan_path_cannot_select_foreign_artifact_root(tmp_path) -> None:
     foreign.parent.mkdir()
     foreign.write_text("{}")
 
-    with pytest.raises(StorageValidationError, match="outside the artifact store root"):
+    with pytest.raises(StorageValidationError, match="outside the artifact root"):
         load_order_plan(str(foreign), artifact_store=_store(tmp_path / "plans"))
 
 

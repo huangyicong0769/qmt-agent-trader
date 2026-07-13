@@ -229,25 +229,53 @@ def save_order_plan(
     return receipt.path
 
 
-def load_order_plan(
-    identifier: str,
+def _normalize_order_plan_identifier(
+    identifier: str | Path,
     *,
-    artifact_store: ArtifactStore,
-) -> OrderPlan:
-    path = Path(identifier)
-    store = artifact_store
-    if path.is_absolute() or path.parent != Path("."):
-        selected = path.expanduser().resolve()
-        if selected.parent != store.root:
+    store: ArtifactStore,
+) -> str:
+    raw_text = str(identifier).strip()
+    raw = Path(raw_text)
+
+    if raw_text in {"", "."}:
+        raise StorageValidationError(
+            store_name="order_plans",
+            path=store.root,
+            operation="resolve",
+            reason="order plan identifier is empty or invalid",
+        )
+
+    if raw.is_absolute() or raw.parent != Path("."):
+        selected = raw.expanduser().resolve()
+        if selected.parent != store.root or selected.suffix != ".json":
             raise StorageValidationError(
                 store_name="order_plans",
                 path=selected,
-                operation="load",
-                reason="order plan path is outside the artifact store root",
+                operation="resolve",
+                reason=("order plan identifier is outside the artifact root or has invalid suffix"),
             )
-        order_plan_id = path.stem
-    else:
-        order_plan_id = identifier
+        return selected.stem
+
+    if raw.suffix:
+        if raw.suffix != ".json":
+            raise StorageValidationError(
+                store_name="order_plans",
+                path=store.root / raw,
+                operation="resolve",
+                reason="order plan identifier has invalid suffix",
+            )
+        return raw.stem
+
+    return raw.name
+
+
+def load_order_plan(
+    identifier: str | Path,
+    *,
+    artifact_store: ArtifactStore,
+) -> OrderPlan:
+    store = artifact_store
+    order_plan_id = _normalize_order_plan_identifier(identifier, store=store)
     relative_path = f"{order_plan_id}.json"
     raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
     try:
@@ -255,7 +283,12 @@ def load_order_plan(
     except Exception:
         raise
     if plan.order_plan_id != order_plan_id:
-        raise ValueError("order plan id does not match repository path")
+        raise StorageValidationError(
+            store_name="order_plans",
+            path=store.path_for(relative_path),
+            operation="read",
+            reason="order plan id does not match repository path",
+        )
     return plan
 
 
