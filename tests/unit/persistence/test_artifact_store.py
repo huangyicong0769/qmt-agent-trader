@@ -82,6 +82,49 @@ def test_same_artifact_id_or_target_name_cannot_overwrite(store: ArtifactStore) 
     assert store.path_for("reports/run_1.json").read_bytes() == b"one"
 
 
+def test_create_rejects_path_still_owned_by_missing_artifact(
+    store: ArtifactStore,
+) -> None:
+    first = store.create(
+        "reports/shared.json",
+        b"first",
+        metadata=_metadata("first"),
+    )
+    first.path.unlink()
+
+    with pytest.raises(StorageConflictError, match="already bound"):
+        store.create(
+            "reports/shared.json",
+            b"second",
+            metadata=_metadata("second"),
+        )
+
+    assert first.manifest_path.exists()
+    assert not store.manifest_path_for("second").exists()
+
+
+def test_create_respects_recoverable_invalid_manifest_path_owner(
+    store: ArtifactStore,
+) -> None:
+    first = store.create(
+        "reports/shared.json",
+        b"first",
+        metadata=_metadata("first"),
+    )
+    first.path.unlink()
+
+    payload = json.loads(first.manifest_path.read_text())
+    payload["byte_length"] = "invalid"
+    first.manifest_path.write_text(json.dumps(payload))
+
+    with pytest.raises(StorageConflictError, match="already bound"):
+        store.create(
+            "reports/shared.json",
+            b"second",
+            metadata=_metadata("second"),
+        )
+
+
 @pytest.mark.parametrize("relative_path", ["../escape.json", "/tmp/escape.json", "a/../../x"])
 def test_create_rejects_path_traversal(
     store: ArtifactStore,

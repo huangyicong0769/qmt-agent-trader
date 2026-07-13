@@ -158,6 +158,14 @@ class ArtifactStore:
                     operation="create",
                     reason="artifact identity or target path already exists",
                 )
+            owner = self._artifact_path_owner_assume_locked(relative)
+            if owner is not None and owner != metadata.artifact_id:
+                raise StorageConflictError(
+                    store_name="artifacts",
+                    path=path,
+                    operation="create",
+                    reason=f"artifact path is already bound to {owner}",
+                )
             created_content = False
             try:
                 self.atomic_store.write_bytes_assume_locked(
@@ -459,6 +467,27 @@ class ArtifactStore:
     def _recover_manifest_binding_assume_locked(
         self, manifest_path: Path
     ) -> RecoveredManifestBinding | None:
+        binding = self._parse_recoverable_manifest_binding_assume_locked(manifest_path)
+        if binding is None:
+            return None
+
+        manifest_root = self.root / self._MANIFEST_DIRECTORY
+        for other_path in manifest_root.glob("*.json"):
+            if other_path == manifest_path:
+                continue
+            other_binding = self._parse_recoverable_manifest_binding_assume_locked(
+                other_path
+            )
+            if (
+                other_binding is not None
+                and other_binding.relative_path == binding.relative_path
+            ):
+                return None
+        return binding
+
+    def _parse_recoverable_manifest_binding_assume_locked(
+        self, manifest_path: Path
+    ) -> RecoveredManifestBinding | None:
         try:
             import json
 
@@ -474,22 +503,6 @@ class ArtifactStore:
             if self.manifest_path_for(artifact_id) != manifest_path:
                 return None
             canonical = self.path_for(relative_path).relative_to(self.root).as_posix()
-            manifest_root = self.root / self._MANIFEST_DIRECTORY
-            for other_path in manifest_root.glob("*.json"):
-                if other_path == manifest_path:
-                    continue
-                try:
-                    other_payload = json.loads(other_path.read_text(encoding="utf-8"))
-                    other_relative = other_payload.get("relative_path")
-                    if not isinstance(other_relative, str):
-                        continue
-                    other_canonical = (
-                        self.path_for(other_relative).relative_to(self.root).as_posix()
-                    )
-                except Exception:
-                    continue
-                if other_canonical == canonical:
-                    return None
         except Exception:
             return None
         return RecoveredManifestBinding(
@@ -498,6 +511,16 @@ class ArtifactStore:
             manifest_path=manifest_path,
             binding_state="RECOVERED_FROM_INVALID_MANIFEST",
         )
+
+    def _artifact_path_owner_assume_locked(self, relative_path: str) -> str | None:
+        manifest_root = self.root / self._MANIFEST_DIRECTORY
+        for manifest_path in manifest_root.glob("*.json"):
+            binding = self._parse_recoverable_manifest_binding_assume_locked(
+                manifest_path
+            )
+            if binding is not None and binding.relative_path == relative_path:
+                return binding.artifact_id
+        return None
 
     def _quarantine_invalid_manifest_assume_locked(
         self,
