@@ -1112,7 +1112,7 @@ def _load_plan_or_error(identifier: str) -> OrderPlan:
             identifier,
             artifact_store=_artifact_store(plans_root),
         )
-    except ValueError as exc:
+    except (StorageError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
 
