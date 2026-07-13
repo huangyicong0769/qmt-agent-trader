@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+from dataclasses import asdict
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import date, datetime
@@ -38,6 +39,9 @@ from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
+)
+from qmt_agent_trader.strategy.adapter_capabilities import (
+    validate_factor_rank_adapter_spec,
 )
 from qmt_agent_trader.strategy.loader import static_check_strategy_file
 from qmt_agent_trader.strategy.models import (
@@ -553,6 +557,27 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         strategy_id = strategy_id or strategy_spec.strategy_id
         if not factor_name and strategy_spec.factors:
             factor_name = strategy_spec.factors[0].factor_id
+    code_path = str(input_data.get("code_path") or "")
+    if strategy_spec is not None:
+        capability_issues = validate_factor_rank_adapter_spec(
+            strategy_spec,
+            code_path=code_path or None,
+        )
+        if capability_issues:
+            generated_code = any(issue.field == "code_path" for issue in capability_issues)
+            return {
+                "status": "BLOCKED",
+                "reason": (
+                    "GENERATED_STRATEGY_EXECUTION_NOT_IMPLEMENTED"
+                    if generated_code
+                    else "UNSUPPORTED_STRATEGY_SEMANTICS"
+                ),
+                "unsupported_fields": [issue.field for issue in capability_issues],
+                "capability_issues": [asdict(issue) for issue in capability_issues],
+                "execution_backend": "factor_rank_baseline_adapter",
+                "research_only": True,
+                "live_trading_allowed": False,
+            }
     start_date = input_data.get("start_date", "20200101")
     end_date = input_data.get("end_date", _today_yyyymmdd())
     initial_cash = float(input_data.get("initial_cash", 1_000_000))
@@ -587,12 +612,6 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     symbols_by_date = universe_state["symbols_by_date"]
     universe_info = universe_state["universe_info"]
     resolved_universe = universe_state["resolved_universe"]
-    code_path = str(input_data.get("code_path") or "")
-    if code_path:
-        issues = static_check_strategy_file(Path(code_path))
-        if issues:
-            return {"status": "STATIC_CHECK_FAILED", "issues": issues, "code_path": code_path}
-
     if not factor_name:
         return {
             "status": "INVALID_REQUEST",
