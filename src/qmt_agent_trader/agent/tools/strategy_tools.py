@@ -63,6 +63,7 @@ _cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
     "strategy_tool_cache", default=None
 )
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
+BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v2"
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
@@ -641,6 +642,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             factors=[{"factor_id": factor_name}],
             portfolio={"top_n": top_n},
         )
+    single_factor = strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
     config = StrategyBacktestConfig(
         strategy_id=strategy_spec.strategy_id,
         strategy_spec=strategy_spec,
@@ -653,6 +655,11 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
         slippage_bps=strategy_spec.execution.slippage_bps,
         execution_delay_days=strategy_spec.execution.execution_delay_days,
+        rebalance_frequency=strategy_spec.rebalance.frequency,
+        min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
+        rank_buffer=strategy_spec.rebalance.rank_buffer,
+        cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
+        lower_is_better=bool(single_factor and single_factor.ascending),
         symbols=symbols,
         symbols_by_date=symbols_by_date,
         universe_mode=cast(
@@ -2087,6 +2094,7 @@ def _backtest_cache_key(
     requested_factor_ids: list[str],
 ) -> str:
     payload = {
+        "schema_version": BACKTEST_CACHE_SCHEMA_VERSION,
         "config": config.model_dump(mode="json"),
         "factor_name": factor_name,
         "requested_factor_ids": requested_factor_ids,

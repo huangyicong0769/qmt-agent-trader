@@ -40,6 +40,10 @@ class FactorRankResearchConfig:
     initial_cash: float = 1_000_000.0
     rebalance_every_n_days: int = 1
     rebalance_frequency: RebalanceFrequency = "daily"
+    min_turnover_threshold: float = 0.0
+    rank_buffer: int = 0
+    cash_buffer_pct: float = 0.02
+    lower_is_better: bool = False
     symbols_by_date: dict[str, list[str]] | None = None
     base_cost_config: CostConfig = field(default_factory=CostConfig)
 

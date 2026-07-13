@@ -58,6 +58,11 @@ class StrategyBacktestConfig(BaseModel):
     slippage_bps: float = 5.0
     top_n: int = 20
     max_single_position_pct: float = 0.10
+    rebalance_frequency: Literal["daily", "weekly", "monthly"] = "daily"
+    min_turnover_threshold: float = Field(default=0.0, ge=0, le=1)
+    rank_buffer: int = Field(default=0, ge=0)
+    cash_buffer_pct: float = Field(default=0.02, ge=0, lt=1)
+    lower_is_better: bool = False
     symbols: list[str] = Field(default_factory=list)
     symbols_by_date: dict[str, list[str]] | None = None
     universe_mode: Literal["snapshot", "rolling"] = "snapshot"
@@ -203,6 +208,11 @@ def run_strategy_backtest(
                 top_n=config.top_n,
                 max_single_position_pct=config.max_single_position_pct,
                 initial_cash=config.initial_cash,
+                rebalance_frequency=config.rebalance_frequency,
+                min_turnover_threshold=config.min_turnover_threshold,
+                rank_buffer=config.rank_buffer,
+                cash_buffer_pct=config.cash_buffer_pct,
+                lower_is_better=config.lower_is_better,
                 symbols_by_date=config.symbols_by_date,
             ),
         )
