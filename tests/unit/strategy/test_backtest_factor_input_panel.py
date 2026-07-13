@@ -113,6 +113,7 @@ def test_backtest_composite_strategy_unions_all_factor_required_columns(tmp_path
     spec = StrategySpec(
         strategy_id="value_momentum",
         name="Value momentum",
+        kind="FACTOR_RANK_LONG_ONLY",
         factors=[
             FactorLeg(factor_id="pb_rank", weight=0.5),
             FactorLeg(factor_id="momentum_60d", weight=0.5),

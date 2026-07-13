@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -26,8 +27,8 @@ from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
-from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 from qmt_agent_trader.strategy.adapter_capabilities import validate_factor_rank_adapter_spec
+from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 from qmt_agent_trader.strategy.models import FactorLeg, StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
 
@@ -345,7 +346,7 @@ def run_strategy_backtest(
 
 def _canonical_result_evidence(
     result_dict: dict[str, Any],
-    metrics: dict[str, object],
+    metrics: Mapping[str, object],
 ) -> dict[str, Any]:
     return {
         "equity_points": list(result_dict.get("equity_points") or []),
@@ -515,23 +516,6 @@ def _blocked_backtest_from_panel_metadata(
         factor_registry=factor_registry,
         requested_factor_ids=requested_factor_ids,
     )
-
-
-def _abrupt_low_coverage_dates(
-    panel_metadata: dict[str, Any],
-    config: StrategyBacktestConfig,
-) -> list[str]:
-    ratios = panel_metadata.get("daily_cross_sectional_coverage")
-    references = panel_metadata.get("daily_reference_symbol_counts")
-    if not isinstance(ratios, dict) or not isinstance(references, dict):
-        return []
-    minimum_reference = max(config.min_reference_symbols_for_coverage_gate, config.top_n * 2)
-    return sorted(
-        str(day)
-        for day, ratio in ratios.items()
-        if float(references.get(day, 0.0)) >= minimum_reference
-        and float(ratio) < config.min_daily_cross_sectional_coverage
-    )
     panel_status = str(panel_metadata.get("status") or "")
     unresolved = _unresolved_fields_for_columns(panel_metadata, missing_columns)
     missing_fields = _missing_fields_for_columns(panel_metadata, missing_columns)
@@ -637,6 +621,23 @@ def _abrupt_low_coverage_dates(
                 }
             ],
         },
+    )
+
+
+def _abrupt_low_coverage_dates(
+    panel_metadata: dict[str, Any],
+    config: StrategyBacktestConfig,
+) -> list[str]:
+    ratios = panel_metadata.get("daily_cross_sectional_coverage")
+    references = panel_metadata.get("daily_reference_symbol_counts")
+    if not isinstance(ratios, dict) or not isinstance(references, dict):
+        return []
+    minimum_reference = max(config.min_reference_symbols_for_coverage_gate, config.top_n * 2)
+    return sorted(
+        str(day)
+        for day, ratio in ratios.items()
+        if float(references.get(day, 0.0)) >= minimum_reference
+        and float(ratio) < config.min_daily_cross_sectional_coverage
     )
 
 

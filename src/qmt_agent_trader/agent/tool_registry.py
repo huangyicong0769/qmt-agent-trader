@@ -444,7 +444,7 @@ def _run_with_process_timeout(
     timeout_seconds: int | float,
 ) -> dict[str, Any]:
     try:
-        process_context = get_context("fork")
+        process_context: Any = get_context("fork")
     except ValueError:
         return _run_with_thread_timeout_payload(tool, input_data, context, timeout_seconds)
     recv_conn, send_conn = process_context.Pipe(duplex=False)

@@ -1,5 +1,4 @@
 import pandas as pd
-
 from test_research_runner_valuation import (
     bars_for_symbols,
     run_zero_cost_top_one,

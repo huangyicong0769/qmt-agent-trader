@@ -6,9 +6,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from dataclasses import asdict
 from collections.abc import Callable
 from contextvars import ContextVar
+from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 from pprint import pformat
@@ -26,10 +26,10 @@ from qmt_agent_trader.agent.tool_result import (
     RecommendationStatus,
 )
 from qmt_agent_trader.agent.tools.base import AgentTool, tool
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
-from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
@@ -37,12 +37,12 @@ from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.paths import PersistencePaths
+from qmt_agent_trader.strategy.adapter_capabilities import (
+    validate_factor_rank_adapter_spec,
+)
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
-)
-from qmt_agent_trader.strategy.adapter_capabilities import (
-    validate_factor_rank_adapter_spec,
 )
 from qmt_agent_trader.strategy.loader import static_check_strategy_file
 from qmt_agent_trader.strategy.models import (

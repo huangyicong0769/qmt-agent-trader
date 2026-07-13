@@ -155,12 +155,20 @@ class UniverseResolver:
                 else None
             ),
             "pre_limit_selected_count": max(
-                (int(item["pre_limit_selected_count"]) for item in limit_metadata_by_date.values()),
+                (
+                    value
+                    if isinstance(value := item["pre_limit_selected_count"], int)
+                    else 0
+                    for item in limit_metadata_by_date.values()
+                ),
                 default=0,
             ),
             "selected_count": max(counts, default=0),
             "candidate_count": max(
-                (int(item.get("candidate_count", 0)) for item in diagnostics_by_date.values()),
+                (
+                    value if isinstance(value := item.get("candidate_count"), int) else 0
+                    for item in diagnostics_by_date.values()
+                ),
                 default=0,
             ),
         }
