@@ -237,6 +237,76 @@ def test_preserve_raw_reset_reports_and_retains_staging_when_rollback_fails(
     assert receipt.staging_path.exists()
 
 
+def test_preserve_raw_reset_keeps_unmoved_targets_when_forward_move_fails(
+    operations: StorageOperations,
+    monkeypatch,
+) -> None:
+    sessions = operations.paths.sessions_root / "legacy-session.json"
+    sessions.parent.mkdir(parents=True)
+    sessions.write_text("legacy-session")
+
+    reports = operations.paths.reports_root / "research/legacy-report.json"
+    reports.parent.mkdir(parents=True)
+    reports.write_text("legacy-report")
+
+    plan = operations.plan_reset(profile="preserve-raw")
+    real_replace = os.replace
+    forward_move_count = 0
+
+    def fail_second_forward_move(source, destination):
+        nonlocal forward_move_count
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if ".storage-reset-" not in str(source_path) and ".storage-reset-" in str(
+            destination_path
+        ):
+            forward_move_count += 1
+            if forward_move_count == 2:
+                raise OSError("injected forward move failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(
+        "qmt_agent_trader.persistence.operations.os.replace",
+        fail_second_forward_move,
+    )
+
+    receipt = operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert receipt.status == "rolled_back"
+    assert sessions.read_text() == "legacy-session"
+    assert reports.read_text() == "legacy-report"
+    assert not list(operations.paths.project_root.glob(".storage-reset-*.staging"))
+
+
+def test_preserve_raw_reset_does_not_delete_state_when_staging_creation_fails(
+    operations: StorageOperations,
+    monkeypatch,
+) -> None:
+    sessions = operations.paths.sessions_root / "legacy-session.json"
+    sessions.parent.mkdir(parents=True)
+    sessions.write_text("legacy-session")
+
+    reports = operations.paths.reports_root / "research/legacy-report.json"
+    reports.parent.mkdir(parents=True)
+    reports.write_text("legacy-report")
+
+    plan = operations.plan_reset(profile="preserve-raw")
+    real_mkdir = Path.mkdir
+
+    def fail_staging_mkdir(path, *args, **kwargs):
+        if path.name.startswith(".storage-reset-") and path.name.endswith(".staging"):
+            raise OSError("injected staging mkdir failure")
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_staging_mkdir)
+
+    receipt = operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert receipt.status == "rolled_back"
+    assert sessions.read_text() == "legacy-session"
+    assert reports.read_text() == "legacy-report"
+
+
 def test_inventory_covers_every_canonical_path(operations: StorageOperations) -> None:
     names = {item.name for item in operations.inventory()}
     assert names == {store.name for store in operations.catalog.stores}

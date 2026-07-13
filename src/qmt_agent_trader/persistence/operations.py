@@ -197,6 +197,11 @@ class StorageOperations:
             raw_before = self._snapshot_reset_files(
                 self.paths.lake_root / "raw", validate_parquet=True
             )
+            existing_before = {
+                target
+                for target in self._reset_targets()
+                if target.exists() or target.is_symlink()
+            }
             try:
                 staging.mkdir(parents=False, exist_ok=False)
                 for relative in plan.delete_paths:
@@ -273,7 +278,11 @@ class StorageOperations:
                 try:
                     if receipt_path is not None:
                         receipt_path.unlink(missing_ok=True)
-                    self._remove_new_reset_state()
+                    moved_sources = {source for source, _destination in moved}
+                    self._remove_new_reset_state(
+                        existing_before=existing_before,
+                        moved_sources=moved_sources,
+                    )
                     for source, destination in reversed(moved):
                         source.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(destination, source)
@@ -303,12 +312,18 @@ class StorageOperations:
                     reason=type(exc).__name__,
                 )
 
-    def _remove_new_reset_state(self) -> None:
+    def _remove_new_reset_state(
+        self,
+        *,
+        existing_before: set[Path],
+        moved_sources: set[Path],
+    ) -> None:
         for target in self._reset_targets():
-            if target.is_dir():
-                shutil.rmtree(target)
-            elif target.exists():
-                target.unlink()
+            was_moved = target in moved_sources
+            was_created_during_reset = target not in existing_before
+            if not was_moved and not was_created_during_reset:
+                continue
+            _remove_reset_path(target)
 
     def _reset_targets(self) -> tuple[Path, ...]:
         data = self.paths.data_root
@@ -938,6 +953,13 @@ class StorageOperations:
             StorageDiagnostic(store.name, item.code, item.reason, item.path, item.severity)
             for item in self._verify_file(path, deep=deep)
         ]
+
+
+def _remove_reset_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
 def _hash(path: Path) -> str:
