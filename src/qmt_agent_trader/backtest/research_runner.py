@@ -1,13 +1,21 @@
-"""Executable research runners for candidate strategy evidence."""
+"""Deterministic daily-ledger research runner for factor-rank strategies."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from qmt_agent_trader.backtest.commission import CostConfig, calculate_cost_breakdown
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
+from qmt_agent_trader.backtest.rebalance import (
+    RebalanceFrequency,
+    build_execution_schedule,
+    select_signal_dates,
+)
 from qmt_agent_trader.backtest.research_models import (
     FactorRankResearchResult,
     ResearchDataQuality,
@@ -31,12 +39,13 @@ class FactorRankResearchConfig:
     max_single_position_pct: float = 0.10
     initial_cash: float = 1_000_000.0
     rebalance_every_n_days: int = 1
+    rebalance_frequency: RebalanceFrequency = "daily"
     symbols_by_date: dict[str, list[str]] | None = None
     base_cost_config: CostConfig = field(default_factory=CostConfig)
 
 
 class FactorRankResearchRunner:
-    """Run a deterministic T+delay daily factor-rank portfolio simulation."""
+    """Run after-close signals at a delayed open and value every trading day."""
 
     def __init__(self, bars: pd.DataFrame, config: FactorRankResearchConfig) -> None:
         self.bars = _prepare_bars(bars)
@@ -57,16 +66,18 @@ class FactorRankResearchRunner:
         max_position = scenario.max_single_position_pct or self.config.max_single_position_pct
         if top_n <= 0:
             raise ValueError("top_n must be positive")
-        if max_position <= 0 or max_position > 1:
+        if not 0 < max_position <= 1:
             raise ValueError("max_single_position_pct must be in (0, 1]")
 
-        cash = self.config.initial_cash
-        positions: dict[str, int] = {}
-        trades: list[ResearchTrade] = []
-        equity_points: list[ResearchEquityPoint] = []
-        rebalance_points: list[ResearchRebalancePoint] = []
-        rejected_orders = 0
-        dates = sorted(self.bars["trade_date"].unique())
+        dates: tuple[date, ...] = tuple(sorted(self.bars["trade_date"].unique()))
+        signal_dates = select_signal_dates(dates, self.config.rebalance_frequency)
+        if self.config.rebalance_every_n_days > 1:
+            signal_dates = signal_dates[:: self.config.rebalance_every_n_days]
+        execution_schedule = build_execution_schedule(
+            dates,
+            signal_dates=signal_dates,
+            delay_days=scenario.execution_delay_days,
+        )
         factor_by_date = {
             trade_date: frame.dropna(subset=["factor_value"]).sort_values(
                 "factor_value", ascending=False
@@ -74,135 +85,159 @@ class FactorRankResearchRunner:
             for trade_date, frame in self.factor_frame.groupby("trade_date")
         }
 
-        for index, signal_date in enumerate(dates):
-            if index % self.config.rebalance_every_n_days != 0:
-                continue
-            execution_index = index + scenario.execution_delay_days
-            if execution_index >= len(dates):
-                continue
-            execution_date = dates[execution_index]
-            factors = factor_by_date.get(signal_date)
-            factors = self._filter_factors_for_universe(factors, signal_date)
-            if factors is None or factors.empty:
-                continue
-            day_bars = self._bars_on(execution_date)
-            if day_bars.empty:
-                continue
+        cash = self.config.initial_cash
+        positions: dict[str, int] = {}
+        trades: list[ResearchTrade] = []
+        equity_points: list[ResearchEquityPoint] = []
+        rebalance_points: list[ResearchRebalancePoint] = []
+        rejected_orders = 0
+        scaled_costs = _scaled_cost_config(
+            self.config.base_cost_config,
+            scenario.cost_multiplier,
+        )
 
-            equity_before = cash + self._mark_to_market(positions, day_bars)
-            targets = self._target_quantities(
-                factors=factors,
+        for trade_date in dates:
+            day_bars = self._bars_on(trade_date)
+            equity_before = cash + self._position_value_strict(
+                positions,
+                trade_date=trade_date,
                 day_bars=day_bars,
-                equity=equity_before,
-                top_n=top_n,
-                max_position=max_position,
-                scenario=scenario,
+                field="open",
+                error_code="MISSING_HELD_POSITION_BAR",
             )
-            symbols = sorted(set(positions) | set(targets))
-            orders = [
-                (symbol, targets.get(symbol, 0) - positions.get(symbol, 0))
-                for symbol in symbols
-                if targets.get(symbol, 0) - positions.get(symbol, 0) != 0
-            ]
-            orders.sort(key=lambda item: 0 if item[1] < 0 else 1)
-            traded_notional = 0.0
-            for symbol, delta in orders:
-                bar = self._bar_for_symbol(day_bars, symbol)
-                if bar is None:
-                    rejected_orders += 1
-                    continue
-                side = Side.BUY if delta > 0 else Side.SELL
-                quantity = abs(delta)
-                price = fixed_bps_slippage(
-                    float(bar["open"]),
-                    side,
-                    bps=scenario.slippage_bps,
+            signal_date = execution_schedule.get(trade_date)
+            if signal_date is not None:
+                factors = self._filter_factors_for_universe(
+                    factor_by_date.get(signal_date),
+                    signal_date,
                 )
-                notional = quantity * price
-                breakdown = calculate_cost_breakdown(
-                    notional,
-                    side,
-                    _scaled_cost_config(self.config.base_cost_config, scenario.cost_multiplier),
-                )
-                cost = breakdown.total
-                if side == Side.BUY and notional + cost > cash:
-                    affordable = int(cash / max(price, 1e-9) // 100 * 100)
-                    quantity = min(quantity, affordable)
-                    if quantity <= 0:
-                        rejected_orders += 1
-                        continue
-                    notional = quantity * price
-                    breakdown = calculate_cost_breakdown(
-                        notional,
-                        side,
-                        _scaled_cost_config(
-                            self.config.base_cost_config, scenario.cost_multiplier
-                        ),
+                if factors is not None and not factors.empty:
+                    targets = self._target_quantities(
+                        factors=factors,
+                        day_bars=day_bars,
+                        trade_date=trade_date,
+                        equity=equity_before,
+                        top_n=top_n,
+                        max_position=max_position,
+                        scenario=scenario,
                     )
-                    cost = breakdown.total
-                cash, positions = self._apply_trade(
-                    cash,
-                    positions,
-                    symbol=symbol,
-                    side=side,
-                    quantity=quantity,
-                    notional=notional,
-                    cost=cost,
-                )
-                traded_notional += notional
-                trades.append(
-                    ResearchTrade(
-                        signal_date=f"{signal_date:%Y-%m-%d}",
-                        trade_date=f"{execution_date:%Y-%m-%d}",
-                        symbol=symbol,
-                        side=side,
-                        quantity=quantity,
-                        reference_price=float(bar["open"]),
-                        price=price,
-                        notional=notional,
-                        commission=breakdown.commission,
-                        stamp_tax=breakdown.stamp_tax,
-                        transfer_fee=breakdown.transfer_fee,
-                        slippage_cost=abs(price - float(bar["open"])) * quantity,
-                        cost=cost,
+                    before_symbols = set(positions)
+                    orders = [
+                        (symbol, targets.get(symbol, 0) - positions.get(symbol, 0))
+                        for symbol in sorted(set(positions) | set(targets))
+                        if targets.get(symbol, 0) != positions.get(symbol, 0)
+                    ]
+                    orders.sort(key=lambda item: item[1] > 0)
+                    self._validate_order_prices(orders, trade_date, day_bars)
+                    gross_notional = 0.0
+                    for symbol, delta in orders:
+                        bar = self._bar_for_symbol(day_bars, symbol)
+                        assert bar is not None
+                        side = Side.BUY if delta > 0 else Side.SELL
+                        if not self._can_execute(bar, side):
+                            rejected_orders += 1
+                            continue
+                        quantity = abs(delta)
+                        reference_price = self._required_price(
+                            symbol=symbol,
+                            trade_date=trade_date,
+                            day_bars=day_bars,
+                            field="open",
+                            error_code="MISSING_EXECUTION_BAR",
+                        )
+                        price = fixed_bps_slippage(
+                            reference_price,
+                            side,
+                            bps=scenario.slippage_bps,
+                        )
+                        notional = quantity * price
+                        breakdown = calculate_cost_breakdown(notional, side, scaled_costs)
+                        if side == Side.BUY and notional + breakdown.total > cash:
+                            affordable = int(cash / max(price, 1e-9) // 100 * 100)
+                            quantity = min(quantity, affordable)
+                            if quantity <= 0:
+                                rejected_orders += 1
+                                continue
+                            notional = quantity * price
+                            breakdown = calculate_cost_breakdown(notional, side, scaled_costs)
+                        cash, positions = self._apply_trade(
+                            cash,
+                            positions,
+                            symbol=symbol,
+                            side=side,
+                            quantity=quantity,
+                            notional=notional,
+                            cost=breakdown.total,
+                        )
+                        gross_notional += notional
+                        trades.append(
+                            ResearchTrade(
+                                signal_date=f"{signal_date:%Y-%m-%d}",
+                                trade_date=f"{trade_date:%Y-%m-%d}",
+                                symbol=symbol,
+                                side=side,
+                                quantity=quantity,
+                                reference_price=reference_price,
+                                price=price,
+                                notional=notional,
+                                commission=breakdown.commission,
+                                stamp_tax=breakdown.stamp_tax,
+                                transfer_fee=breakdown.transfer_fee,
+                                slippage_cost=abs(price - reference_price) * quantity,
+                                cost=breakdown.total,
+                            )
+                        )
+                    after_symbols = set(positions)
+                    rebalance_points.append(
+                        ResearchRebalancePoint(
+                            signal_date=f"{signal_date:%Y-%m-%d}",
+                            trade_date=f"{trade_date:%Y-%m-%d}",
+                            equity_before=equity_before,
+                            gross_traded_notional=gross_notional,
+                            one_way_turnover=(
+                                gross_notional / (2.0 * equity_before)
+                                if equity_before > 0
+                                else 0.0
+                            ),
+                            selected_count=len(targets),
+                            retained_count=len(before_symbols & after_symbols),
+                            entered_count=len(after_symbols - before_symbols),
+                            exited_count=len(before_symbols - after_symbols),
+                        )
                     )
-                )
-            equity_after = cash + self._mark_to_market(positions, day_bars)
-            one_way_turnover = traded_notional / equity_before if equity_before > 0 else 0.0
+
+            market_value = self._position_value_strict(
+                positions,
+                trade_date=trade_date,
+                day_bars=day_bars,
+                field="close",
+                error_code="MISSING_HELD_POSITION_BAR",
+            )
             equity_points.append(
                 ResearchEquityPoint(
-                    trade_date=f"{execution_date:%Y-%m-%d}",
+                    trade_date=f"{trade_date:%Y-%m-%d}",
                     cash=cash,
-                    market_value=equity_after - cash,
-                    equity=equity_after,
+                    market_value=market_value,
+                    equity=cash + market_value,
                     stale_position_count=0,
                 )
             )
-            rebalance_points.append(
-                ResearchRebalancePoint(
-                    signal_date=f"{signal_date:%Y-%m-%d}",
-                    trade_date=f"{execution_date:%Y-%m-%d}",
-                    equity_before=equity_before,
-                    gross_traded_notional=traded_notional,
-                    one_way_turnover=one_way_turnover,
-                    selected_count=len(targets),
-                    retained_count=0,
-                    entered_count=len(targets),
-                    exited_count=0,
-                )
-            )
 
-        metrics = _metrics_from_equity(
-            [self.config.initial_cash, *(point.equity for point in equity_points)],
-            turnover_series=[point.one_way_turnover for point in rebalance_points],
-            diagnostic_pass=rejected_orders == 0,
-        )
+        equity_curve = [point.equity for point in equity_points]
+        turnover_series = [point.one_way_turnover for point in rebalance_points]
         return FactorRankResearchResult(
-            metrics=metrics,
+            metrics=_metrics_from_equity(
+                equity_curve,
+                turnover_series=turnover_series,
+                diagnostic_pass=rejected_orders == 0,
+            ),
             trades=tuple(trades),
             equity_points=tuple(equity_points),
             rebalance_points=tuple(rebalance_points),
-            data_quality=ResearchDataQuality(rejected_order_count=rejected_orders),
+            data_quality=ResearchDataQuality(
+                validated_valuation_dates=len(equity_points),
+                rejected_order_count=rejected_orders,
+            ),
             rejected_orders=rejected_orders,
         )
 
@@ -214,78 +249,134 @@ class FactorRankResearchRunner:
         factors: pd.DataFrame | None,
         signal_date: object,
     ) -> pd.DataFrame | None:
-        if factors is None or factors.empty or not self.config.symbols_by_date:
+        if factors is None or factors.empty:
             return factors
+        filtered = factors.copy()
+        signal_bars = self._bars_on(signal_date)
+        eligible = [
+            symbol
+            for symbol in filtered["symbol"].astype(str)
+            if (bar := self._bar_for_symbol(signal_bars, symbol)) is not None
+            and not bool(bar.get("suspended", False))
+            and not bool(bar.get("st", False))
+        ]
+        filtered = filtered[filtered["symbol"].astype(str).isin(eligible)]
+        if not self.config.symbols_by_date:
+            return filtered
         key = f"{signal_date:%Y%m%d}" if hasattr(signal_date, "strftime") else str(signal_date)
         symbols = self.config.symbols_by_date.get(key)
         if symbols is None:
-            return factors.iloc[0:0].copy()
-        return factors[factors["symbol"].astype(str).isin(symbols)].copy()
+            return filtered.iloc[0:0].copy()
+        return filtered[filtered["symbol"].astype(str).isin(symbols)].copy()
 
     @staticmethod
     def _bar_for_symbol(day_bars: pd.DataFrame, symbol: str) -> pd.Series | None:
-        if day_bars.empty:
+        if day_bars.empty or symbol not in day_bars.index:
             return None
-        if day_bars.index.name == "symbol":
-            if symbol not in day_bars.index:
-                return None
-            match = day_bars.loc[symbol]
-            row = match.iloc[0] if isinstance(match, pd.DataFrame) else match
-            return row if isinstance(row, pd.Series) else None
-        matches = day_bars[day_bars["symbol"] == symbol]
-        if matches.empty:
-            return None
-        row = matches.iloc[0]
+        match = day_bars.loc[symbol]
+        row = match.iloc[0] if isinstance(match, pd.DataFrame) else match
         return row if isinstance(row, pd.Series) else None
+
+    @staticmethod
+    def _can_execute(bar: pd.Series, side: Side) -> bool:
+        if bool(bar.get("suspended", False)):
+            return False
+        if side == Side.BUY:
+            return not bool(bar.get("st", False)) and not bool(bar.get("limit_up", False))
+        return not bool(bar.get("limit_down", False))
+
+    def _required_price(
+        self,
+        *,
+        symbol: str,
+        trade_date: date,
+        day_bars: pd.DataFrame,
+        field: str,
+        error_code: str,
+    ) -> float:
+        row = self._bar_for_symbol(day_bars, symbol)
+        if row is None:
+            raise BacktestDataIntegrityError(
+                code=error_code,
+                trade_date=f"{trade_date:%Y-%m-%d}",
+                symbols=(symbol,),
+                field=field,
+                message="required symbol-date bar is absent",
+            )
+        value = pd.to_numeric(row.get(field), errors="coerce")
+        if pd.isna(value) or not math.isfinite(float(value)) or float(value) <= 0:
+            raise BacktestDataIntegrityError(
+                code="INVALID_REQUIRED_PRICE",
+                trade_date=f"{trade_date:%Y-%m-%d}",
+                symbols=(symbol,),
+                field=field,
+                message=f"required {field} price is null, non-finite or non-positive",
+            )
+        return float(value)
+
+    def _position_value_strict(
+        self,
+        positions: dict[str, int],
+        *,
+        trade_date: date,
+        day_bars: pd.DataFrame,
+        field: str,
+        error_code: str,
+    ) -> float:
+        return sum(
+            quantity
+            * self._required_price(
+                symbol=symbol,
+                trade_date=trade_date,
+                day_bars=day_bars,
+                field=field,
+                error_code=error_code,
+            )
+            for symbol, quantity in positions.items()
+        )
+
+    def _validate_order_prices(
+        self,
+        orders: list[tuple[str, int]],
+        trade_date: date,
+        day_bars: pd.DataFrame,
+    ) -> None:
+        for symbol, _delta in orders:
+            self._required_price(
+                symbol=symbol,
+                trade_date=trade_date,
+                day_bars=day_bars,
+                field="open",
+                error_code="MISSING_EXECUTION_BAR",
+            )
 
     def _target_quantities(
         self,
         *,
         factors: pd.DataFrame,
         day_bars: pd.DataFrame,
+        trade_date: date,
         equity: float,
         top_n: int,
         max_position: float,
         scenario: SensitivityScenario,
     ) -> dict[str, int]:
-        selected_bars: list[tuple[str, pd.Series]] = []
-        for symbol in factors["symbol"].astype(str).tolist():
-            bar = self._bar_for_symbol(day_bars, symbol)
-            if bar is not None:
-                selected_bars.append((symbol, bar))
-            if len(selected_bars) >= top_n:
-                break
-        if not selected_bars:
+        selected = factors["symbol"].astype(str).tolist()[:top_n]
+        if not selected:
             return {}
-        weight = min(1.0 / len(selected_bars), max_position)
+        weight = min(1.0 / len(selected), max_position)
         targets: dict[str, int] = {}
-        for symbol, bar in selected_bars:
-            price = fixed_bps_slippage(
-                float(bar["open"]),
-                Side.BUY,
-                bps=scenario.slippage_bps,
+        for symbol in selected:
+            reference_price = self._required_price(
+                symbol=symbol,
+                trade_date=trade_date,
+                day_bars=day_bars,
+                field="open",
+                error_code="MISSING_EXECUTION_BAR",
             )
+            price = fixed_bps_slippage(reference_price, Side.BUY, bps=scenario.slippage_bps)
             targets[symbol] = int((equity * weight) / price // 100 * 100)
         return targets
-
-    @staticmethod
-    def _mark_to_market(positions: dict[str, int], day_bars: pd.DataFrame) -> float:
-        market_value = 0.0
-        for symbol, quantity in positions.items():
-            if day_bars.empty:
-                continue
-            if day_bars.index.name == "symbol":
-                if symbol not in day_bars.index:
-                    continue
-                match = day_bars.loc[symbol]
-                row = match.iloc[0] if isinstance(match, pd.DataFrame) else match
-            else:
-                matches = day_bars[day_bars["symbol"] == symbol]
-                if matches.empty:
-                    continue
-                row = matches.iloc[0]
-            market_value += quantity * float(row.close)
-        return market_value
 
     @staticmethod
     def _apply_trade(
@@ -316,6 +407,7 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"bars missing required columns: {sorted(missing)}")
     data = bars.copy()
+    data["symbol"] = data["symbol"].astype(str)
     data["trade_date"] = pd.to_datetime(data["trade_date"]).dt.date
     for column in ["high", "low", "volume", "amount", "turnover"]:
         if column not in data.columns:
@@ -323,7 +415,7 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     for column in ["suspended", "limit_up", "limit_down", "st"]:
         if column not in data.columns:
             data[column] = False
-    data = data[~data["suspended"] & ~data["st"]]
+        data[column] = data[column].fillna(False).astype(bool)
     return data.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
 
@@ -358,18 +450,18 @@ def _metrics_from_equity(
             max_drawdown = min(max_drawdown, value / peak - 1.0)
     return SensitivityMetrics(
         total_return=total_return,
-        sharpe=_simple_sharpe(returns),
+        sharpe=_annualized_sharpe(returns),
         max_drawdown=max_drawdown,
         turnover=sum(turnover_series) / len(turnover_series) if turnover_series else 0.0,
         diagnostic_pass=diagnostic_pass,
     )
 
 
-def _simple_sharpe(returns: list[float]) -> float:
+def _annualized_sharpe(returns: list[float]) -> float:
     if len(returns) < 2:
         return 0.0
-    series = pd.Series(returns)
+    series = pd.Series(returns, dtype="float64")
     volatility = float(series.std(ddof=0))
-    if volatility == 0:
+    if volatility == 0.0:
         return 0.0
-    return float(series.mean() / volatility)
+    return float(series.mean() / volatility * (252.0**0.5))
