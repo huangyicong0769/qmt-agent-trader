@@ -8,6 +8,13 @@ from pathlib import Path
 import pandas as pd
 
 from qmt_agent_trader.backtest.commission import CostConfig, calculate_cost
+from qmt_agent_trader.backtest.research_models import (
+    FactorRankResearchResult,
+    ResearchDataQuality,
+    ResearchEquityPoint,
+    ResearchRebalancePoint,
+    ResearchTrade,
+)
 from qmt_agent_trader.backtest.sensitivity import SensitivityMetrics, SensitivityScenario
 from qmt_agent_trader.backtest.slippage import fixed_bps_slippage
 from qmt_agent_trader.core.types import Side
@@ -26,36 +33,6 @@ class FactorRankResearchConfig:
     rebalance_every_n_days: int = 1
     symbols_by_date: dict[str, list[str]] | None = None
     base_cost_config: CostConfig = field(default_factory=CostConfig)
-
-
-@dataclass(frozen=True)
-class ResearchTrade:
-    signal_date: str
-    trade_date: str
-    symbol: str
-    side: Side
-    quantity: int
-    price: float
-    notional: float
-    cost: float
-
-
-@dataclass(frozen=True)
-class FactorRankResearchResult:
-    metrics: SensitivityMetrics
-    trades: tuple[ResearchTrade, ...]
-    equity_curve: tuple[float, ...]
-    turnover_series: tuple[float, ...]
-    rejected_orders: int = 0
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "metrics": self.metrics.as_dict(),
-            "trades": [trade.__dict__ for trade in self.trades],
-            "equity_curve": list(self.equity_curve),
-            "turnover_series": list(self.turnover_series),
-            "rejected_orders": self.rejected_orders,
-        }
 
 
 class FactorRankResearchRunner:
@@ -86,8 +63,8 @@ class FactorRankResearchRunner:
         cash = self.config.initial_cash
         positions: dict[str, int] = {}
         trades: list[ResearchTrade] = []
-        equity_curve = [cash]
-        turnover_series: list[float] = []
+        equity_points: list[ResearchEquityPoint] = []
+        rebalance_points: list[ResearchRebalancePoint] = []
         rejected_orders = 0
         dates = sorted(self.bars["trade_date"].unique())
         factor_by_date = {
@@ -178,25 +155,52 @@ class FactorRankResearchRunner:
                         symbol=symbol,
                         side=side,
                         quantity=quantity,
+                        reference_price=float(bar["open"]),
                         price=price,
                         notional=notional,
+                        commission=cost,
+                        stamp_tax=0.0,
+                        transfer_fee=0.0,
+                        slippage_cost=abs(price - float(bar["open"])) * quantity,
                         cost=cost,
                     )
                 )
             equity_after = cash + self._mark_to_market(positions, day_bars)
-            equity_curve.append(equity_after)
-            turnover_series.append(traded_notional / equity_before if equity_before > 0 else 0.0)
+            one_way_turnover = traded_notional / equity_before if equity_before > 0 else 0.0
+            equity_points.append(
+                ResearchEquityPoint(
+                    trade_date=f"{execution_date:%Y-%m-%d}",
+                    cash=cash,
+                    market_value=equity_after - cash,
+                    equity=equity_after,
+                    stale_position_count=0,
+                )
+            )
+            rebalance_points.append(
+                ResearchRebalancePoint(
+                    signal_date=f"{signal_date:%Y-%m-%d}",
+                    trade_date=f"{execution_date:%Y-%m-%d}",
+                    equity_before=equity_before,
+                    gross_traded_notional=traded_notional,
+                    one_way_turnover=one_way_turnover,
+                    selected_count=len(targets),
+                    retained_count=0,
+                    entered_count=len(targets),
+                    exited_count=0,
+                )
+            )
 
         metrics = _metrics_from_equity(
-            equity_curve,
-            turnover_series=turnover_series,
+            [self.config.initial_cash, *(point.equity for point in equity_points)],
+            turnover_series=[point.one_way_turnover for point in rebalance_points],
             diagnostic_pass=rejected_orders == 0,
         )
         return FactorRankResearchResult(
             metrics=metrics,
             trades=tuple(trades),
-            equity_curve=tuple(equity_curve),
-            turnover_series=tuple(turnover_series),
+            equity_points=tuple(equity_points),
+            rebalance_points=tuple(rebalance_points),
+            data_quality=ResearchDataQuality(rejected_order_count=rejected_orders),
             rejected_orders=rejected_orders,
         )
 
