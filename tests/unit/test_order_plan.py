@@ -94,6 +94,19 @@ def test_load_order_plan_rejects_invalid_identifier(
         load_order_plan(identifier, artifact_store=store)
 
 
+def test_load_order_plan_rejects_relative_identifier_with_directory_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    path = save_order_plan(plan, artifact_store=store)
+    monkeypatch.chdir(store.root)
+
+    with pytest.raises(StorageValidationError, match="identifier"):
+        load_order_plan(f"nested/../{path.name}", artifact_store=store)
+
+
 def test_load_order_plan_identity_mismatch_is_structured(tmp_path: Path) -> None:
     plan = make_plan()
     store = _store(tmp_path)

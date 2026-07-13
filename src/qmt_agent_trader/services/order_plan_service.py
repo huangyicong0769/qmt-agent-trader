@@ -245,7 +245,7 @@ def _normalize_order_plan_identifier(
             reason="order plan identifier is empty or invalid",
         )
 
-    if raw.is_absolute() or raw.parent != Path("."):
+    if raw.is_absolute():
         selected = raw.expanduser().resolve()
         if selected.parent != store.root or selected.suffix != ".json":
             raise StorageValidationError(
@@ -255,6 +255,14 @@ def _normalize_order_plan_identifier(
                 reason=("order plan identifier is outside the artifact root or has invalid suffix"),
             )
         return selected.stem
+
+    if raw.parent != Path("."):
+        raise StorageValidationError(
+            store_name="order_plans",
+            path=store.root / raw,
+            operation="resolve",
+            reason="order plan identifier must not contain relative directory components",
+        )
 
     if raw.suffix:
         if raw.suffix != ".json":
