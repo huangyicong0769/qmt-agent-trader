@@ -70,6 +70,17 @@ class OrderPlanEventVerification:
     events: tuple[OrderPlanEvent, ...]
 
 
+@dataclass(frozen=True)
+class BoundOrderPlanEventVerification:
+    stream: OrderPlanEventVerification
+    plan_verified: bool
+    corruptions: tuple[OrderPlanEventCorruption, ...]
+
+    @property
+    def healthy(self) -> bool:
+        return self.plan_verified and not self.corruptions
+
+
 def verify_order_plan_event_stream(
     path: Path,
     *,
@@ -123,6 +134,78 @@ def verify_order_plan_event_stream(
         event_count=len(events),
         order_plan_ids=order_plan_ids,
         events=tuple(events),
+    )
+
+
+def verify_bound_order_plan_event_stream_assume_locked(
+    *,
+    store: ArtifactStore,
+    path: Path,
+    expected_order_plan_id: str | None = None,
+) -> BoundOrderPlanEventVerification:
+    """Verify an event stream and its bound order-plan artifact under the store lock."""
+    stream = verify_order_plan_event_stream(
+        path,
+        expected_order_plan_id=expected_order_plan_id,
+    )
+    corruptions = list(stream.corruptions)
+    detected_id = next(iter(stream.order_plan_ids), None)
+
+    if detected_id is None:
+        if path.exists() and path.stat().st_size > 0:
+            corruptions.append(
+                OrderPlanEventCorruption(
+                    "ORPHAN_EVENT_STREAM",
+                    "event stream has no valid order_plan_id",
+                )
+            )
+        return BoundOrderPlanEventVerification(
+            stream=stream,
+            plan_verified=False,
+            corruptions=tuple(corruptions),
+        )
+
+    try:
+        verification = store._verify_assume_locked(
+            detected_id,
+            expected_relative_path=f"{detected_id}.json",
+        )
+    except StorageValidationError:
+        corruptions.append(
+            OrderPlanEventCorruption(
+                "MISSING_ORDER_PLAN",
+                "event stream references a missing or invalid order plan manifest",
+            )
+        )
+        return BoundOrderPlanEventVerification(
+            stream=stream,
+            plan_verified=False,
+            corruptions=tuple(corruptions),
+        )
+
+    if verification.code == "MISSING_ARTIFACT":
+        corruptions.append(
+            OrderPlanEventCorruption(
+                "MISSING_ORDER_PLAN",
+                "event stream references a missing order plan",
+            )
+        )
+        plan_verified = False
+    elif not verification.verified:
+        corruptions.append(
+            OrderPlanEventCorruption(
+                "INVALID_ORDER_PLAN",
+                "event stream references an invalid order plan",
+            )
+        )
+        plan_verified = False
+    else:
+        plan_verified = True
+
+    return BoundOrderPlanEventVerification(
+        stream=stream,
+        plan_verified=plan_verified,
+        corruptions=tuple(corruptions),
     )
 
 
@@ -228,10 +311,12 @@ def load_order_plan_events(
     with store.lock_manager.resource_lock(store._resource):
         if not path.exists():
             return []
-        verification = verify_order_plan_event_stream(
-            path, expected_order_plan_id=order_plan_id
+        verification = verify_bound_order_plan_event_stream_assume_locked(
+            store=store,
+            path=path,
+            expected_order_plan_id=order_plan_id,
         )
-        if verification.tail_truncated:
+        if verification.stream.tail_truncated:
             raise StorageCorruptError(
                 store_name="order_plan_events",
                 path=path,
@@ -245,9 +330,9 @@ def load_order_plan_events(
                 store_name="order_plan_events",
                 path=path,
                 operation="read",
-                reason=f"order plan event stream is corrupt: {reason}",
+                reason=f"order plan event stream is corrupt or unbound: {reason}",
             )
-        return list(verification.events)
+        return list(verification.stream.events)
 
 
 def _event_path(store: ArtifactStore, order_plan_id: str) -> Path:

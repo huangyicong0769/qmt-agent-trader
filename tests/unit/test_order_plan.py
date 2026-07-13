@@ -218,6 +218,44 @@ def test_order_plan_event_truncated_tail_fails_closed(tmp_path) -> None:
     assert verification.tail_truncated
 
 
+def test_event_stream_without_order_plan_is_rejected(tmp_path) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    content = save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="RISK_CHECKED",
+        actor="test",
+        artifact_store=store,
+    )
+
+    event_path = next((tmp_path / ".events").glob("*.jsonl"))
+    content.unlink()
+    store.manifest_path_for(plan.order_plan_id).unlink()
+
+    with pytest.raises(StorageCorruptError, match="order plan"):
+        load_order_plan_events(plan.order_plan_id, artifact_store=store)
+
+    assert event_path.exists()
+
+
+def test_event_stream_with_tampered_order_plan_is_rejected(tmp_path) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    content = save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="RISK_CHECKED",
+        actor="test",
+        artifact_store=store,
+    )
+
+    content.write_bytes(b"tampered")
+
+    with pytest.raises(StorageCorruptError, match="order plan"):
+        load_order_plan_events(plan.order_plan_id, artifact_store=store)
+
+
 def test_order_plan_event_verifier_rejects_duplicate_event_identity(tmp_path) -> None:
     plan = make_plan()
     store = _store(tmp_path)

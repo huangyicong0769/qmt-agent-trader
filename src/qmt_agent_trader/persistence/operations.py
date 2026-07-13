@@ -37,7 +37,10 @@ from qmt_agent_trader.persistence.initialization import storage_migrations
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.paths import PersistencePaths
-from qmt_agent_trader.services.order_plan_service import verify_order_plan_event_stream
+from qmt_agent_trader.services.order_plan_service import (
+    verify_bound_order_plan_event_stream_assume_locked,
+    verify_order_plan_event_stream,
+)
 
 
 @dataclass(frozen=True)
@@ -199,7 +202,10 @@ class StorageOperations:
             if not definition.path.exists():
                 return diagnostics
             for path in sorted(definition.path.glob("*.jsonl")):
-                verification = verify_order_plan_event_stream(path)
+                verification = verify_bound_order_plan_event_stream_assume_locked(
+                    store=artifact_store,
+                    path=path,
+                )
                 diagnostics.extend(
                     StorageDiagnostic(definition.name, item.code, item.reason, path)
                     for item in verification.corruptions

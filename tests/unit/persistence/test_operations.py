@@ -90,6 +90,52 @@ def test_verify_detects_corrupt_order_plan_event_stream(
     )
 
 
+def test_storage_verify_rejects_orphan_order_plan_event_stream(
+    operations: StorageOperations,
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    store = artifact_store_for_root(
+        operations.paths.order_plans_root,
+        lock_manager=operations.locks,
+    )
+    content = save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="RISK_CHECKED",
+        actor="test",
+        artifact_store=store,
+    )
+
+    content.unlink()
+    store.manifest_path_for(plan.order_plan_id).unlink()
+
+    result = operations.verify(deep=True)
+
+    assert not result.healthy
+    assert any(
+        item.component == "order_plan_events"
+        and item.code in {"MISSING_ORDER_PLAN", "ORPHAN_EVENT_STREAM"}
+        for item in result.diagnostics
+    )
+
+
+def test_storage_verify_does_not_report_order_plan_without_event_stream(
+    operations: StorageOperations,
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    store = artifact_store_for_root(
+        operations.paths.order_plans_root,
+        lock_manager=operations.locks,
+    )
+    save_order_plan(plan, artifact_store=store)
+
+    result = operations.verify(deep=True)
+
+    assert not any(
+        item.component == "order_plan_events" for item in result.diagnostics
+    )
+
+
 def test_verify_reports_immutable_pending_migrations_without_mutation(
     operations: StorageOperations,
 ) -> None:
@@ -700,14 +746,22 @@ def test_event_store_verify_and_append_share_one_root_snapshot(
     verify_results = []
     from qmt_agent_trader.persistence import operations as operations_module
 
-    original_verify = operations_module.verify_order_plan_event_stream
+    original_verify = operations_module.verify_bound_order_plan_event_stream_assume_locked
 
-    def paused_verify(path, *, expected_order_plan_id=None):
+    def paused_verify(*, store, path, expected_order_plan_id=None):
         entered.set()
         assert release.wait(timeout=5)
-        return original_verify(path, expected_order_plan_id=expected_order_plan_id)
+        return original_verify(
+            store=store,
+            path=path,
+            expected_order_plan_id=expected_order_plan_id,
+        )
 
-    monkeypatch.setattr(operations_module, "verify_order_plan_event_stream", paused_verify)
+    monkeypatch.setattr(
+        operations_module,
+        "verify_bound_order_plan_event_stream_assume_locked",
+        paused_verify,
+    )
     verify_thread = threading.Thread(
         target=lambda: verify_results.append(operations.verify(deep=True))
     )
