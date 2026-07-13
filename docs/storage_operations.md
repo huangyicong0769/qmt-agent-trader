@@ -26,12 +26,15 @@ bound to missing or tampered plans are unhealthy.
 
 Event-stream diagnostics distinguish the operator action required:
 
-- `ORPHAN_EVENT_STREAM`: the stream exists but has no valid event identity or no
-  valid bound plan. Append is refused; `storage quarantine order_plan_events <file>`
-  is allowed.
+- `ORPHAN_EVENT_STREAM`: the stream has no valid event identity, including an empty
+  stream. Append is refused; `storage quarantine order_plan_events <file>` is allowed.
 - `INVALID_ORDER_PLAN`: the stream points to an artifact whose envelope,
   `OrderPlan` payload, identity, or `plan_hash` is invalid.
 - `MISSING_ORDER_PLAN`: the stream points to a missing manifest or content file.
+
+Once verification detects a valid event identity, plan-binding failures are classified
+exclusively as `MISSING_ORDER_PLAN` or `INVALID_ORDER_PLAN`; they do not overlap with
+`ORPHAN_EVENT_STREAM`.
 
 For a failed first JSONL write, rollback restores the stream's prior absence.
 Directory-fsync failure after a successful append is different: durability is

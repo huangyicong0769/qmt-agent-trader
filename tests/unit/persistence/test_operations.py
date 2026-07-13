@@ -829,6 +829,62 @@ def test_event_only_quarantine_uses_order_plan_artifact_root_lock(
     assert f"artifact-store:{operations.paths.order_plans_root.resolve()}" in resources
 
 
+def test_event_only_quarantine_sidecar_failure_restores_bound_stream(
+    operations: StorageOperations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    store = artifact_store_for_root(
+        operations.paths.order_plans_root,
+        lock_manager=operations.locks,
+    )
+    content = save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="PLAN_CREATED",
+        actor="test",
+        artifact_store=store,
+    )
+    event_path = next(
+        (operations.paths.order_plans_root / ".events").glob("*.jsonl")
+    )
+    original_stream = event_path.read_bytes()
+    content.unlink()
+
+    resources: list[str] = []
+    original_lock = operations.locks.resource_lock
+
+    @contextmanager
+    def recording_lock(resource):
+        resources.append(str(resource))
+        with original_lock(resource) as lock:
+            yield lock
+
+    attempted_sidecars: list[tuple[Path, dict]] = []
+
+    def fail_sidecar(path: Path, payload: dict, **kwargs) -> None:
+        attempted_sidecars.append((path, payload))
+        raise OSError("event sidecar publish failed")
+
+    monkeypatch.setattr(operations.locks, "resource_lock", recording_lock)
+    monkeypatch.setattr(operations.atomic, "write_json_assume_locked", fail_sidecar)
+
+    with pytest.raises(OSError, match="event sidecar publish failed"):
+        operations.quarantine("order_plan_events", event_path.name)
+
+    assert event_path.read_bytes() == original_stream
+    assert len(attempted_sidecars) == 1
+    sidecar_path, payload = attempted_sidecars[0]
+    assert [item["code"] for item in payload["diagnostics"]] == ["MISSING_ORDER_PLAN"]
+    assert payload["diagnostics"][0]["path"] == str(event_path)
+    assert not sidecar_path.exists()
+    assert not sidecar_path.with_suffix("").exists()
+    quarantine_root = operations.paths.quarantine_root / "order_plan_events"
+    assert not quarantine_root.exists() or not any(quarantine_root.iterdir())
+    assert resources == [
+        f"artifact-store:{operations.paths.order_plans_root.resolve()}"
+    ]
+
+
 def test_quarantine_accepts_structurally_valid_orphan_event_stream(
     operations: StorageOperations,
 ) -> None:
