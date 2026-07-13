@@ -861,9 +861,28 @@ def test_locks_report_maps_catalog_resources_and_marks_unknown(
 
     report = {item["path"]: item for item in operations.locks_report()}
 
-    assert report[str(known_path)]["known_resource"] == "sessions"
+    assert report[str(known_path)]["known_resources"] == ("sessions",)
     assert report[str(known_path)]["resource"] == known.lock_resource
-    assert report[str(unknown_path)]["known_resource"] is None
+    assert report[str(unknown_path)]["known_resources"] == ()
     assert report[str(unknown_path)]["resource_status"] == "unknown"
     assert report[str(known_path)]["active"] is False
     assert "stale" not in report[str(known_path)]
+
+
+def test_locks_report_preserves_all_catalog_owners_of_shared_resource(
+    operations: StorageOperations,
+) -> None:
+    order_plans = operations.catalog.by_name("order_plans")
+    order_plan_events = operations.catalog.by_name("order_plan_events")
+    assert order_plans.lock_resource == order_plan_events.lock_resource
+    lock_path = operations.locks.lock_path_for_resource(order_plans.lock_resource)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+
+    report = {item["path"]: item for item in operations.locks_report()}
+
+    assert report[str(lock_path)]["resource"] == order_plans.lock_resource
+    assert report[str(lock_path)]["known_resources"] == (
+        "order_plans",
+        "order_plan_events",
+    )

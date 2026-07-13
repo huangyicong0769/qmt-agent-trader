@@ -343,22 +343,20 @@ class StorageOperations:
 
     def locks_report(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        known = {
-            self.locks.lock_path_for_resource(store.lock_resource): (
-                store.name,
-                store.lock_resource,
-            )
-            for store in self.catalog.stores
-        }
+        known: dict[Path, tuple[tuple[str, ...], str]] = {}
+        for store in self.catalog.stores:
+            lock_path = self.locks.lock_path_for_resource(store.lock_resource)
+            names, _ = known.get(lock_path, ((), store.lock_resource))
+            known[lock_path] = ((*names, store.name), store.lock_resource)
         database_digest = hashlib.sha256(
             str(self.paths.control_db_path.resolve()).encode()
         ).hexdigest()
         known[self.paths.locks_root / f"database-{database_digest}.lock"] = (
-            "control_db",
+            ("control_db",),
             str(self.paths.control_db_path.resolve()),
         )
         known[self.paths.locks_root / "writer-admission.lock"] = (
-            "writer_admission",
+            ("writer_admission",),
             "writer-admission",
         )
         if not self.paths.locks_root.exists():
@@ -372,8 +370,8 @@ class StorageOperations:
                     "resource": (
                         known_metadata[1] if known_metadata is not None else path.stem
                     ),
-                    "known_resource": (
-                        known_metadata[0] if known_metadata is not None else None
+                    "known_resources": (
+                        known_metadata[0] if known_metadata is not None else ()
                     ),
                     "resource_status": (
                         "known" if known_metadata is not None else "unknown"
@@ -655,7 +653,7 @@ def _marker_report(path: Path, *, marker_type: str) -> dict[str, Any]:
         return {
             "path": str(path),
             "resource": payload.get("resource"),
-            "known_resource": None,
+            "known_resources": (),
             "resource_status": marker_type,
             "active": active,
             "pid": pid,
@@ -667,7 +665,7 @@ def _marker_report(path: Path, *, marker_type: str) -> dict[str, Any]:
         return {
             "path": str(path),
             "resource": None,
-            "known_resource": None,
+            "known_resources": (),
             "resource_status": f"invalid_{marker_type}_marker",
             "active": None,
             "error": type(exc).__name__,
