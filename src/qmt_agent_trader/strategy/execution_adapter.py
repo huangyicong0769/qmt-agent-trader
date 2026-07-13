@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,6 +27,7 @@ from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
+from qmt_agent_trader.strategy.adapter_capabilities import validate_factor_rank_adapter_spec
 from qmt_agent_trader.strategy.models import FactorLeg, StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
 
@@ -103,6 +105,8 @@ class StrategyBacktestResult(BaseModel):
     missing_fields: dict[str, object] = Field(default_factory=dict)
     next_repair_tool: str | None = None
     suggested_repair: dict[str, object] = Field(default_factory=dict)
+    unsupported_fields: list[str] = Field(default_factory=list)
+    capability_issues: list[dict[str, object]] = Field(default_factory=list)
 
 
 def run_strategy_backtest(
@@ -114,6 +118,18 @@ def run_strategy_backtest(
 ) -> StrategyBacktestResult:
     run_id = new_id("research")
     spec = config.strategy_spec or _strategy_spec_from_registry(registry, config.strategy_id)
+    if spec is not None:
+        capability_issues = validate_factor_rank_adapter_spec(spec)
+        if capability_issues:
+            return StrategyBacktestResult(
+                run_id=run_id,
+                strategy_id=config.strategy_id,
+                strategy_version=spec.version,
+                status="BLOCKED",
+                reason="UNSUPPORTED_STRATEGY_SEMANTICS",
+                unsupported_fields=[issue.field for issue in capability_issues],
+                capability_issues=[asdict(issue) for issue in capability_issues],
+            )
     factor_name = config.factor_name or _first_factor_id(spec)
     requested_factor_ids = _factor_ids(spec) or ([factor_name] if factor_name else [])
     composite_method = _composite_method(spec)
