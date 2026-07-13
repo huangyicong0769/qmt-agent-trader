@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -165,6 +166,65 @@ def test_verify_rejects_manifest_identity_or_relative_path_substitution(
     manifest_path.write_text(__import__("json").dumps(payload), encoding="utf-8")
     with pytest.raises(StorageValidationError, match="relative path"):
         store.verify("run_1", expected_relative_path="reports/other.json")
+
+
+def test_manifest_rejects_unknown_schema_version(store: ArtifactStore) -> None:
+    receipt = store.create("reports/run.json", b"payload", metadata=_metadata("run"))
+    payload = json.loads(receipt.manifest_path.read_text())
+    payload["schema_version"] = 2
+    receipt.manifest_path.write_text(json.dumps(payload))
+
+    diagnostics = store.diagnose()
+
+    assert any(item.code == "INVALID_MANIFEST" for item in diagnostics)
+    with pytest.raises(StorageValidationError):
+        store.read_verified("run", expected_relative_path="reports/run.json")
+
+
+def test_manifest_byte_length_mismatch_is_not_verified(store: ArtifactStore) -> None:
+    receipt = store.create("reports/run.json", b"payload", metadata=_metadata("run"))
+    payload = json.loads(receipt.manifest_path.read_text())
+    payload["byte_length"] = 999
+    receipt.manifest_path.write_text(json.dumps(payload))
+
+    verification = store.verify("run", expected_relative_path="reports/run.json")
+
+    assert not verification.verified
+    assert verification.code == "LENGTH_MISMATCH"
+
+
+def test_read_verified_rejects_manifest_byte_length_mismatch(store: ArtifactStore) -> None:
+    receipt = store.create("reports/run.json", b"payload", metadata=_metadata("run"))
+    payload = json.loads(receipt.manifest_path.read_text())
+    payload["byte_length"] = 999
+    receipt.manifest_path.write_text(json.dumps(payload))
+
+    with pytest.raises(StorageValidationError, match="length_mismatch"):
+        store.read_verified("run", expected_relative_path="reports/run.json")
+
+
+def test_diagnostics_report_length_mismatch_with_one_content_read(
+    store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = store.create("reports/run.json", b"payload", metadata=_metadata("run"))
+    payload = json.loads(receipt.manifest_path.read_text())
+    payload["byte_length"] = 999
+    receipt.manifest_path.write_text(json.dumps(payload))
+    original_read = Path.read_bytes
+    reads = 0
+
+    def counted_read(path: Path) -> bytes:
+        nonlocal reads
+        if path == receipt.path:
+            reads += 1
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read)
+
+    diagnostics = store.diagnose()
+
+    assert any(item.code == "LENGTH_MISMATCH" for item in diagnostics)
+    assert reads == 1
 
 
 def test_diagnostics_report_orphan_missing_content_and_hash_mismatch(

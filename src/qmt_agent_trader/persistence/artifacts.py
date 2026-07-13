@@ -33,7 +33,7 @@ class ArtifactMetadata(BaseModel):
 
 
 class ArtifactManifest(ArtifactMetadata):
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     created_at: str
     content_hash: str
     byte_length: int = Field(ge=0)
@@ -50,7 +50,9 @@ class ArtifactReceipt(BaseModel):
 class ArtifactVerification(BaseModel):
     artifact_id: str
     verified: bool
-    code: Literal["VERIFIED", "MISSING_ARTIFACT", "HASH_MISMATCH"]
+    code: Literal[
+        "VERIFIED", "MISSING_ARTIFACT", "HASH_MISMATCH", "LENGTH_MISMATCH"
+    ]
     path: Path
     manifest_path: Path
 
@@ -60,6 +62,7 @@ class ArtifactDiagnostic(BaseModel):
         "ORPHAN_ARTIFACT",
         "MISSING_ARTIFACT",
         "HASH_MISMATCH",
+        "LENGTH_MISMATCH",
         "INVALID_MANIFEST",
     ]
     relative_path: str
@@ -235,7 +238,16 @@ class ArtifactStore:
                 path=path,
                 manifest_path=manifest_path,
             )
-        verified = hashlib.sha256(path.read_bytes()).hexdigest() == manifest.content_hash
+        content = path.read_bytes()
+        if len(content) != manifest.byte_length:
+            return ArtifactVerification(
+                artifact_id=artifact_id,
+                verified=False,
+                code="LENGTH_MISMATCH",
+                path=path,
+                manifest_path=manifest_path,
+            )
+        verified = hashlib.sha256(content).hexdigest() == manifest.content_hash
         return ArtifactVerification(
             artifact_id=artifact_id,
             verified=verified,
@@ -276,6 +288,13 @@ class ArtifactStore:
                 reason="missing_artifact",
                 original_error=exc,
             ) from exc
+        if len(content) != manifest.byte_length:
+            raise StorageValidationError(
+                store_name="artifacts",
+                path=path,
+                operation="read_verified",
+                reason="length_mismatch",
+            )
         if hashlib.sha256(content).hexdigest() != manifest.content_hash:
             raise StorageValidationError(
                 store_name="artifacts",
@@ -338,15 +357,26 @@ class ArtifactStore:
                         reason="manifest references missing artifact",
                     )
                 )
-            elif hashlib.sha256(artifact_path.read_bytes()).hexdigest() != manifest.content_hash:
-                diagnostics.append(
-                    ArtifactDiagnostic(
-                        code="HASH_MISMATCH",
-                        relative_path=manifest.relative_path,
-                        artifact_id=manifest.artifact_id,
-                        reason="artifact bytes do not match manifest content_hash",
+            else:
+                content = artifact_path.read_bytes()
+                if len(content) != manifest.byte_length:
+                    diagnostics.append(
+                        ArtifactDiagnostic(
+                            code="LENGTH_MISMATCH",
+                            relative_path=manifest.relative_path,
+                            artifact_id=manifest.artifact_id,
+                            reason="artifact byte length does not match manifest byte_length",
+                        )
                     )
-                )
+                elif hashlib.sha256(content).hexdigest() != manifest.content_hash:
+                    diagnostics.append(
+                        ArtifactDiagnostic(
+                            code="HASH_MISMATCH",
+                            relative_path=manifest.relative_path,
+                            artifact_id=manifest.artifact_id,
+                            reason="artifact bytes do not match manifest content_hash",
+                        )
+                    )
         if self.root.exists():
             for path in sorted(self.root.rglob("*")):
                 if (

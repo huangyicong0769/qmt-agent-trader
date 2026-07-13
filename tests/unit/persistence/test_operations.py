@@ -228,6 +228,31 @@ def test_governed_store_is_diagnosed_once_per_verify(
     assert calls == expected
 
 
+def test_verify_surfaces_governed_artifact_length_mismatch(
+    operations: StorageOperations,
+) -> None:
+    root = operations.paths.approvals_root
+    store = artifact_store_for_root(root, lock_manager=operations.locks)
+    receipt = store.create(
+        "approval.yaml",
+        b"status: APPROVED\n",
+        metadata=ArtifactMetadata(
+            artifact_id="approval", artifact_type="approval", producer="test"
+        ),
+    )
+    payload = json.loads(receipt.manifest_path.read_text())
+    payload["byte_length"] += 1
+    receipt.manifest_path.write_text(json.dumps(payload))
+
+    result = operations.verify(deep=True)
+
+    assert not result.healthy
+    assert any(
+        item.component == "approvals" and item.code == "LENGTH_MISMATCH"
+        for item in result.diagnostics
+    )
+
+
 def test_backup_excludes_cache_temp_and_locks_and_verifies_hashes(
     operations: StorageOperations,
 ) -> None:
