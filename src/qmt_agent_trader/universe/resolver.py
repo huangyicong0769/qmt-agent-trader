@@ -28,7 +28,7 @@ class UniverseResolver:
         start_date: str | None = None,
         end_date: str | None = None,
         rebalance_frequency: str | None = None,
-        limit: int = 2000,
+        limit: int | None = None,
         include_exclusions: bool = False,
     ) -> dict[str, Any]:
         requested_mode = mode or spec.mode
@@ -67,11 +67,11 @@ class UniverseResolver:
         spec: UniverseSpec,
         *,
         as_of_date: str,
-        limit: int,
+        limit: int | None,
         include_exclusions: bool,
     ) -> dict[str, Any]:
         symbols, excluded, diagnostics = self._resolve_for_date(spec, as_of_date=as_of_date)
-        symbols = _apply_limit(symbols, spec=spec, limit=limit)
+        symbols, limit_metadata = _apply_limit(symbols, spec=spec, limit=limit)
         diagnostics["selected_count"] = len(symbols)
         metadata: dict[str, Any] = {
             "count": len(symbols),
@@ -80,6 +80,8 @@ class UniverseResolver:
             "spec_fingerprint": fingerprint_spec(spec),
             "excluded_symbols": excluded if include_exclusions else [],
             "diagnostics": diagnostics,
+            "candidate_count": int(diagnostics.get("candidate_count", len(symbols))),
+            **limit_metadata,
         }
         return {
             "status": "OK",
@@ -95,7 +97,7 @@ class UniverseResolver:
         start_date: str,
         end_date: str,
         rebalance_frequency: str,
-        limit: int,
+        limit: int | None,
         include_exclusions: bool,
     ) -> dict[str, Any]:
         resolve_dates = self._rebalance_dates(
@@ -107,12 +109,14 @@ class UniverseResolver:
         rolling_symbols: dict[str, list[str]] = {}
         excluded_by_date: dict[str, list[dict[str, str]]] = {}
         diagnostics_by_date: dict[str, dict[str, Any]] = {}
+        limit_metadata_by_date: dict[str, dict[str, object]] = {}
         for resolve_date in resolve_dates:
             symbols, excluded, diagnostics = self._resolve_for_date(spec, as_of_date=resolve_date)
-            resolved = _apply_limit(symbols, spec=spec, limit=limit)
+            resolved, limit_metadata = _apply_limit(symbols, spec=spec, limit=limit)
             rolling_symbols[resolve_date] = resolved
             diagnostics["selected_count"] = len(resolved)
             diagnostics_by_date[resolve_date] = diagnostics
+            limit_metadata_by_date[resolve_date] = limit_metadata
             if include_exclusions:
                 excluded_by_date[resolve_date] = excluded
 
@@ -138,6 +142,27 @@ class UniverseResolver:
             "empty_dates": empty_dates,
             "changed_dates": changed_dates,
             "diagnostics_by_date": diagnostics_by_date,
+            "limit_metadata_by_date": limit_metadata_by_date,
+            "truncated": any(
+                bool(item["truncated"]) for item in limit_metadata_by_date.values()
+            ),
+            "effective_limit": spec.max_symbols if spec.max_symbols is not None else limit,
+            "truncation_source": (
+                "spec.max_symbols"
+                if spec.max_symbols is not None
+                else "request_limit"
+                if limit is not None
+                else None
+            ),
+            "pre_limit_selected_count": max(
+                (int(item["pre_limit_selected_count"]) for item in limit_metadata_by_date.values()),
+                default=0,
+            ),
+            "selected_count": max(counts, default=0),
+            "candidate_count": max(
+                (int(item.get("candidate_count", 0)) for item in diagnostics_by_date.values()),
+                default=0,
+            ),
         }
         if include_exclusions:
             metadata["excluded_symbols_by_date"] = excluded_by_date
@@ -700,9 +725,28 @@ def _is_missing_scalar(value: Any) -> bool:
     return text in {"", "nan", "nat", "none", "<na>"}
 
 
-def _apply_limit(symbols: list[str], *, spec: UniverseSpec, limit: int) -> list[str]:
-    effective_limit = min(limit, spec.max_symbols or limit)
-    return symbols[:effective_limit]
+def _apply_limit(
+    symbols: list[str],
+    *,
+    spec: UniverseSpec,
+    limit: int | None,
+) -> tuple[list[str], dict[str, object]]:
+    requested_limit = limit
+    effective_limit = spec.max_symbols if spec.max_symbols is not None else requested_limit
+    selected = symbols if effective_limit is None else symbols[:effective_limit]
+    return selected, {
+        "pre_limit_selected_count": len(symbols),
+        "selected_count": len(selected),
+        "truncated": len(selected) < len(symbols),
+        "effective_limit": effective_limit,
+        "truncation_source": (
+            "spec.max_symbols"
+            if spec.max_symbols is not None
+            else "request_limit"
+            if requested_limit is not None
+            else None
+        ),
+    }
 
 
 def _datasets_for_asset_types(asset_types: Sequence[str]) -> list[tuple[str, str]]:
