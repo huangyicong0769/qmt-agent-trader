@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -42,8 +42,9 @@ class PortfolioConstructionSpec(BaseModel):
 
 
 class RebalanceSpec(BaseModel):
-    frequency: str = "daily"
+    frequency: Literal["daily", "weekly", "monthly"] = "daily"
     min_turnover_threshold: float = Field(default=0.0, ge=0, le=1)
+    rank_buffer: int = Field(default=0, ge=0)
 
 
 class ExecutionAssumptionSpec(BaseModel):
