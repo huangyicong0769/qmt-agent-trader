@@ -29,6 +29,7 @@ from qmt_agent_trader.agent.tools.base import AgentTool, tool
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
@@ -708,6 +709,20 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             config,
             reports_dir=PersistencePaths.from_settings(get_settings()).reports_root / "research",
         )
+    except BacktestDataIntegrityError as exc:
+        return {
+            "status": "ERROR",
+            "reason": "BACKTEST_DATA_INTEGRITY_ERROR",
+            "error": {
+                "code": exc.code,
+                "trade_date": exc.trade_date,
+                "symbols": list(exc.symbols),
+                "field": exc.field,
+                "message": exc.message,
+            },
+            "research_only": True,
+            "live_trading_allowed": False,
+        }
     except ValueError as exc:
         blocked = _blocked_backtest_from_value_error(
             exc,
