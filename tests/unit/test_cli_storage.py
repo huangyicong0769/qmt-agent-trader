@@ -62,6 +62,13 @@ def test_storage_reset_requires_dry_run_digest_and_executes(monkeypatch, tmp_pat
     assert missing.exit_code == 1
     assert json.loads(missing.stdout)["status"] == "rejected"
 
+    rejected = runner.invoke(
+        app,
+        ["storage", "reset", "--profile", "preserve-raw", "--confirm", "wrong"],
+    )
+    assert rejected.exit_code == 1
+    assert json.loads(rejected.stdout)["status"] == "rejected"
+
     completed = runner.invoke(
         app,
         [

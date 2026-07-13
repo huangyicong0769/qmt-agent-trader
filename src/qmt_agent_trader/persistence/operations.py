@@ -94,6 +94,7 @@ class ResetPlan:
     byte_count: int
     preserved_raw_count: int
     preserved_raw_bytes: int
+    preserved_raw_digest: str
     delete_paths: tuple[str, ...]
 
 
@@ -106,8 +107,10 @@ class ResetReceipt:
     byte_count: int
     preserved_raw_count: int
     preserved_raw_bytes: int
+    preserved_raw_digest: str
     receipt_path: Path | None = None
     reason: str | None = None
+    staging_path: Path | None = None
 
 
 class StorageOperations:
@@ -163,6 +166,9 @@ class StorageOperations:
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+        raw_digest = hashlib.sha256(
+            json.dumps(sorted(raw_files), separators=(",", ":")).encode()
+        ).hexdigest()
         return ResetPlan(
             status="planned",
             profile="preserve-raw",
@@ -171,25 +177,26 @@ class StorageOperations:
             byte_count=sum(item[1] for item in delete_files),
             preserved_raw_count=len(raw_files),
             preserved_raw_bytes=sum(item[1] for item in raw_files),
+            preserved_raw_digest=raw_digest,
             delete_paths=tuple(sorted(delete_paths)),
         )
 
     def reset(self, *, profile: str, confirm: str) -> ResetReceipt:
-        plan = self.plan_reset(profile=profile)
-        if not confirm or confirm != plan.digest:
-            raise StorageValidationError(
-                store_name="storage_reset",
-                path=self.paths.project_root,
-                operation="reset",
-                reason="confirmation digest does not match the current reset plan",
-            )
         staging = self.paths.project_root / f".storage-reset-{uuid4().hex}.staging"
         moved: list[tuple[Path, Path]] = []
         receipt_path: Path | None = None
-        raw_before = self._snapshot_reset_files(
-            self.paths.lake_root / "raw", validate_parquet=True
-        )
         with self.locks.backup_barrier():
+            plan = self.plan_reset(profile=profile)
+            if not confirm or confirm != plan.digest:
+                raise StorageValidationError(
+                    store_name="storage_reset",
+                    path=self.paths.project_root,
+                    operation="reset",
+                    reason="confirmation digest does not match the current reset plan",
+                )
+            raw_before = self._snapshot_reset_files(
+                self.paths.lake_root / "raw", validate_parquet=True
+            )
             try:
                 staging.mkdir(parents=False, exist_ok=False)
                 for relative in plan.delete_paths:
@@ -241,6 +248,12 @@ class StorageOperations:
                         "deleted_byte_count": plan.byte_count,
                         "preserved_raw_count": plan.preserved_raw_count,
                         "preserved_raw_bytes": plan.preserved_raw_bytes,
+                        "preserved_raw_digest": plan.preserved_raw_digest,
+                        "verification": {
+                            "healthy": verification.healthy,
+                            "deep": verification.deep,
+                            "diagnostics": len(verification.diagnostics),
+                        },
                     },
                     create_only=True,
                 )
@@ -253,6 +266,7 @@ class StorageOperations:
                     plan.byte_count,
                     plan.preserved_raw_count,
                     plan.preserved_raw_bytes,
+                    plan.preserved_raw_digest,
                     receipt_path,
                 )
             except Exception as exc:
@@ -273,7 +287,9 @@ class StorageOperations:
                         plan.byte_count,
                         plan.preserved_raw_count,
                         plan.preserved_raw_bytes,
+                        plan.preserved_raw_digest,
                         reason=f"{type(exc).__name__}; rollback: {type(rollback_exc).__name__}",
+                        staging_path=staging,
                     )
                 return ResetReceipt(
                     "rolled_back",
@@ -283,6 +299,7 @@ class StorageOperations:
                     plan.byte_count,
                     plan.preserved_raw_count,
                     plan.preserved_raw_bytes,
+                    plan.preserved_raw_digest,
                     reason=type(exc).__name__,
                 )
 
@@ -304,6 +321,7 @@ class StorageOperations:
             data / "todos",
             self.paths.experiments_root,
             self.paths.registries_root,
+            data / "universes",
             self.paths.control_db_path,
             self.paths.sessions_root,
             self.paths.approvals_root,
@@ -348,7 +366,14 @@ class StorageOperations:
         for path in candidates:
             if not path.is_file():
                 continue
-            if validate_parquet and path.suffix == ".parquet":
+            if validate_parquet and path.suffix != ".parquet":
+                raise StorageValidationError(
+                    store_name="storage_reset",
+                    path=path,
+                    operation="plan_reset",
+                    reason="preserve-raw accepts only Parquet files",
+                )
+            if validate_parquet:
                 try:
                     parquet = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
                     for index in range(parquet.num_row_groups):

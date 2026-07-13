@@ -60,7 +60,7 @@ from qmt_agent_trader.factors.service import compute_factor_to_lake, validate_fa
 from qmt_agent_trader.persistence.artifacts import ArtifactStore, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
-from qmt_agent_trader.persistence.errors import StorageError
+from qmt_agent_trader.persistence.errors import StorageError, StorageValidationError
 from qmt_agent_trader.persistence.initialization import initialize_persistence
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.operations import StorageOperations, as_json
@@ -183,6 +183,9 @@ def storage_reset(
             )
             raise typer.Exit(code=1)
         receipt = operations.reset(profile=profile, confirm=confirm)
+    except StorageValidationError as exc:
+        print_json({"status": "rejected", "reason": exc.reason})
+        raise typer.Exit(code=1) from exc
     except StorageError as exc:
         _raise_storage_cli_error(exc)
     print_json(as_json(receipt))

@@ -21,7 +21,7 @@ uv run qmt-agent storage quarantine sessions bad-record.json
 
 Use this only when an incompatible storage refactor makes existing control state and Agent
 artifacts disposable. The profile preserves validated provider data under `data/lake/raw` and
-removes derived lake layers, control metadata, registries, sessions, reports, approvals, order
+removes derived lake layers, control metadata, current and legacy registries, sessions, reports, approvals, order
 plans, generated code, audit logs, backups, and quarantine evidence.
 
 First create a read-only plan:
@@ -38,7 +38,7 @@ uv run qmt-agent storage reset --profile preserve-raw --confirm <digest>
 ```
 
 The digest is bound to file paths, sizes, and hashes. Any intervening change rejects execution.
-The command refuses corrupt raw Parquet or symbolic links, excludes cooperating writers through
+The command refuses corrupt raw Parquet, non-Parquet raw files, or symbolic links, and excludes cooperating writers through
 the maintenance barrier, and stages removals on the same filesystem. It initializes the current
 control schema and runs deep verification before deleting staging. A failure restores the prior
 state; `rollback_failed` requires manual inspection of the reported staging directory.

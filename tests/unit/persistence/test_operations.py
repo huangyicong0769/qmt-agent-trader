@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import threading
 import time
@@ -79,6 +80,17 @@ def test_preserve_raw_reset_plan_rejects_corrupt_raw(operations: StorageOperatio
         operations.plan_reset(profile="preserve-raw")
 
 
+def test_preserve_raw_reset_plan_rejects_non_parquet_raw(
+    operations: StorageOperations,
+) -> None:
+    stale = operations.paths.lake_root / "raw/partial.tmp"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("partial")
+
+    with pytest.raises(StorageValidationError, match="only Parquet files"):
+        operations.plan_reset(profile="preserve-raw")
+
+
 def test_preserve_raw_reset_plan_rejects_symlink(operations: StorageOperations) -> None:
     outside = operations.paths.project_root.parent / "outside-reset-target"
     outside.write_text("keep")
@@ -103,6 +115,7 @@ def test_preserve_raw_reset_executes_and_preserves_raw(operations: StorageOperat
         operations.paths.sessions_root / "s1.json",
         operations.paths.reports_root / "research/legacy.json",
         operations.paths.audit_root / "agent_tool_calls.jsonl",
+        operations.paths.data_root / "universes/registry/legacy.json",
     ):
         stale.parent.mkdir(parents=True, exist_ok=True)
         stale.write_text("legacy")
@@ -114,10 +127,13 @@ def test_preserve_raw_reset_executes_and_preserves_raw(operations: StorageOperat
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == raw_hash
     assert not (operations.paths.lake_root / "silver").exists()
     assert not operations.paths.sessions_root.exists()
+    assert not (operations.paths.data_root / "universes").exists()
     assert operations.paths.control_db_path.exists()
     assert operations.verify(deep=True).healthy
     payload = json.loads(receipt.receipt_path.read_text())
     assert payload["digest"] == plan.digest
+    assert payload["preserved_raw_digest"] == plan.preserved_raw_digest
+    assert payload["verification"] == {"deep": True, "healthy": True, "diagnostics": 0}
     assert "legacy" not in receipt.receipt_path.read_text()
     assert not list(operations.paths.project_root.glob(".storage-reset-*.staging"))
 
@@ -133,6 +149,27 @@ def test_preserve_raw_reset_rejects_snapshot_drift(operations: StorageOperations
         operations.reset(profile="preserve-raw", confirm=plan.digest)
 
     assert stale.read_text() == "changed"
+
+
+def test_preserve_raw_reset_rechecks_digest_after_writer_exclusion(
+    operations: StorageOperations, monkeypatch
+) -> None:
+    stale = operations.paths.reports_root / "research/legacy.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("first")
+    plan = operations.plan_reset(profile="preserve-raw")
+
+    @contextmanager
+    def barrier_with_last_moment_change():
+        stale.write_text("changed-before-barrier")
+        yield
+
+    monkeypatch.setattr(operations.locks, "backup_barrier", barrier_with_last_moment_change)
+
+    with pytest.raises(StorageValidationError, match="confirmation digest"):
+        operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert stale.read_text() == "changed-before-barrier"
 
 
 def test_preserve_raw_reset_rolls_back_when_initialization_fails(
@@ -171,6 +208,33 @@ def test_preserve_raw_reset_rolls_back_when_receipt_write_fails(
     assert receipt.status == "rolled_back"
     assert stale.read_text() == "legacy-session"
     assert not operations.paths.control_db_path.exists()
+
+
+def test_preserve_raw_reset_reports_and_retains_staging_when_rollback_fails(
+    operations: StorageOperations, monkeypatch
+) -> None:
+    stale = operations.paths.sessions_root / "s1.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("legacy-session")
+    plan = operations.plan_reset(profile="preserve-raw")
+    real_replace = os.replace
+
+    def fail_initialization(*_args, **_kwargs):
+        raise RuntimeError("injected initialization failure")
+
+    def fail_restore(source, destination):
+        if ".storage-reset-" in str(source):
+            raise OSError("injected restore failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(MigrationRegistry, "apply", fail_initialization)
+    monkeypatch.setattr("qmt_agent_trader.persistence.operations.os.replace", fail_restore)
+
+    receipt = operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert receipt.status == "rollback_failed"
+    assert receipt.staging_path is not None
+    assert receipt.staging_path.exists()
 
 
 def test_inventory_covers_every_canonical_path(operations: StorageOperations) -> None:
