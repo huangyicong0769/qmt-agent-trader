@@ -248,10 +248,21 @@ def run_strategy_backtest(
     )
     diagnostics = StrategyDiagnosticsEvaluator().evaluate(evidence).as_dict()
     metrics = {
-        "total_return": round(result.metrics.total_return, 4),
-        "sharpe": round(result.metrics.sharpe, 4),
-        "max_drawdown": round(result.metrics.max_drawdown, 4),
-        "turnover": round(result.metrics.turnover, 4),
+        "total_return": round(result.metrics.total_return, 6),
+        "net_total_return": round(result.metrics.total_return, 6),
+        "same_trade_gross_return": round(result.same_trade_gross_return, 6),
+        "cost_drag": round(result.same_trade_gross_return - result.metrics.total_return, 6),
+        "sharpe": round(result.metrics.sharpe, 6),
+        "max_drawdown": round(result.metrics.max_drawdown, 6),
+        "turnover": round(result.metrics.turnover, 6),
+        "average_one_way_turnover": round(result.metrics.turnover, 6),
+        "average_top_n_overlap": round(result.average_top_n_overlap, 6),
+        "explicit_cost_to_initial_cash": round(
+            result.total_explicit_cost / config.initial_cash, 6
+        ),
+        "slippage_cost_to_initial_cash": round(
+            result.total_slippage_cost / config.initial_cash, 6
+        ),
         "trade_count": len(result.trades),
     }
     report = {
@@ -863,8 +874,10 @@ def _diagnostic_evidence(
         "trade_blotter": trades,
         "turnover_report": {"average_turnover": metrics.get("turnover", 0.0)},
         "cost_report": {
-            "cost_to_initial_cash": total_cost / initial_cash if initial_cash else 0.0
+            "cost_to_initial_cash": total_cost / initial_cash if initial_cash else 0.0,
+            "cost_drag": metrics.get("cost_drag", 0.0),
         },
+        "churn_report": {"average_top_n_overlap": metrics.get("average_top_n_overlap", 0.0)},
         "rejection_report": {
             "rate": rejected_orders / (trade_count + rejected_orders)
             if trade_count + rejected_orders

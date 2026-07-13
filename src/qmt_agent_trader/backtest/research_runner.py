@@ -101,6 +101,9 @@ class FactorRankResearchRunner:
         equity_points: list[ResearchEquityPoint] = []
         rebalance_points: list[ResearchRebalancePoint] = []
         rejected_orders = 0
+        total_explicit_cost = 0.0
+        total_slippage_cost = 0.0
+        previous_selected: set[str] | None = None
         scaled_costs = _scaled_cost_config(
             self.config.base_cost_config,
             scenario.cost_multiplier,
@@ -225,6 +228,8 @@ class FactorRankResearchRunner:
                             cost=breakdown.total,
                         )
                         gross_notional += notional
+                        total_explicit_cost += breakdown.total
+                        total_slippage_cost += abs(price - reference_price) * quantity
                         trades.append(
                             ResearchTrade(
                                 signal_date=f"{signal_date:%Y-%m-%d}",
@@ -243,6 +248,14 @@ class FactorRankResearchRunner:
                             )
                         )
                     after_symbols = set(positions)
+                    current_selected = set(selected_symbols)
+                    selection_jaccard = (
+                        len(previous_selected & current_selected)
+                        / max(1, len(previous_selected | current_selected))
+                        if previous_selected is not None
+                        else None
+                    )
+                    previous_selected = current_selected
                     rebalance_points.append(
                         ResearchRebalancePoint(
                             signal_date=f"{signal_date:%Y-%m-%d}",
@@ -258,6 +271,7 @@ class FactorRankResearchRunner:
                             retained_count=len(before_symbols & after_symbols),
                             entered_count=len(after_symbols - before_symbols),
                             exited_count=len(before_symbols - after_symbols),
+                            selection_jaccard=selection_jaccard,
                         )
                     )
 
@@ -280,12 +294,24 @@ class FactorRankResearchRunner:
 
         equity_curve = [point.equity for point in equity_points]
         turnover_series = [point.one_way_turnover for point in rebalance_points]
-        return FactorRankResearchResult(
-            metrics=_metrics_from_equity(
+        metrics = _metrics_from_equity(
                 equity_curve,
                 turnover_series=turnover_series,
                 diagnostic_pass=rejected_orders == 0,
-            ),
+            )
+        final_net_equity = equity_points[-1].equity if equity_points else self.config.initial_cash
+        same_trade_gross_return = (
+            (final_net_equity + total_explicit_cost + total_slippage_cost)
+            / self.config.initial_cash
+            - 1.0
+        )
+        overlaps = [
+            point.selection_jaccard
+            for point in rebalance_points
+            if point.selection_jaccard is not None and not point.skipped
+        ]
+        return FactorRankResearchResult(
+            metrics=metrics,
             trades=tuple(trades),
             equity_points=tuple(equity_points),
             rebalance_points=tuple(rebalance_points),
@@ -294,6 +320,10 @@ class FactorRankResearchRunner:
                 rejected_order_count=rejected_orders,
             ),
             rejected_orders=rejected_orders,
+            total_explicit_cost=total_explicit_cost,
+            total_slippage_cost=total_slippage_cost,
+            same_trade_gross_return=same_trade_gross_return,
+            average_top_n_overlap=(sum(overlaps) / len(overlaps) if overlaps else 0.0),
         )
 
     def _bars_on(self, trade_date: object) -> pd.DataFrame:
