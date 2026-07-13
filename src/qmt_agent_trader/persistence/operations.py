@@ -262,18 +262,6 @@ class StorageOperations:
                     },
                     create_only=True,
                 )
-                shutil.rmtree(staging)
-                return ResetReceipt(
-                    "completed",
-                    plan.profile,
-                    plan.digest,
-                    plan.file_count,
-                    plan.byte_count,
-                    plan.preserved_raw_count,
-                    plan.preserved_raw_bytes,
-                    plan.preserved_raw_digest,
-                    receipt_path,
-                )
             except Exception as exc:
                 try:
                     if receipt_path is not None:
@@ -311,6 +299,33 @@ class StorageOperations:
                     plan.preserved_raw_digest,
                     reason=type(exc).__name__,
                 )
+            try:
+                shutil.rmtree(staging)
+            except Exception as cleanup_exc:
+                return ResetReceipt(
+                    "completed",
+                    plan.profile,
+                    plan.digest,
+                    plan.file_count,
+                    plan.byte_count,
+                    plan.preserved_raw_count,
+                    plan.preserved_raw_bytes,
+                    plan.preserved_raw_digest,
+                    receipt_path,
+                    reason=f"staging_cleanup_failed:{type(cleanup_exc).__name__}",
+                    staging_path=staging,
+                )
+            return ResetReceipt(
+                "completed",
+                plan.profile,
+                plan.digest,
+                plan.file_count,
+                plan.byte_count,
+                plan.preserved_raw_count,
+                plan.preserved_raw_bytes,
+                plan.preserved_raw_digest,
+                receipt_path,
+            )
 
     def _remove_new_reset_state(
         self,

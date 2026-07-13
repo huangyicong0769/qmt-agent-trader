@@ -307,6 +307,41 @@ def test_preserve_raw_reset_does_not_delete_state_when_staging_creation_fails(
     assert reports.read_text() == "legacy-report"
 
 
+def test_preserve_raw_reset_keeps_committed_state_when_staging_cleanup_fails(
+    operations: StorageOperations,
+    monkeypatch,
+) -> None:
+    stale = operations.paths.sessions_root / "legacy-session.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("legacy-session")
+
+    plan = operations.plan_reset(profile="preserve-raw")
+    real_rmtree = shutil.rmtree
+
+    def fail_staging_cleanup(path, *args, **kwargs):
+        target = Path(path)
+        if target.name.startswith(".storage-reset-") and target.name.endswith(".staging"):
+            raise OSError("injected staging cleanup failure")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "qmt_agent_trader.persistence.operations.shutil.rmtree",
+        fail_staging_cleanup,
+    )
+
+    receipt = operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert receipt.status == "completed"
+    assert receipt.reason == "staging_cleanup_failed:OSError"
+    assert receipt.staging_path is not None
+    assert receipt.staging_path.exists()
+    assert not stale.exists()
+    assert operations.paths.control_db_path.exists()
+    assert operations.verify(deep=True).healthy
+    assert receipt.receipt_path is not None
+    assert receipt.receipt_path.exists()
+
+
 def test_inventory_covers_every_canonical_path(operations: StorageOperations) -> None:
     names = {item.name for item in operations.inventory()}
     assert names == {store.name for store in operations.catalog.stores}

@@ -38,10 +38,16 @@ uv run qmt-agent storage reset --profile preserve-raw --confirm <digest>
 ```
 
 The digest is bound to file paths, sizes, and hashes. Any intervening change rejects execution.
-The command refuses corrupt raw Parquet, non-Parquet raw files, or symbolic links, and excludes cooperating writers through
-the maintenance barrier, and stages removals on the same filesystem. It initializes the current
-control schema and runs deep verification before deleting staging. A failure restores the prior
-state; `rollback_failed` requires manual inspection of the reported staging directory.
+The command refuses corrupt raw Parquet, non-Parquet raw files, or symbolic links, excludes
+cooperating writers through the maintenance barrier, and stages removals on the same filesystem.
+Failures before schema verification and receipt creation restore the targets that were moved into
+staging. Targets that were never moved remain untouched; `rollback_failed` requires manual
+inspection of the reported staging directory.
+
+After verification and receipt creation, the reset is considered complete. If removal of the
+staging directory fails, the command keeps the verified new state and returns `status: completed`
+together with `reason` and `staging_path`. Inspect the reported directory and remove it manually
+after confirming the reset result.
 
 Successful resets write a content-free receipt under `data/storage-resets/`. This workflow is not
 a migration or backup facility: successful execution permanently deletes the old state.
