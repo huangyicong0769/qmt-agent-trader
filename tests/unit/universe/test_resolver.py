@@ -16,7 +16,9 @@ def _spec(max_symbols=None) -> UniverseSpec:
 
 
 def test_broad_universe_is_not_implicitly_cut_to_2000() -> None:
-    selected, metadata = _apply_limit([str(index) for index in range(3_000)], spec=_spec(), limit=None)
+    selected, metadata = _apply_limit(
+        [str(index) for index in range(3_000)], spec=_spec(), limit=None
+    )
     assert len(selected) == 3_000
     assert metadata["truncated"] is False
 

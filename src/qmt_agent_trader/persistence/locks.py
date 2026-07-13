@@ -165,15 +165,16 @@ class LockManager:
             raise
         else:
             os.close(descriptor)
-        try:
-            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        if os.name != "nt":
             try:
-                _marker_fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
-        except Exception:
-            path.unlink(missing_ok=True)
-            raise
+                directory_descriptor = os.open(path.parent, os.O_RDONLY)
+                try:
+                    _marker_fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+            except Exception:
+                path.unlink(missing_ok=True)
+                raise
 
     def _wait_for_active_writers(self) -> None:
         deadline = monotonic() + self.timeout_seconds

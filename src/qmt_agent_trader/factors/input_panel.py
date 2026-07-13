@@ -429,7 +429,9 @@ def _daily_panel_coverage(panel: pd.DataFrame) -> dict[str, object]:
     prior_reference = symbol_counts.shift(1).rolling(20, min_periods=5).median()
     ratios = symbol_counts / prior_reference.replace(0, pd.NA)
     return {
-        "daily_row_counts": {_format_date(index): int(value) for index, value in row_counts.items()},
+        "daily_row_counts": {
+            _format_date(index): int(value) for index, value in row_counts.items()
+        },
         "daily_symbol_counts": {
             _format_date(index): int(value) for index, value in symbol_counts.items()
         },

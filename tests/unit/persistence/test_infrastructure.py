@@ -214,6 +214,8 @@ def test_short_marker_write_leaves_no_marker(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_marker_directory_fsync_failure_leaves_no_marker(tmp_path: Path, monkeypatch) -> None:
+    if os.name == "nt":
+        pytest.skip("Windows does not support opening directories for fsync")
     manager = LockManager(tmp_path / "locks")
     real_fsync = os.fsync
     calls = 0
