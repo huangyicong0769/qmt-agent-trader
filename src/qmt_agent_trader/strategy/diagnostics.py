@@ -46,6 +46,8 @@ class StrategyDiagnosticConfig:
     max_average_turnover: float = 0.40
     max_cost_to_initial_cash: float = 0.02
     max_rejection_rate: float = 0.10
+    min_average_top_n_overlap: float = 0.50
+    max_cost_drag: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,9 @@ class StrategyDiagnosticsEvaluator:
             self._walk_forward_check(evidence, cfg),
             self._drawdown_check(evidence, cfg),
             self._turnover_check(evidence, cfg),
+            self._top_n_overlap_check(evidence, cfg),
             self._cost_check(evidence, cfg),
+            self._cost_drag_check(evidence, cfg),
             self._rejection_rate_check(evidence, cfg),
         )
         return StrategyDiagnostics(status=self._overall_status(checks), checks=checks)
@@ -295,6 +299,57 @@ class StrategyDiagnosticsEvaluator:
             message="trading costs should not dominate research-period capital",
         )
 
+    @staticmethod
+    def _top_n_overlap_check(
+        evidence: dict[str, Any],
+        config: StrategyDiagnosticConfig,
+    ) -> DiagnosticCheck:
+        if not _has_metric(evidence, "churn_report", "average_top_n_overlap"):
+            return DiagnosticCheck(
+                name="average_top_n_overlap",
+                status=DiagnosticStatus.PASS,
+                observed="not_available_legacy_evidence",
+                threshold=config.min_average_top_n_overlap,
+                message="legacy evidence does not contain selection overlap",
+            )
+        observed = _float_metric(evidence, "churn_report", "average_top_n_overlap")
+        return DiagnosticCheck(
+            name="average_top_n_overlap",
+            status=(
+                DiagnosticStatus.PASS
+                if observed >= config.min_average_top_n_overlap
+                else DiagnosticStatus.WARN
+            ),
+            observed=observed,
+            threshold=config.min_average_top_n_overlap,
+            message="consecutive selected sets should retain at least half their union",
+        )
+
+    @staticmethod
+    def _cost_drag_check(
+        evidence: dict[str, Any],
+        config: StrategyDiagnosticConfig,
+    ) -> DiagnosticCheck:
+        if not _has_metric(evidence, "cost_report", "cost_drag"):
+            return DiagnosticCheck(
+                name="cost_drag",
+                status=DiagnosticStatus.PASS,
+                observed="not_available_legacy_evidence",
+                threshold=config.max_cost_drag,
+                message="legacy evidence does not contain same-trade cost drag",
+            )
+        observed = _float_metric(evidence, "cost_report", "cost_drag")
+        return DiagnosticCheck(
+            name="cost_drag",
+            status=(
+                DiagnosticStatus.PASS
+                if observed <= config.max_cost_drag
+                else DiagnosticStatus.WARN
+            ),
+            observed=observed,
+            threshold=config.max_cost_drag,
+            message="same-trade explicit and slippage cost drag should stay below 10 points",
+        )
     @staticmethod
     def _rejection_rate_check(
         evidence: dict[str, Any],
