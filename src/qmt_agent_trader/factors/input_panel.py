@@ -108,6 +108,7 @@ def build_target_frequency_panel(
             )
 
     metadata["coverage_by_field"] = _coverage_by_field(panel, required_fields, metadata)
+    metadata.update(_daily_panel_coverage(panel))
     if metadata["unresolved_fields"]:
         metadata["status"] = "PARTIAL_COVERAGE"
     elif metadata["missing_fields"]:
@@ -415,6 +416,33 @@ def _coverage_by_field(
     return coverage
 
 
+def _daily_panel_coverage(panel: pd.DataFrame) -> dict[str, object]:
+    if panel.empty or not {"trade_date", "symbol"}.issubset(panel.columns):
+        return {
+            "daily_row_counts": {},
+            "daily_symbol_counts": {},
+            "daily_cross_sectional_coverage": {},
+            "daily_reference_symbol_counts": {},
+        }
+    row_counts = panel.groupby("trade_date").size().sort_index().astype(int)
+    symbol_counts = panel.groupby("trade_date")["symbol"].nunique().sort_index().astype(int)
+    prior_reference = symbol_counts.shift(1).rolling(20, min_periods=5).median()
+    ratios = symbol_counts / prior_reference.replace(0, pd.NA)
+    return {
+        "daily_row_counts": {_format_date(index): int(value) for index, value in row_counts.items()},
+        "daily_symbol_counts": {
+            _format_date(index): int(value) for index, value in symbol_counts.items()
+        },
+        "daily_cross_sectional_coverage": {
+            _format_date(index): float(value) for index, value in ratios.dropna().items()
+        },
+        "daily_reference_symbol_counts": {
+            _format_date(index): float(value)
+            for index, value in prior_reference.dropna().items()
+        },
+    }
+
+
 def _base_metadata(
     *,
     target_frequency: Frequency,
@@ -430,6 +458,11 @@ def _base_metadata(
         "required_fields": list(required_fields),
         "field_sources": {},
         "coverage_by_field": {},
+        "daily_row_counts": {},
+        "daily_symbol_counts": {},
+        "daily_cross_sectional_coverage": {},
+        "daily_reference_symbol_counts": {},
+        "abrupt_low_coverage_dates": [],
         "missing_fields": {},
         "unresolved_fields": [],
         "warnings": [],

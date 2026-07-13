@@ -65,6 +65,8 @@ class StrategyBacktestConfig(BaseModel):
     rank_buffer: int = Field(default=0, ge=0)
     cash_buffer_pct: float = Field(default=0.02, ge=0, lt=1)
     lower_is_better: bool = False
+    min_daily_cross_sectional_coverage: float = Field(default=0.80, gt=0, le=1)
+    min_reference_symbols_for_coverage_gate: int = Field(default=50, ge=1)
     symbols: list[str] = Field(default_factory=list)
     symbols_by_date: dict[str, list[str]] | None = None
     universe_mode: Literal["snapshot", "rolling"] = "snapshot"
@@ -212,29 +214,25 @@ def run_strategy_backtest(
         top_n=config.top_n,
         max_single_position_pct=config.max_single_position_pct,
     )
-    try:
-        # TODO: preload factor lookback window before config.start_date,
-        # then trim signals to requested window.
-        runner = FactorRankResearchRunner(
-            panel,
-            FactorRankResearchConfig(
-                factor_name=used_factor_name,
-                factor_registry_root=lake.root.parent / "factors",
-                factor_registry=factor_registry,
-                top_n=config.top_n,
-                max_single_position_pct=config.max_single_position_pct,
-                initial_cash=config.initial_cash,
-                rebalance_frequency=config.rebalance_frequency,
-                min_turnover_threshold=config.min_turnover_threshold,
-                rank_buffer=config.rank_buffer,
-                cash_buffer_pct=config.cash_buffer_pct,
-                lower_is_better=config.lower_is_better,
-                symbols_by_date=config.symbols_by_date,
-            ),
-        )
-        result = runner.run(scenario)
-    except Exception as exc:
-        return _error(run_id, config, spec, "BACKTEST_FAILED", str(exc))
+    # TODO: preload factor lookback window before config.start_date, then trim signals.
+    runner = FactorRankResearchRunner(
+        panel,
+        FactorRankResearchConfig(
+            factor_name=used_factor_name,
+            factor_registry_root=lake.root.parent / "factors",
+            factor_registry=factor_registry,
+            top_n=config.top_n,
+            max_single_position_pct=config.max_single_position_pct,
+            initial_cash=config.initial_cash,
+            rebalance_frequency=config.rebalance_frequency,
+            min_turnover_threshold=config.min_turnover_threshold,
+            rank_buffer=config.rank_buffer,
+            cash_buffer_pct=config.cash_buffer_pct,
+            lower_is_better=config.lower_is_better,
+            symbols_by_date=config.symbols_by_date,
+        ),
+    )
+    result = runner.run(scenario)
 
     result_dict = result.as_dict()
     leakage_report: dict[str, object] = {
@@ -440,10 +438,54 @@ def _blocked_backtest_from_panel_metadata(
     panel: pd.DataFrame,
     panel_metadata: dict[str, Any],
 ) -> StrategyBacktestResult | None:
+    abrupt_dates = _abrupt_low_coverage_dates(panel_metadata, config)
+    panel_metadata["abrupt_low_coverage_dates"] = abrupt_dates
+    if abrupt_dates:
+        panel_metadata["input_panel_status"] = "ABRUPT_DAILY_COVERAGE_DROP"
+        panel_metadata["evidence_status"] = "BLOCKED"
+        return StrategyBacktestResult(
+            run_id=run_id,
+            strategy_id=config.strategy_id,
+            strategy_version=spec.version if spec else "0.1.0",
+            status="BLOCKED",
+            reason="ABRUPT_DAILY_COVERAGE_DROP",
+            message=f"daily market-data cross-section collapsed on {abrupt_dates}",
+            requested_factor_ids=requested_factor_ids,
+            factor_ids=requested_factor_ids,
+            input_panel_metadata=panel_metadata,
+            diagnostics={
+                "status": "BLOCKED",
+                "checks": [{
+                    "name": "daily_cross_sectional_coverage",
+                    "status": "BLOCKED",
+                    "observed": abrupt_dates,
+                    "threshold": config.min_daily_cross_sectional_coverage,
+                    "message": "abrupt daily symbol coverage drop blocks execution",
+                    "evidence_source": "input_panel_metadata",
+                }],
+            },
+        )
     missing_columns = _missing_factor_input_columns(
         panel=panel,
         factor_registry=factor_registry,
         requested_factor_ids=requested_factor_ids,
+    )
+
+
+def _abrupt_low_coverage_dates(
+    panel_metadata: dict[str, Any],
+    config: StrategyBacktestConfig,
+) -> list[str]:
+    ratios = panel_metadata.get("daily_cross_sectional_coverage")
+    references = panel_metadata.get("daily_reference_symbol_counts")
+    if not isinstance(ratios, dict) or not isinstance(references, dict):
+        return []
+    minimum_reference = max(config.min_reference_symbols_for_coverage_gate, config.top_n * 2)
+    return sorted(
+        str(day)
+        for day, ratio in ratios.items()
+        if float(references.get(day, 0.0)) >= minimum_reference
+        and float(ratio) < config.min_daily_cross_sectional_coverage
     )
     panel_status = str(panel_metadata.get("status") or "")
     unresolved = _unresolved_fields_for_columns(panel_metadata, missing_columns)
@@ -807,6 +849,13 @@ def _diagnostic_evidence(
     factor_report.update(_factor_predictive_report(factor_frame, bars))
     return {
         "leakage_report": leakage_report,
+        "data_quality": {
+            "abrupt_low_coverage_dates": result_dict.get("data_quality", {}).get(
+                "low_cross_section_dates", []
+            )
+            if isinstance(result_dict.get("data_quality"), dict)
+            else [],
+        },
         "factor_report": factor_report,
         "performance_report": {
             "max_drawdown": metrics.get("max_drawdown", 0.0),

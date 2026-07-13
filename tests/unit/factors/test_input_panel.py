@@ -6,7 +6,10 @@ import pandas as pd
 
 from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
+from qmt_agent_trader.factors.input_panel import (
+    _daily_panel_coverage,
+    build_target_frequency_panel,
+)
 
 
 def _write_daily(
@@ -203,3 +206,18 @@ def test_event_field_is_reported_unresolved_and_not_forward_filled(tmp_path) -> 
             "suggested_next_step": "implement event_to_state transform or event-window factor",
         }
     ]
+def test_daily_panel_coverage_uses_prior_rolling_symbol_reference() -> None:
+    rows = []
+    for offset in range(6):
+        count = 3 if offset == 5 else 100
+        for symbol in range(count):
+            rows.append(
+                {
+                    "trade_date": date(2024, 1, 1) + timedelta(days=offset),
+                    "symbol": f"{symbol:06d}.SZ",
+                }
+            )
+    metadata = _daily_panel_coverage(pd.DataFrame(rows))
+    assert metadata["daily_symbol_counts"]["2024-01-06"] == 3
+    assert metadata["daily_cross_sectional_coverage"]["2024-01-06"] == 0.03
+

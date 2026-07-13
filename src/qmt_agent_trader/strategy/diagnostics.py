@@ -74,6 +74,7 @@ class StrategyDiagnosticsEvaluator:
             self._sample_size_check(evidence, cfg),
             self._trade_count_check(evidence, cfg),
             self._coverage_check(evidence, cfg),
+            self._daily_cross_section_check(evidence),
             self._positive_ic_check(evidence, cfg),
             self._walk_forward_check(evidence, cfg),
             self._drawdown_check(evidence, cfg),
@@ -198,6 +199,18 @@ class StrategyDiagnosticsEvaluator:
             message="daily IC should be positive in enough periods",
         )
 
+    @staticmethod
+    def _daily_cross_section_check(evidence: dict[str, Any]) -> DiagnosticCheck:
+        dates = _dig(evidence, "data_quality", "abrupt_low_coverage_dates", default=[])
+        count = len(dates) if isinstance(dates, list | tuple) else 0
+        return DiagnosticCheck(
+            name="daily_cross_sectional_coverage",
+            status=DiagnosticStatus.PASS if count == 0 else DiagnosticStatus.FAIL,
+            observed=count,
+            threshold=0,
+            message="completed backtests must have no abrupt daily coverage collapse",
+            evidence_source="input_panel_metadata",
+        )
     @staticmethod
     def _walk_forward_check(
         evidence: dict[str, Any],
