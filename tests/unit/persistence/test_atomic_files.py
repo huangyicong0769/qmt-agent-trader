@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -18,13 +19,17 @@ def test_first_jsonl_append_fsyncs_parent_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[Path] = []
-    monkeypatch.setattr(atomic_files_module, "_fsync_directory", calls.append)
+    calls: list[tuple[Path, bool]] = []
+
+    def record_directory_fsync(path: Path, *, suppress_errors: bool = True) -> None:
+        calls.append((path, suppress_errors))
+
+    monkeypatch.setattr(atomic_files_module, "_fsync_directory", record_directory_fsync)
 
     path = tmp_path / "events" / "stream.jsonl"
     atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
 
-    assert calls == [path.parent]
+    assert calls == [(path.parent, False)]
 
 
 def test_later_jsonl_append_does_not_fsync_parent_directory(
@@ -34,8 +39,12 @@ def test_later_jsonl_append_does_not_fsync_parent_directory(
 ) -> None:
     path = tmp_path / "events" / "stream.jsonl"
     atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
-    calls: list[Path] = []
-    monkeypatch.setattr(atomic_files_module, "_fsync_directory", calls.append)
+    calls: list[tuple[Path, bool]] = []
+
+    def record_directory_fsync(path: Path, *, suppress_errors: bool = True) -> None:
+        calls.append((path, suppress_errors))
+
+    monkeypatch.setattr(atomic_files_module, "_fsync_directory", record_directory_fsync)
 
     atomic_store.append_jsonl(path, {"event": 2}, fsync=True)
 
@@ -47,8 +56,12 @@ def test_jsonl_append_without_fsync_does_not_fsync_parent_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[Path] = []
-    monkeypatch.setattr(atomic_files_module, "_fsync_directory", calls.append)
+    calls: list[tuple[Path, bool]] = []
+
+    def record_directory_fsync(path: Path, *, suppress_errors: bool = True) -> None:
+        calls.append((path, suppress_errors))
+
+    monkeypatch.setattr(atomic_files_module, "_fsync_directory", record_directory_fsync)
 
     atomic_store.append_jsonl(
         tmp_path / "events" / "stream.jsonl", {"event": 1}, fsync=False
@@ -63,11 +76,17 @@ def test_directory_fsync_failure_reports_uncertain_durability_without_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "events" / "stream.jsonl"
+    real_fsync = os.fsync
+    calls = 0
 
-    def fail_directory_fsync(directory: Path) -> None:
-        raise OSError("directory fsync failed")
+    def fail_directory_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("directory fsync failed")
+        real_fsync(descriptor)
 
-    monkeypatch.setattr(atomic_files_module, "_fsync_directory", fail_directory_fsync)
+    monkeypatch.setattr(os, "fsync", fail_directory_fsync)
 
     with pytest.raises(StorageError) as caught:
         atomic_store.append_jsonl(path, {"event": 1}, fsync=True)

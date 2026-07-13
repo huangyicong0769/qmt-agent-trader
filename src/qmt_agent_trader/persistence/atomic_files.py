@@ -259,7 +259,7 @@ class AtomicFileStore:
             os.close(descriptor)
         if fsync and was_missing:
             try:
-                _fsync_directory(path.parent)
+                _fsync_directory(path.parent, suppress_errors=False)
             except Exception as exc:
                 raise StorageError(
                     store_name="atomic_files",
@@ -404,14 +404,17 @@ def _next_jsonl_generation(path: Path) -> Path:
     return path.with_name(f"{path.name}.{max(generations, default=0) + 1:012d}")
 
 
-def _fsync_directory(path: Path) -> None:
+def _fsync_directory(path: Path, *, suppress_errors: bool = True) -> None:
     try:
         descriptor = os.open(path, os.O_RDONLY)
     except OSError:
-        return
+        if suppress_errors:
+            return
+        raise
     try:
         os.fsync(descriptor)
     except OSError:
-        pass
+        if not suppress_errors:
+            raise
     finally:
         os.close(descriptor)
