@@ -93,10 +93,20 @@ def _parse_report(path: Path, data: dict[str, Any]) -> ReportMeta:
     if not isinstance(metadata, dict):
         metadata = {}
 
+    metrics = data.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    v2_total_return = _extract_float(metrics, "total_return")
+    sharpe = _extract_float(metrics, "sharpe")
+    max_drawdown = _extract_float(metrics, "max_drawdown")
+    turnover = _extract_float(metrics, "turnover")
+
     # ── Metrics ──
     # Research reports: summary.baseline_total_return
     # Smoke tests: performance_report.fills
-    total_return = _extract_float(summary, "baseline_total_return")
+    total_return = v2_total_return
+    if total_return is None:
+        total_return = _extract_float(summary, "baseline_total_return")
     if total_return is None:
         total_return = _extract_float(summary, "median_total_return")
 
@@ -115,8 +125,8 @@ def _parse_report(path: Path, data: dict[str, Any]) -> ReportMeta:
 
     # ── Fills ──
     perf = data.get("performance_report", {})
-    fills = 0
-    if isinstance(perf, dict):
+    fills = int(metrics.get("trade_count", 0) or 0)
+    if fills == 0 and isinstance(perf, dict):
         fills = int(perf.get("fills", 0))
 
     # ── Factor name (for title) ──
@@ -137,6 +147,14 @@ def _parse_report(path: Path, data: dict[str, Any]) -> ReportMeta:
 
     # Try diagnostic_report (some backtests)
     if status == "UNKNOWN":
+        diag = data.get("diagnostics", {})
+        if isinstance(diag, dict):
+            status = _normalize_status(str(diag.get("status", "")))
+            raw_checks = diag.get("checks", [])
+            if isinstance(raw_checks, list):
+                checks = [_normalize_check(c) for c in raw_checks if isinstance(c, dict)]
+
+    if status == "UNKNOWN":
         diag = data.get("diagnostic_report", {})
         if isinstance(diag, dict):
             st = str(diag.get("status", "")).upper()
@@ -154,9 +172,9 @@ def _parse_report(path: Path, data: dict[str, Any]) -> ReportMeta:
         symbol=symbol,
         factor_name=factor_name,
         total_return=total_return,
-        sharpe=None,
-        max_drawdown=None,
-        turnover=None,
+        sharpe=sharpe,
+        max_drawdown=max_drawdown,
+        turnover=turnover,
         fills=fills,
         status=status,
         checks=checks,
@@ -225,22 +243,17 @@ def _status_icon(s: str) -> str:
 
 
 def _equity_echart(report: ReportMeta) -> dict[str, Any] | None:
-    blotter = report.raw.get("trade_blotter", [])
-    if not isinstance(blotter, list) or not blotter:
+    points = report.raw.get("equity_points", [])
+    if not isinstance(points, list) or not points:
         return None
-
-    dates: list[str] = []
-    for t in blotter:
-        if isinstance(t, dict):
-            d = t.get("execution_date", "")
-            if d:
-                dates.append(str(d))
-
-    if not dates or report.total_return is None:
+    valid_points = [item for item in points if isinstance(item, dict)]
+    try:
+        dates = [str(item["trade_date"]) for item in valid_points]
+        eq = [float(item["equity"]) for item in valid_points]
+    except (KeyError, TypeError, ValueError):
         return None
-
-    n = len(dates)
-    eq = [round(1.0 + report.total_return * (i / max(n - 1, 1)), 4) for i in range(n)]
+    if not dates or len(dates) != len(eq):
+        return None
 
     return {
         "tooltip": {"trigger": "axis"},
@@ -265,7 +278,7 @@ def _equity_echart(report: ReportMeta) -> dict[str, Any] | None:
                     "silent": True,
                     "data": [
                         {
-                            "yAxis": 1.0,
+                            "yAxis": eq[0],
                             "label": {"formatter": "Baseline"},
                             "lineStyle": {"color": "#9ca3af", "type": "dashed"},
                         }
@@ -539,6 +552,23 @@ def _render_detail(r: ReportMeta, on_back: Any) -> None:
                     "Turnover", _fmt_pct(r.turnover), "swap_horiz", ""
                 )
                 _metric_card("Trades", str(r.fills), "receipt_long", "")
+                raw_metrics = r.raw.get("metrics", {})
+                if isinstance(raw_metrics, dict):
+                    _metric_card(
+                        "Same-trade Gross",
+                        _fmt_pct(_extract_float(raw_metrics, "same_trade_gross_return")),
+                        "account_balance",
+                    )
+                    _metric_card(
+                        "Cost Drag",
+                        _fmt_pct(_extract_float(raw_metrics, "cost_drag")),
+                        "payments",
+                    )
+                    _metric_card(
+                        "Top-N Overlap",
+                        _fmt_pct(_extract_float(raw_metrics, "average_top_n_overlap")),
+                        "compare_arrows",
+                    )
 
         # ── Equity curve ──
         eq_option = _equity_echart(r)
@@ -595,31 +625,17 @@ def _render_detail(r: ReportMeta, on_back: Any) -> None:
                 )
                 cols = [
                     {"name": "symbol", "label": "Symbol", "field": "symbol"},
-                    {
-                        "name": "date",
-                        "label": "Execution Date",
-                        "field": "execution_date",
-                    },
-                    {"name": "qty", "label": "Qty", "field": "quantity"},
+                    {"name": "trade_date", "label": "Trade Date", "field": "trade_date"},
+                    {"name": "signal_date", "label": "Signal Date", "field": "signal_date"},
+                    {"name": "side", "label": "Side", "field": "side"},
+                    {"name": "quantity", "label": "Qty", "field": "quantity"},
+                    {"name": "reference_price", "label": "Reference", "field": "reference_price"},
+                    {"name": "price", "label": "Price", "field": "price"},
+                    {"name": "cost", "label": "Cost", "field": "cost"},
                 ]
-                rows = [
-                    {
-                        "symbol": (
-                            t.get("symbol", "") if isinstance(t, dict) else ""
-                        ),
-                        "execution_date": (
-                            t.get("execution_date", "")
-                            if isinstance(t, dict)
-                            else ""
-                        ),
-                        "quantity": (
-                            t.get("quantity", "") if isinstance(t, dict) else ""
-                        ),
-                    }
-                    for t in blotter
-                ]
+                rows = [t for t in blotter if isinstance(t, dict)]
                 ui.table(
-                    columns=cols, rows=rows, row_key="execution_date"
+                    columns=cols, rows=rows, row_key="trade_date"
                 ).classes("w-full text-xs")
 
         # ── Raw JSON ──
