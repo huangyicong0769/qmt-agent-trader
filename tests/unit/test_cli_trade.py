@@ -10,6 +10,7 @@ from qmt_agent_trader.cli.main import _artifact_store, app
 from qmt_agent_trader.core.config import Settings
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
+    append_order_plan_event,
     build_sample_paper_order_plan,
     save_order_plan,
 )
@@ -68,6 +69,40 @@ def test_trade_risk_check_reports_tampered_plan_without_side_effects(
         ["trade", "risk-check", "--plan", plan.order_plan_id],
     )
 
-    assert result.exit_code != 0
-    assert "hash_mismatch" in result.output.lower()
+    assert result.exit_code == 2
+    assert "error" in result.output.lower()
+    assert "traceback" not in result.output.lower()
+
+
+@pytest.mark.parametrize("command", ["risk-check", "paper"])
+def test_trade_commands_reject_orphan_event_history_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: str,
+) -> None:
+    settings = _configure_project(monkeypatch, tmp_path)
+    paths = PersistencePaths.from_settings(settings)
+    store = _artifact_store(paths.order_plans_root)
+    plan = build_sample_paper_order_plan("s1")
+    content = save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="RISK_CHECKED",
+        actor="test",
+        artifact_store=store,
+    )
+    content.unlink()
+    store.manifest_path_for(plan.order_plan_id).unlink()
+    monkeypatch.setattr("qmt_agent_trader.cli.main.run_order_plan_risk_checks", _fail_if_called)
+    monkeypatch.setattr("qmt_agent_trader.cli.main.append_order_plan_event", _fail_if_called)
+    monkeypatch.setattr("qmt_agent_trader.cli.main._audit_logger", _fail_if_called)
+
+    result = runner.invoke(
+        app,
+        ["trade", command, "--plan", plan.order_plan_id],
+        env={"COLUMNS": "2000"},
+    )
+
+    assert result.exit_code == 2
+    assert "manifest is missing" in result.output.lower()
     assert "traceback" not in result.output.lower()

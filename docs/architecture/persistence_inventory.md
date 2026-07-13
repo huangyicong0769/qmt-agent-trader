@@ -61,7 +61,7 @@ As of the Phase 2 implementation on 2026-07-11, repository production code has n
 | --- | --- | --- | --- | --- | --- |
 | Agent tool audit | `agent/audit.py:AuditLogger`; runtime injects canonical path and shared storage dependencies | `PersistencePaths.audit_root/agent_tool_calls.jsonl` | Schema-versioned JSONL source of truth; legacy rows readable; recursive exact-pattern secret scrub | Single locked `os.write`, configurable fsync, unlimited numbered rotation generations; verifier covers every generation plus active file | Multi-process records cannot interleave and repeated rotation preserves every event. |
 | Core/CLI trade audit stream | `core/audit.py:AuditLogger`; `cli/main.py:_audit_logger` | `PersistencePaths.audit_root/trade.jsonl` by default | Schema-versioned JSONL source of truth with backward-compatible reader | Shared `AuditJsonlStore`, canonical `LockManager`, configurable fsync/rotation and read-only verifier | Public append/read contracts remain unchanged. |
-| Strategy approvals | `strategy/approval.py:write_approval_file`; CLI injects `PersistencePaths.approvals_root` | `{approvals_root}/{strategy_id}_{strategy_version}.approval.yaml` plus `.manifests/{sha256(artifact_id)}.json` | Human-readable YAML governance artifact; immutable decision per strategy version; exact signer and timestamp bytes retained | Shared `ArtifactStore`; legacy YAML is validated then adopted without rewriting; governed reads verify hash/id/path. Same-content CLI retries resume registry attachment/status after partial failure. | A different decision for the same strategy/version conflicts. Storage does not create or alter `approved_by`, `approved_at`, or trading permissions. |
+| Strategy approvals | `strategy/approval.py:write_approval_file`; CLI injects `PersistencePaths.approvals_root` | `{approvals_root}/{strategy_id}_{strategy_version}.approval.yaml` plus `.manifests/{sha256(artifact_id)}.json` | Human-readable YAML governance artifact; immutable decision per strategy version; exact signer and timestamp bytes retained | Shared `ArtifactStore`; governed reads require and verify the manifest hash/id/path and do not adopt legacy YAML. Same-content CLI retries resume registry attachment/status after partial failure. | A different decision for the same strategy/version conflicts. Storage does not create or alter `approved_by`, `approved_at`, or trading permissions. |
 | Order plans and governance events | `services/order_plan_service.py:save_order_plan`, `append_order_plan_event`; CLI injects `PersistencePaths.order_plans_root` | `{order_plans_root}/{order_plan_id}.json`, manifest, and separately cataloged `order_plan_events` at `.events/{sha256(order_plan_id)}.jsonl` | Immutable JSON plan plus schema-versioned append-only lifecycle events | All governed APIs require the canonical artifact store. Event append/read uses canonical locking; runtime and `storage verify` share validation for complete tails, schema, unique event ids, one order-plan id, and filename/id binding. | Any truncated tail, malformed record, mixed identity, duplicate event id, or tampered plan fails closed. Main-plan quarantine moves content, manifest, and its event stream as one governance unit. |
 | Research JSON reports | `services/research_report_service.py:save_research_report` | Injected reports root `{research_run_id}.json` plus deterministic manifest | Immutable JSON carrying research-only, approval and decision-boundary metadata | Shared path-safe create-only `ArtifactStore`; exact-byte SHA-256 and optional structured `storage_status` receipt | Duplicate run identity conflicts; partial/faulted publication is not returned as saved. |
 | Backtest JSON reports | `backtest/service.py:run_backtest_report`; `strategy/execution_adapter.py:run_strategy_backtest` | Injected report root `{run_id}.json` plus deterministic manifest | Immutable run artifact with run/strategy/factor provenance | Shared create-only `ArtifactStore`; exact-byte hash, verified manifest, shared data-lake lock where available | Duplicate run identity cannot replace reviewed evidence; manifest diagnostics expose missing or hash-mismatched files. |
@@ -70,9 +70,11 @@ As of the Phase 2 implementation on 2026-07-11, repository production code has n
 | Tool-registration proposals | `agent/tools/meta_tools.py:_propose_tool_registration` | Normally sandbox `.../generated/tools/tool_proposal_{candidate_id}.json`; fallback **CWD-relative** `proposals/` | JSON review artifact; intended immutable per candidate | Direct overwrite; no lock/create-only/hash/manifest | Proposal evidence can be replaced after scoring. AS create-only artifact tied to generated-code manifest. |
 | Oversized subprocess payload spill | `agent/tool_registry.py:_prepare_process_payload`, `_process_payload_path` | **CWD-relative** `reports/tool_payloads/{sanitized_run_id}_{sanitized_tool}.json` | JSON transient transport artifact; mutable/reused by run/tool key | Direct write; no lock/atomic swap/expiry/backup; filename sanitization | Parallel same tool/run calls overwrite payloads and can resolve the wrong result; partial payload fails process response. CPS transient blob/cache API with unique call id and atomic create. |
 
-## Module-relative paths requiring explicit migration
+## Historical module-relative paths requiring migration
 
-These paths bypass `Settings.resolved_*` and must be injected through the future store interfaces instead of being resolved from `cwd` or accepted as unrestricted payload strings:
+This list records the pre-refactor migration targets. It is historical evidence, not a description
+of current runtime path resolution; the completed migrations are summarized under Current
+architecture below.
 
 - `web/ui/pages/chat.py:SESSIONS_DIR` -> `sessions/`.
 - Validation/backtest caches now use injected `PersistencePaths.cache_root`; no production cache root is derived from CWD.
@@ -111,7 +113,16 @@ The baseline was produced from current code using searches for `write_text`, `wr
 - Order plans, approvals, reports, and generated code require a canonical `ArtifactStore`;
   ordinary reads do not migrate or adopt legacy files.
 - Order-plan content, manifests, and event streams share the artifact-root lock. Event corruption
-  fails closed for append, read, operational verification, and execution.
+  fails closed for append, read, operational verification, and execution. A structurally valid
+  event stream is not healthy unless its governance binding resolves to the corresponding verified
+  order-plan artifact; `storage verify` validates that artifact binding too.
+- `ArtifactManifest` accepts schema v1 only. Both `byte_length` and `content_hash` are strong
+  verification invariants for reads, diagnostics, and operational verification.
+- A manifest retains ownership of its safe `relative_path` even when artifact content is missing;
+  another artifact cannot claim that path until the owning manifest is explicitly removed or
+  quarantined.
+- `StoreDefinition.layout` is catalog metadata and does not change according to whether the
+  configured file or directory currently exists.
 - Governed quarantine distinguishes hash mismatch, content missing before quarantine, safely
   recoverable invalid manifests, unrecoverable manifests, and unrelated orphan content.
 - DataLake external Parquet SQL uses `query_external()`; registered views and control tables use

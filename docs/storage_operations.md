@@ -19,6 +19,10 @@ uv run qmt-agent storage quarantine sessions bad-record.json
 
 `verify` is strictly read-only. The default checks parsable metadata and durable
 envelopes; `--deep` reads every Parquet row group. A non-healthy result exits 1.
+For order-plan governance, a valid event stream is insufficient by itself:
+verification also requires the bound order-plan manifest and content to pass schema-v1,
+byte-length, content-hash, identity, and relative-path checks. Orphan streams and streams
+bound to missing or tampered plans are unhealthy.
 Run `migrate --dry-run` first: it reads the migration registry without creating
 the database or directories. The apply command runs only the immutable built-in
 non-destructive catalog; destructive migrations require a separate explicitly
@@ -74,6 +78,12 @@ diagnostics, and time. Evidence
 publication failure rolls the complete unit back. Tushare's existing repair
 command remains the owner of its specialized ledger history-reset protocol.
 
+Artifact manifests support schema v1 only. Their `byte_length` and `content_hash`
+are independent strong invariants, and a manifest continues to own its contained
+relative path even if content is missing. That ownership ends only when the
+manifest is removed or isolated by quarantine; missing content alone never frees
+the path for a different artifact.
+
 ## Lock order and limitations
 
 The backup barrier precedes resource locks, which precede the DuckDB write lock.
@@ -85,3 +95,6 @@ The backup destination shares the local data root. It protects against logical
 or operator damage when retained, but not disk loss, host loss, or distributed
 writers. Retention, encryption, off-device copies, restore selection, and cloud
 support require a later evidence-backed design.
+
+Catalog layout is declarative: each `StoreDefinition` keeps its configured
+single-file or directory layout regardless of whether that path currently exists.
