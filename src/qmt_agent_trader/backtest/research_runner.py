@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from qmt_agent_trader.backtest.commission import CostConfig, calculate_cost
+from qmt_agent_trader.backtest.commission import CostConfig, calculate_cost_breakdown
 from qmt_agent_trader.backtest.research_models import (
     FactorRankResearchResult,
     ResearchDataQuality,
@@ -119,11 +119,12 @@ class FactorRankResearchRunner:
                     bps=scenario.slippage_bps,
                 )
                 notional = quantity * price
-                cost = calculate_cost(
+                breakdown = calculate_cost_breakdown(
                     notional,
                     side,
                     _scaled_cost_config(self.config.base_cost_config, scenario.cost_multiplier),
                 )
+                cost = breakdown.total
                 if side == Side.BUY and notional + cost > cash:
                     affordable = int(cash / max(price, 1e-9) // 100 * 100)
                     quantity = min(quantity, affordable)
@@ -131,13 +132,14 @@ class FactorRankResearchRunner:
                         rejected_orders += 1
                         continue
                     notional = quantity * price
-                    cost = calculate_cost(
+                    breakdown = calculate_cost_breakdown(
                         notional,
                         side,
                         _scaled_cost_config(
                             self.config.base_cost_config, scenario.cost_multiplier
                         ),
                     )
+                    cost = breakdown.total
                 cash, positions = self._apply_trade(
                     cash,
                     positions,
@@ -158,9 +160,9 @@ class FactorRankResearchRunner:
                         reference_price=float(bar["open"]),
                         price=price,
                         notional=notional,
-                        commission=cost,
-                        stamp_tax=0.0,
-                        transfer_fee=0.0,
+                        commission=breakdown.commission,
+                        stamp_tax=breakdown.stamp_tax,
+                        transfer_fee=breakdown.transfer_fee,
                         slippage_cost=abs(price - float(bar["open"])) * quantity,
                         cost=cost,
                     )
