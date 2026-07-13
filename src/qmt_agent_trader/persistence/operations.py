@@ -85,6 +85,18 @@ class QuarantineReceipt:
     manifest_path: Path
 
 
+@dataclass(frozen=True)
+class ResetPlan:
+    status: Literal["planned"]
+    profile: Literal["preserve-raw"]
+    digest: str
+    file_count: int
+    byte_count: int
+    preserved_raw_count: int
+    preserved_raw_bytes: int
+    delete_paths: tuple[str, ...]
+
+
 class StorageOperations:
     def __init__(self, paths: PersistencePaths, *, timeout_seconds: float = 30.0) -> None:
         self.paths = paths
@@ -110,6 +122,119 @@ class StorageOperations:
             )
             for store in self.catalog.stores
         ]
+
+    def plan_reset(self, *, profile: str) -> ResetPlan:
+        if profile != "preserve-raw":
+            raise StorageValidationError(
+                store_name="storage_reset",
+                path=self.paths.project_root,
+                operation="plan_reset",
+                reason=f"unsupported reset profile: {profile}",
+            )
+        raw_files = self._snapshot_reset_files(self.paths.lake_root / "raw", validate_parquet=True)
+        delete_files: list[tuple[str, int, str]] = []
+        delete_paths: list[str] = []
+        for target in self._reset_targets():
+            if not target.exists() and not target.is_symlink():
+                continue
+            self._validate_reset_target(target)
+            delete_paths.append(target.relative_to(self.paths.project_root).as_posix())
+            delete_files.extend(self._snapshot_reset_files(target))
+        payload = {
+            "schema_version": 1,
+            "profile": profile,
+            "delete_paths": sorted(delete_paths),
+            "delete_files": sorted(delete_files),
+            "preserved_raw": sorted(raw_files),
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return ResetPlan(
+            status="planned",
+            profile="preserve-raw",
+            digest=digest,
+            file_count=len(delete_files),
+            byte_count=sum(item[1] for item in delete_files),
+            preserved_raw_count=len(raw_files),
+            preserved_raw_bytes=sum(item[1] for item in raw_files),
+            delete_paths=tuple(sorted(delete_paths)),
+        )
+
+    def _reset_targets(self) -> tuple[Path, ...]:
+        data = self.paths.data_root
+        targets = [
+            self.paths.lake_root / "silver",
+            self.paths.lake_root / "gold",
+            self.paths.lake_root / "metadata",
+            data / "factors",
+            data / "strategies",
+            data / "todos",
+            self.paths.experiments_root,
+            self.paths.registries_root,
+            self.paths.control_db_path,
+            self.paths.sessions_root,
+            self.paths.approvals_root,
+            self.paths.order_plans_root,
+            self.paths.reports_root,
+            self.paths.audit_root,
+            self.paths.quarantine_root,
+            self.paths.backup_root,
+            self.paths.project_root / "src/qmt_agent_trader/agent/generated",
+        ]
+        targets.extend(sorted(data.glob(f"{self.paths.control_db_path.name}.*")))
+        return tuple(dict.fromkeys(path.resolve(strict=False) for path in targets))
+
+    def _validate_reset_target(self, target: Path) -> None:
+        root = self.paths.project_root
+        if target != root and root not in target.parents:
+            raise StorageValidationError(
+                store_name="storage_reset",
+                path=target,
+                operation="plan_reset",
+                reason="reset target escapes project root",
+            )
+        paths = [target]
+        if target.is_dir():
+            paths.extend(target.rglob("*"))
+        if any(path.is_symlink() for path in paths):
+            raise StorageValidationError(
+                store_name="storage_reset",
+                path=target,
+                operation="plan_reset",
+                reason="reset target contains a symbolic link",
+            )
+
+    def _snapshot_reset_files(
+        self, root: Path, *, validate_parquet: bool = False
+    ) -> list[tuple[str, int, str]]:
+        if not root.exists():
+            return []
+        self._validate_reset_target(root)
+        candidates = [root] if root.is_file() else sorted(root.rglob("*"))
+        snapshot: list[tuple[str, int, str]] = []
+        for path in candidates:
+            if not path.is_file():
+                continue
+            if validate_parquet and path.suffix == ".parquet":
+                try:
+                    pq.read_metadata(path)
+                except Exception as exc:
+                    raise StorageValidationError(
+                        store_name="storage_reset",
+                        path=path,
+                        operation="plan_reset",
+                        reason="raw dataset is corrupt",
+                        original_error=exc,
+                    ) from exc
+            snapshot.append(
+                (
+                    path.relative_to(self.paths.project_root).as_posix(),
+                    path.stat().st_size,
+                    _hash(path),
+                )
+            )
+        return snapshot
 
     def verify(self, *, deep: bool = False) -> VerificationResult:
         diagnostics: list[StorageDiagnostic] = []

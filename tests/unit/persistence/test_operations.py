@@ -42,6 +42,51 @@ def operations(tmp_path: Path) -> StorageOperations:
     return StorageOperations(paths)
 
 
+def test_preserve_raw_reset_plan_is_deterministic_and_read_only(
+    operations: StorageOperations,
+) -> None:
+    raw = operations.paths.lake_root / "raw/tushare/daily.parquet"
+    raw.parent.mkdir(parents=True)
+    pd.DataFrame({"ts_code": ["000001.SZ"]}).to_parquet(raw, index=False)
+    stale = operations.paths.reports_root / "research/legacy.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"legacy": true}')
+    before = {p: p.read_bytes() for p in operations.paths.project_root.rglob("*") if p.is_file()}
+
+    first = operations.plan_reset(profile="preserve-raw")
+    second = operations.plan_reset(profile="preserve-raw")
+
+    assert first == second
+    assert first.status == "planned"
+    assert first.file_count == 1
+    assert first.byte_count == stale.stat().st_size
+    assert first.preserved_raw_count == 1
+    assert len(first.digest) == 64
+    assert {p: p.read_bytes() for p in operations.paths.project_root.rglob("*") if p.is_file()} == before
+
+
+def test_preserve_raw_reset_plan_rejects_corrupt_raw(operations: StorageOperations) -> None:
+    raw = operations.paths.lake_root / "raw/broken.parquet"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"broken")
+
+    with pytest.raises(StorageValidationError, match="raw dataset is corrupt"):
+        operations.plan_reset(profile="preserve-raw")
+
+
+def test_preserve_raw_reset_plan_rejects_symlink(operations: StorageOperations) -> None:
+    outside = operations.paths.project_root.parent / "outside-reset-target"
+    outside.write_text("keep")
+    reports = operations.paths.reports_root
+    reports.mkdir(parents=True)
+    (reports / "escape").symlink_to(outside)
+
+    with pytest.raises(StorageValidationError, match="symbolic link"):
+        operations.plan_reset(profile="preserve-raw")
+
+    outside.unlink()
+
+
 def test_inventory_covers_every_canonical_path(operations: StorageOperations) -> None:
     names = {item.name for item in operations.inventory()}
     assert names == {store.name for store in operations.catalog.stores}
