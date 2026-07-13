@@ -5,7 +5,7 @@ import pytest
 
 from qmt_agent_trader.persistence import atomic_files as atomic_files_module
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
-from qmt_agent_trader.persistence.errors import StorageError
+from qmt_agent_trader.persistence.errors import StorageAppendRollbackError, StorageError
 from qmt_agent_trader.persistence.locks import LockManager
 
 
@@ -95,3 +95,149 @@ def test_directory_fsync_failure_reports_uncertain_durability_without_rollback(
     assert caught.value.reason == "JSONL append succeeded but directory fsync failed"
     assert caught.value.recoverable is False
     assert path.read_text() == '{"event":1}\n'
+
+
+def test_failed_first_jsonl_append_restores_absent_file_state(
+    atomic_store: AtomicFileStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events" / "stream.jsonl"
+
+    def fail_write(_descriptor: int, _payload: bytes) -> int:
+        raise OSError("injected first append failure")
+
+    monkeypatch.setattr(os, "write", fail_write)
+
+    with pytest.raises(StorageError, match="original state was restored"):
+        atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
+
+    assert not path.exists()
+
+
+def test_partial_first_jsonl_append_removes_new_file(
+    atomic_store: AtomicFileStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events" / "stream.jsonl"
+    real_write = os.write
+
+    def partial_write(descriptor: int, payload: bytes) -> int:
+        written = max(1, len(payload) // 2)
+        real_write(descriptor, payload[:written])
+        return written
+
+    monkeypatch.setattr(os, "write", partial_write)
+
+    with pytest.raises(StorageError):
+        atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
+
+    assert not path.exists()
+
+
+def test_failed_append_preserves_preexisting_empty_jsonl(
+    atomic_store: AtomicFileStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events" / "stream.jsonl"
+    path.parent.mkdir(parents=True)
+    path.touch()
+
+    monkeypatch.setattr(
+        os,
+        "write",
+        lambda *_args: (_ for _ in ()).throw(OSError("injected")),
+    )
+
+    with pytest.raises(StorageError):
+        atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
+
+    assert path.exists()
+    assert path.read_bytes() == b""
+
+
+def test_failed_first_append_reports_cleanup_failure(
+    atomic_store: AtomicFileStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events" / "stream.jsonl"
+    real_unlink = Path.unlink
+
+    monkeypatch.setattr(
+        os,
+        "write",
+        lambda *_args: (_ for _ in ()).throw(OSError("append failed")),
+    )
+
+    def fail_stream_cleanup(target: Path, *, missing_ok: bool = False) -> None:
+        if target == path:
+            raise OSError("cleanup failed")
+        real_unlink(target, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_stream_cleanup)
+
+    with pytest.raises(StorageAppendRollbackError):
+        atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
+
+
+def test_failed_first_append_closes_descriptor_before_unlink(
+    atomic_store: AtomicFileStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events" / "stream.jsonl"
+    real_close = os.close
+    real_unlink = Path.unlink
+    descriptor_closed = False
+
+    monkeypatch.setattr(
+        os,
+        "write",
+        lambda *_args: (_ for _ in ()).throw(OSError("append failed")),
+    )
+
+    def record_close(descriptor: int) -> None:
+        nonlocal descriptor_closed
+        real_close(descriptor)
+        descriptor_closed = True
+
+    def assert_closed_before_unlink(target: Path, *, missing_ok: bool = False) -> None:
+        assert descriptor_closed
+        real_unlink(target, missing_ok=missing_ok)
+
+    monkeypatch.setattr(os, "close", record_close)
+    monkeypatch.setattr(Path, "unlink", assert_closed_before_unlink)
+
+    with pytest.raises(StorageError):
+        atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
+
+    assert not path.exists()
+
+
+def test_failed_first_append_strictly_fsyncs_parent_after_cleanup(
+    atomic_store: AtomicFileStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events" / "stream.jsonl"
+    calls: list[tuple[Path, bool, bool]] = []
+
+    monkeypatch.setattr(
+        os,
+        "write",
+        lambda *_args: (_ for _ in ()).throw(OSError("append failed")),
+    )
+
+    def record_directory_fsync(directory: Path, *, suppress_errors: bool = True) -> None:
+        calls.append((directory, suppress_errors, path.exists()))
+
+    monkeypatch.setattr(atomic_files_module, "_fsync_directory", record_directory_fsync)
+
+    with pytest.raises(StorageError):
+        atomic_store.append_jsonl(path, {"event": 1}, fsync=True)
+
+    assert calls == [(path.parent, False, False)]
+    assert not path.exists()

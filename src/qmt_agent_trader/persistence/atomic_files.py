@@ -230,6 +230,8 @@ class AtomicFileStore:
         was_missing = not path.exists()
         descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
         original_length = os.fstat(descriptor).st_size
+        append_error: Exception | None = None
+        rollback_error: Exception | None = None
         try:
             written = os.write(descriptor, encoded)
             if written != len(encoded):
@@ -237,26 +239,45 @@ class AtomicFileStore:
             if fsync:
                 os.fsync(descriptor)
         except Exception as exc:
+            append_error = exc
             try:
                 os.ftruncate(descriptor, original_length)
                 if fsync:
                     os.fsync(descriptor)
             except Exception as rollback_exc:
+                rollback_error = rollback_exc
+        finally:
+            os.close(descriptor)
+
+        if append_error is not None:
+            if rollback_error is not None:
                 raise StorageAppendRollbackError(
                     path=path,
-                    append_error=exc,
-                    rollback_error=rollback_exc,
-                ) from rollback_exc
+                    append_error=append_error,
+                    rollback_error=rollback_error,
+                ) from rollback_error
+
+            if was_missing:
+                try:
+                    path.unlink(missing_ok=True)
+                    if fsync:
+                        _fsync_directory(path.parent, suppress_errors=False)
+                except Exception as cleanup_error:
+                    raise StorageAppendRollbackError(
+                        path=path,
+                        append_error=append_error,
+                        rollback_error=cleanup_error,
+                    ) from cleanup_error
+
             raise StorageError(
                 store_name="atomic_files",
                 path=path,
                 operation="append_jsonl",
-                reason="append failed and original length was restored",
+                reason="append failed and original state was restored",
                 recoverable=True,
-                original_error=exc,
-            ) from exc
-        finally:
-            os.close(descriptor)
+                original_error=append_error,
+            ) from append_error
+
         if fsync and was_missing:
             try:
                 _fsync_directory(path.parent, suppress_errors=False)
