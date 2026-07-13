@@ -17,7 +17,7 @@ from uuid import uuid4
 import pyarrow.parquet as pq
 import yaml
 
-from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
+from qmt_agent_trader.persistence.artifacts import ArtifactStore, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.audit import AuditJsonlStore
 from qmt_agent_trader.persistence.catalog import StoreCatalog, StoreDefinition, StoreLayout
@@ -39,7 +39,6 @@ from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
     verify_bound_order_plan_event_stream_assume_locked,
-    verify_order_plan_event_stream,
 )
 
 
@@ -204,15 +203,35 @@ class StorageOperations:
             if not definition.path.exists():
                 return diagnostics
             for path in sorted(definition.path.glob("*.jsonl")):
-                verification = verify_bound_order_plan_event_stream_assume_locked(
-                    store=artifact_store,
-                    path=path,
-                )
                 diagnostics.extend(
-                    StorageDiagnostic(definition.name, item.code, item.reason, path)
-                    for item in verification.corruptions
+                    self._order_plan_event_diagnostics_assume_locked(
+                        definition,
+                        path,
+                        artifact_store=artifact_store,
+                    )
                 )
         return diagnostics
+
+    def _order_plan_event_diagnostics_assume_locked(
+        self,
+        definition: StoreDefinition,
+        path: Path,
+        *,
+        artifact_store: ArtifactStore,
+    ) -> list[StorageDiagnostic]:
+        verification = verify_bound_order_plan_event_stream_assume_locked(
+            store=artifact_store,
+            path=path,
+        )
+        return [
+            StorageDiagnostic(
+                definition.name,
+                item.code,
+                item.reason,
+                path,
+            )
+            for item in verification.corruptions
+        ]
 
     def migrate(self, *, dry_run: bool) -> list[str]:
         return MigrationRegistry(self.database).apply(storage_migrations(), dry_run=dry_run)
@@ -449,11 +468,29 @@ class StorageOperations:
             / f"{source.name}.{datetime.now(tz=UTC).strftime('%Y%m%dT%H%M%S.%fZ')}.quarantine"
         )
         manifest_path = target.with_suffix(target.suffix + ".json")
-        quarantine_lock: str | Path = source
-        if definition.verifier_id == "order_plan_event_stream_v1":
-            quarantine_lock = f"artifact-store:{self.paths.order_plans_root.resolve()}"
+        event_artifact_store = (
+            artifact_store_for_root(
+                self.paths.order_plans_root,
+                lock_manager=self.locks,
+            )
+            if definition.verifier_id == "order_plan_event_stream_v1"
+            else None
+        )
+        quarantine_lock: str | Path = (
+            event_artifact_store._resource
+            if event_artifact_store is not None
+            else source
+        )
         with self.locks.resource_lock(quarantine_lock):
-            validation = self._verify_store_file(definition, source, deep=True)
+            validation = (
+                self._order_plan_event_diagnostics_assume_locked(
+                    definition,
+                    source,
+                    artifact_store=event_artifact_store,
+                )
+                if event_artifact_store is not None
+                else self._verify_store_file(definition, source, deep=True)
+            )
             if not any(item.severity == "error" for item in validation):
                 raise StorageValidationError(
                     store_name="quarantine",
@@ -480,6 +517,22 @@ class StorageOperations:
                         "sha256": digest,
                         "size": size,
                         "reason": "explicit operator quarantine",
+                        **(
+                            {
+                                "diagnostics": [
+                                    {
+                                        "component": item.component,
+                                        "code": item.code,
+                                        "reason": item.reason,
+                                        "path": str(item.path) if item.path else None,
+                                        "severity": item.severity,
+                                    }
+                                    for item in validation
+                                ]
+                            }
+                            if event_artifact_store is not None
+                            else {}
+                        ),
                         "quarantined_at": datetime.now(tz=UTC).isoformat(),
                     },
                     create_only=True,
@@ -558,12 +611,6 @@ class StorageOperations:
     def _verify_store_file(
         self, store: StoreDefinition, path: Path, *, deep: bool
     ) -> list[StorageDiagnostic]:
-        if store.verifier_id == "order_plan_event_stream_v1":
-            verification = verify_order_plan_event_stream(path)
-            return [
-                StorageDiagnostic(store.name, item.code, item.reason, path)
-                for item in verification.corruptions
-            ]
         if store.name == "audit" and path.suffix == ".jsonl":
             audit_verification = AuditJsonlStore(path, self.atomic).verify()
             diagnostics = [

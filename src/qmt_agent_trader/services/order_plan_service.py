@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from qmt_agent_trader.broker.order import Order
 from qmt_agent_trader.broker.order_plan import OrderPlan, OrderPlanApproval, RiskChecks
@@ -166,15 +166,23 @@ def verify_bound_order_plan_event_stream_assume_locked(
         )
 
     try:
-        verification = store._verify_assume_locked(
-            detected_id,
-            expected_relative_path=f"{detected_id}.json",
-        )
+        _load_order_plan_assume_locked(detected_id, store=store)
     except StorageValidationError:
+        manifest_exists = store.manifest_path_for(detected_id).is_file()
+        content_exists = store.path_for(f"{detected_id}.json").is_file()
+        code = (
+            "MISSING_ORDER_PLAN"
+            if not manifest_exists or not content_exists
+            else "INVALID_ORDER_PLAN"
+        )
         corruptions.append(
             OrderPlanEventCorruption(
-                "MISSING_ORDER_PLAN",
-                "event stream references a missing or invalid order plan manifest",
+                code,
+                (
+                    "event stream references a missing order plan"
+                    if code == "MISSING_ORDER_PLAN"
+                    else "event stream references an invalid order plan"
+                ),
             )
         )
         return BoundOrderPlanEventVerification(
@@ -183,28 +191,9 @@ def verify_bound_order_plan_event_stream_assume_locked(
             corruptions=tuple(corruptions),
         )
 
-    if verification.code == "MISSING_ARTIFACT":
-        corruptions.append(
-            OrderPlanEventCorruption(
-                "MISSING_ORDER_PLAN",
-                "event stream references a missing order plan",
-            )
-        )
-        plan_verified = False
-    elif not verification.verified:
-        corruptions.append(
-            OrderPlanEventCorruption(
-                "INVALID_ORDER_PLAN",
-                "event stream references an invalid order plan",
-            )
-        )
-        plan_verified = False
-    else:
-        plan_verified = True
-
     return BoundOrderPlanEventVerification(
         stream=stream,
-        plan_verified=plan_verified,
+        plan_verified=True,
         corruptions=tuple(corruptions),
     )
 
@@ -277,16 +266,27 @@ def _normalize_order_plan_identifier(
     return raw.name
 
 
-def load_order_plan(
-    identifier: str | Path,
+def _load_order_plan_assume_locked(
+    order_plan_id: str,
     *,
-    artifact_store: ArtifactStore,
+    store: ArtifactStore,
 ) -> OrderPlan:
-    store = artifact_store
-    order_plan_id = _normalize_order_plan_identifier(identifier, store=store)
     relative_path = f"{order_plan_id}.json"
-    raw = store.read_verified(order_plan_id, expected_relative_path=relative_path)
-    plan = OrderPlan.model_validate_json(raw)
+    raw = store._read_verified_assume_locked(
+        order_plan_id,
+        expected_relative_path=relative_path,
+    )
+    try:
+        plan = OrderPlan.model_validate_json(raw)
+    except ValidationError as exc:
+        raise StorageValidationError(
+            store_name="order_plans",
+            path=store.path_for(relative_path),
+            operation="read",
+            reason="order plan payload is invalid",
+            original_error=exc,
+        ) from exc
+
     if plan.order_plan_id != order_plan_id:
         raise StorageValidationError(
             store_name="order_plans",
@@ -295,6 +295,17 @@ def load_order_plan(
             reason="order plan id does not match repository path",
         )
     return plan
+
+
+def load_order_plan(
+    identifier: str | Path,
+    *,
+    artifact_store: ArtifactStore,
+) -> OrderPlan:
+    store = artifact_store
+    order_plan_id = _normalize_order_plan_identifier(identifier, store=store)
+    with store.lock_manager.resource_lock(store._resource):
+        return _load_order_plan_assume_locked(order_plan_id, store=store)
 
 
 def append_order_plan_event(
@@ -307,26 +318,25 @@ def append_order_plan_event(
 ) -> OrderPlanEvent:
     store = artifact_store
     with store.lock_manager.resource_lock(store._resource):
-        verification = store._verify_assume_locked(
-            order_plan_id,
-            expected_relative_path=f"{order_plan_id}.json",
-        )
-        if not verification.verified:
-            store._read_verified_assume_locked(
-                order_plan_id, expected_relative_path=f"{order_plan_id}.json"
-            )
         event_path = _event_path(store, order_plan_id)
+
         if event_path.exists():
-            stream = verify_order_plan_event_stream(
-                event_path, expected_order_plan_id=order_plan_id
+            verification = verify_bound_order_plan_event_stream_assume_locked(
+                store=store,
+                path=event_path,
+                expected_order_plan_id=order_plan_id,
             )
-            if not stream.healthy:
+            if not verification.healthy:
+                reason = "; ".join(item.code for item in verification.corruptions)
                 raise StorageCorruptError(
                     store_name="order_plan_events",
                     path=event_path,
                     operation="append",
-                    reason="cannot append to corrupt event stream",
+                    reason=f"cannot append to corrupt or unbound event stream: {reason}",
                 )
+        else:
+            _load_order_plan_assume_locked(order_plan_id, store=store)
+
         event = OrderPlanEvent(
             order_plan_id=order_plan_id,
             event_type=event_type,

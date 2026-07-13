@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import threading
@@ -24,6 +25,7 @@ from qmt_agent_trader.persistence.migrations import MigrationRegistry
 from qmt_agent_trader.persistence.operations import StorageOperations
 from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.services.order_plan_service import (
+    OrderPlanEvent,
     append_order_plan_event,
     build_sample_paper_order_plan,
     load_order_plan_events,
@@ -115,6 +117,52 @@ def test_storage_verify_rejects_orphan_order_plan_event_stream(
     assert any(
         item.component == "order_plan_events"
         and item.code in {"MISSING_ORDER_PLAN", "ORPHAN_EVENT_STREAM"}
+        for item in result.diagnostics
+    )
+
+
+def test_storage_verify_rejects_event_bound_to_invalid_order_plan_payload(
+    operations: StorageOperations,
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    store = artifact_store_for_root(
+        operations.paths.order_plans_root,
+        lock_manager=operations.locks,
+    )
+
+    payload = plan.model_dump(mode="json")
+    payload["strategy_id"] = "tampered-without-updating-plan-hash"
+    store.create(
+        f"{plan.order_plan_id}.json",
+        json.dumps(payload).encode("utf-8"),
+        metadata=ArtifactMetadata(
+            artifact_id=plan.order_plan_id,
+            artifact_type="order_plan",
+            producer="test",
+        ),
+    )
+
+    event_path = (
+        operations.paths.order_plans_root
+        / ".events"
+        / f"{hashlib.sha256(plan.order_plan_id.encode()).hexdigest()}.jsonl"
+    )
+    with operations.locks.resource_lock(store._resource):
+        store.atomic_store.append_jsonl_assume_locked(
+            event_path,
+            OrderPlanEvent(
+                order_plan_id=plan.order_plan_id,
+                event_type="PLAN_CREATED",
+                actor="test",
+            ).model_dump(mode="json"),
+        )
+
+    result = operations.verify(deep=True)
+
+    assert not result.healthy
+    assert any(
+        item.component == "order_plan_events"
+        and item.code == "INVALID_ORDER_PLAN"
         for item in result.diagnostics
     )
 
@@ -779,6 +827,40 @@ def test_event_only_quarantine_uses_order_plan_artifact_root_lock(
     operations.quarantine("order_plan_events", event_path.name)
 
     assert f"artifact-store:{operations.paths.order_plans_root.resolve()}" in resources
+
+
+def test_quarantine_accepts_structurally_valid_orphan_event_stream(
+    operations: StorageOperations,
+) -> None:
+    plan = build_sample_paper_order_plan("s1")
+    store = artifact_store_for_root(
+        operations.paths.order_plans_root,
+        lock_manager=operations.locks,
+    )
+    content = save_order_plan(plan, artifact_store=store)
+    append_order_plan_event(
+        plan.order_plan_id,
+        event_type="PLAN_CREATED",
+        actor="test",
+        artifact_store=store,
+    )
+
+    event_path = next(
+        (operations.paths.order_plans_root / ".events").glob("*.jsonl")
+    )
+    content.unlink()
+    store.manifest_path_for(plan.order_plan_id).unlink()
+
+    receipt = operations.quarantine(
+        "order_plan_events",
+        event_path.relative_to(
+            operations.paths.order_plans_root / ".events"
+        ).as_posix(),
+    )
+
+    assert not event_path.exists()
+    assert receipt.path.is_file()
+    assert receipt.manifest_path.is_file()
 
 
 def test_event_store_verify_and_append_share_one_root_snapshot(

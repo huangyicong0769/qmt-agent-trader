@@ -1,4 +1,5 @@
 import hashlib
+import json
 import threading
 from pathlib import Path
 
@@ -282,6 +283,69 @@ def test_existing_empty_order_plan_event_stream_fails_closed(tmp_path: Path) -> 
     event_path.touch()
 
     with pytest.raises(StorageCorruptError, match="ORPHAN_EVENT_STREAM"):
+        load_order_plan_events(plan.order_plan_id, artifact_store=store)
+
+
+def test_append_rejects_existing_empty_event_stream(tmp_path: Path) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+    save_order_plan(plan, artifact_store=store)
+
+    event_path = (
+        tmp_path
+        / ".events"
+        / f"{hashlib.sha256(plan.order_plan_id.encode()).hexdigest()}.jsonl"
+    )
+    event_path.parent.mkdir(parents=True)
+    event_path.touch()
+
+    with pytest.raises(StorageCorruptError, match="ORPHAN_EVENT_STREAM"):
+        append_order_plan_event(
+            plan.order_plan_id,
+            event_type="RISK_CHECKED",
+            actor="test",
+            artifact_store=store,
+        )
+
+    assert event_path.read_bytes() == b""
+
+
+def test_event_binding_rejects_semantically_invalid_order_plan_payload(
+    tmp_path: Path,
+) -> None:
+    plan = make_plan()
+    store = _store(tmp_path)
+
+    payload = plan.model_dump(mode="json")
+    payload["strategy_id"] = "tampered-without-updating-plan-hash"
+    content = json.dumps(payload).encode("utf-8")
+
+    store.create(
+        f"{plan.order_plan_id}.json",
+        content,
+        metadata=ArtifactMetadata(
+            artifact_id=plan.order_plan_id,
+            artifact_type="order_plan",
+            producer="test",
+        ),
+    )
+
+    event_path = (
+        tmp_path
+        / ".events"
+        / f"{hashlib.sha256(plan.order_plan_id.encode()).hexdigest()}.jsonl"
+    )
+    with store.lock_manager.resource_lock(store._resource):
+        store.atomic_store.append_jsonl_assume_locked(
+            event_path,
+            OrderPlanEvent(
+                order_plan_id=plan.order_plan_id,
+                event_type="PLAN_CREATED",
+                actor="test",
+            ).model_dump(mode="json"),
+        )
+
+    with pytest.raises(StorageCorruptError, match="INVALID_ORDER_PLAN"):
         load_order_plan_events(plan.order_plan_id, artifact_store=store)
 
 
