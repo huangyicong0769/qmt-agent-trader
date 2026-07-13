@@ -17,6 +17,35 @@ uv run qmt-agent storage locks
 uv run qmt-agent storage quarantine sessions bad-record.json
 ```
 
+## Destructive preserve-raw reset
+
+Use this only when an incompatible storage refactor makes existing control state and Agent
+artifacts disposable. The profile preserves validated provider data under `data/lake/raw` and
+removes derived lake layers, control metadata, registries, sessions, reports, approvals, order
+plans, generated code, audit logs, backups, and quarantine evidence.
+
+First create a read-only plan:
+
+```bash
+uv run qmt-agent storage reset --profile preserve-raw --dry-run
+```
+
+Review `delete_paths`, `file_count`, `byte_count`, and the preserved raw totals. Execute only with
+the exact digest returned by that plan:
+
+```bash
+uv run qmt-agent storage reset --profile preserve-raw --confirm <digest>
+```
+
+The digest is bound to file paths, sizes, and hashes. Any intervening change rejects execution.
+The command refuses corrupt raw Parquet or symbolic links, excludes cooperating writers through
+the maintenance barrier, and stages removals on the same filesystem. It initializes the current
+control schema and runs deep verification before deleting staging. A failure restores the prior
+state; `rollback_failed` requires manual inspection of the reported staging directory.
+
+Successful resets write a content-free receipt under `data/storage-resets/`. This workflow is not
+a migration or backup facility: successful execution permanently deletes the old state.
+
 `verify` is strictly read-only. The default checks parsable metadata and durable
 envelopes; `--deep` reads every Parquet row group. A non-healthy result exits 1.
 For order-plan governance, a valid event stream is insufficient by itself:
