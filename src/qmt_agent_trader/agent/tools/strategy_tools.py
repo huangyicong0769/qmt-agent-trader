@@ -700,7 +700,15 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         cached["cache_hit"] = True
         cached["timeout_seconds_used"] = timeout_seconds_used
         cached["cost_estimate"] = cost_estimate
-        cached.update(_universe_evidence_payload(universe_info, symbols, resolved_universe))
+        universe_evidence = _universe_evidence_payload(
+            universe_info, symbols, resolved_universe
+        )
+        cached.update(universe_evidence)
+        cached["warnings"] = list(
+            dict.fromkeys(
+                [*list(cached.get("warnings") or []), *universe_evidence["universe_warnings"]]
+            )
+        )
         return _with_backtest_evidence_status(cached)
     try:
         result = run_strategy_backtest(
@@ -733,7 +741,13 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             return _with_backtest_evidence_status(blocked)
         raise
     payload = result.model_dump(mode="json")
-    payload.update(_universe_evidence_payload(universe_info, symbols, resolved_universe))
+    universe_evidence = _universe_evidence_payload(universe_info, symbols, resolved_universe)
+    payload.update(universe_evidence)
+    payload["warnings"] = list(
+        dict.fromkeys(
+            [*list(payload.get("warnings") or []), *universe_evidence["universe_warnings"]]
+        )
+    )
     if saved_strategy is not None and not saved_strategy.code_path:
         warnings = list(payload.get("warnings") or [])
         warning = "strategy has no generated code; backtest used canonical adapter"
@@ -1782,7 +1796,7 @@ def _resolve_backtest_universe(
             rebalance_frequency=str(
                 input_data.get("rebalance_frequency") or spec.rebalance_frequency
             ),
-            limit=int(input_data.get("limit", 2000)),
+            limit=(int(input_data["limit"]) if input_data.get("limit") is not None else None),
             include_exclusions=bool(input_data.get("include_exclusions", False)),
         )
         if resolved.get("status") != "OK":
@@ -1832,7 +1846,7 @@ def _resolve_backtest_universe(
         spec,
         mode="snapshot",
         as_of_date=as_of_date,
-        limit=int(input_data.get("limit", 2000)),
+        limit=(int(input_data["limit"]) if input_data.get("limit") is not None else None),
         include_exclusions=bool(input_data.get("include_exclusions", False)),
     )
     if resolved.get("status") != "OK":
@@ -2043,6 +2057,18 @@ def _universe_evidence_payload(
     symbols: list[str],
     resolved_universe: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    metadata = (
+        resolved_universe.get("metadata", {})
+        if isinstance(resolved_universe, dict)
+        else {}
+    )
+    warnings: list[str] = []
+    if isinstance(metadata, dict) and bool(metadata.get("truncated")):
+        warnings.append(
+            "universe_truncated:"
+            f"{metadata.get('pre_limit_selected_count')}->{metadata.get('selected_count')}:"
+            f"{metadata.get('truncation_source')}"
+        )
     return {
         "universe_requested": universe_info.get("universe_requested"),
         "universe_effective": universe_info.get("universe_effective"),
@@ -2055,6 +2081,7 @@ def _universe_evidence_payload(
         "symbols_sample": symbols[:10],
         "rolling_universe_stats": universe_info.get("rolling_universe_stats"),
         "universe_resolution": resolved_universe,
+        "universe_warnings": warnings,
     }
 
 
