@@ -163,6 +163,33 @@ def storage_quarantine(store: str, record: str) -> None:
     print_json({"status": "quarantined", **as_json(receipt)})
 
 
+@storage_app.command("reset")
+def storage_reset(
+    profile: str = typer.Option(..., "--profile"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    confirm: str | None = typer.Option(None, "--confirm"),
+) -> None:
+    operations = _storage_operations()
+    try:
+        if dry_run:
+            print_json(as_json(operations.plan_reset(profile=profile)))
+            return
+        if confirm is None:
+            print_json(
+                {
+                    "status": "rejected",
+                    "reason": "--confirm must contain the digest from a current dry-run",
+                }
+            )
+            raise typer.Exit(code=1)
+        receipt = operations.reset(profile=profile, confirm=confirm)
+    except StorageError as exc:
+        _raise_storage_cli_error(exc)
+    print_json(as_json(receipt))
+    if receipt.status != "completed":
+        raise typer.Exit(code=1)
+
+
 def _raise_storage_cli_error(exc: StorageError) -> None:
     print_json(
         scrub_sensitive({"status": "error", "error_type": type(exc).__name__, "reason": exc.reason})

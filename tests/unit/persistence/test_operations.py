@@ -62,7 +62,12 @@ def test_preserve_raw_reset_plan_is_deterministic_and_read_only(
     assert first.byte_count == stale.stat().st_size
     assert first.preserved_raw_count == 1
     assert len(first.digest) == 64
-    assert {p: p.read_bytes() for p in operations.paths.project_root.rglob("*") if p.is_file()} == before
+    after = {
+        path: path.read_bytes()
+        for path in operations.paths.project_root.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
 
 
 def test_preserve_raw_reset_plan_rejects_corrupt_raw(operations: StorageOperations) -> None:
@@ -85,6 +90,87 @@ def test_preserve_raw_reset_plan_rejects_symlink(operations: StorageOperations) 
         operations.plan_reset(profile="preserve-raw")
 
     outside.unlink()
+
+
+def test_preserve_raw_reset_executes_and_preserves_raw(operations: StorageOperations) -> None:
+    raw = operations.paths.lake_root / "raw/tushare/daily.parquet"
+    raw.parent.mkdir(parents=True)
+    pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]}).to_parquet(raw, index=False)
+    raw_hash = hashlib.sha256(raw.read_bytes()).hexdigest()
+    for stale in (
+        operations.paths.lake_root / "silver/daily.parquet",
+        operations.paths.lake_root / "gold/factors.parquet",
+        operations.paths.sessions_root / "s1.json",
+        operations.paths.reports_root / "research/legacy.json",
+        operations.paths.audit_root / "agent_tool_calls.jsonl",
+    ):
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("legacy")
+    plan = operations.plan_reset(profile="preserve-raw")
+
+    receipt = operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert receipt.status == "completed"
+    assert hashlib.sha256(raw.read_bytes()).hexdigest() == raw_hash
+    assert not (operations.paths.lake_root / "silver").exists()
+    assert not operations.paths.sessions_root.exists()
+    assert operations.paths.control_db_path.exists()
+    assert operations.verify(deep=True).healthy
+    payload = json.loads(receipt.receipt_path.read_text())
+    assert payload["digest"] == plan.digest
+    assert "legacy" not in receipt.receipt_path.read_text()
+    assert not list(operations.paths.project_root.glob(".storage-reset-*.staging"))
+
+
+def test_preserve_raw_reset_rejects_snapshot_drift(operations: StorageOperations) -> None:
+    stale = operations.paths.reports_root / "research/legacy.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("first")
+    plan = operations.plan_reset(profile="preserve-raw")
+    stale.write_text("changed")
+
+    with pytest.raises(StorageValidationError, match="confirmation digest"):
+        operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert stale.read_text() == "changed"
+
+
+def test_preserve_raw_reset_rolls_back_when_initialization_fails(
+    operations: StorageOperations, monkeypatch
+) -> None:
+    stale = operations.paths.sessions_root / "s1.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("legacy-session")
+    plan = operations.plan_reset(profile="preserve-raw")
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("injected initialization failure")
+
+    monkeypatch.setattr(MigrationRegistry, "apply", fail)
+    receipt = operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert receipt.status == "rolled_back"
+    assert stale.read_text() == "legacy-session"
+    assert not operations.paths.control_db_path.exists()
+
+
+def test_preserve_raw_reset_rolls_back_when_receipt_write_fails(
+    operations: StorageOperations, monkeypatch
+) -> None:
+    stale = operations.paths.sessions_root / "s1.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("legacy-session")
+    plan = operations.plan_reset(profile="preserve-raw")
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("injected receipt failure")
+
+    monkeypatch.setattr(operations.atomic, "write_json", fail)
+    receipt = operations.reset(profile="preserve-raw", confirm=plan.digest)
+
+    assert receipt.status == "rolled_back"
+    assert stale.read_text() == "legacy-session"
+    assert not operations.paths.control_db_path.exists()
 
 
 def test_inventory_covers_every_canonical_path(operations: StorageOperations) -> None:

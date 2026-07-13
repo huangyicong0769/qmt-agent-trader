@@ -97,6 +97,19 @@ class ResetPlan:
     delete_paths: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ResetReceipt:
+    status: Literal["completed", "rolled_back", "rollback_failed"]
+    profile: Literal["preserve-raw"]
+    digest: str
+    file_count: int
+    byte_count: int
+    preserved_raw_count: int
+    preserved_raw_bytes: int
+    receipt_path: Path | None = None
+    reason: str | None = None
+
+
 class StorageOperations:
     def __init__(self, paths: PersistencePaths, *, timeout_seconds: float = 30.0) -> None:
         self.paths = paths
@@ -161,6 +174,125 @@ class StorageOperations:
             delete_paths=tuple(sorted(delete_paths)),
         )
 
+    def reset(self, *, profile: str, confirm: str) -> ResetReceipt:
+        plan = self.plan_reset(profile=profile)
+        if not confirm or confirm != plan.digest:
+            raise StorageValidationError(
+                store_name="storage_reset",
+                path=self.paths.project_root,
+                operation="reset",
+                reason="confirmation digest does not match the current reset plan",
+            )
+        staging = self.paths.project_root / f".storage-reset-{uuid4().hex}.staging"
+        moved: list[tuple[Path, Path]] = []
+        receipt_path: Path | None = None
+        raw_before = self._snapshot_reset_files(
+            self.paths.lake_root / "raw", validate_parquet=True
+        )
+        with self.locks.backup_barrier():
+            try:
+                staging.mkdir(parents=False, exist_ok=False)
+                for relative in plan.delete_paths:
+                    source = self.paths.project_root / relative
+                    if not source.exists():
+                        raise StorageConflictError(
+                            store_name="storage_reset",
+                            path=source,
+                            operation="reset",
+                            reason="reset target changed after confirmation",
+                        )
+                    destination = staging / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, destination)
+                    moved.append((source, destination))
+                MigrationRegistry(self.database).apply(storage_migrations())
+                raw_after = self._snapshot_reset_files(
+                    self.paths.lake_root / "raw", validate_parquet=True
+                )
+                if raw_after != raw_before:
+                    raise StorageConflictError(
+                        store_name="storage_reset",
+                        path=self.paths.lake_root / "raw",
+                        operation="reset",
+                        reason="preserved raw snapshot changed during reset",
+                    )
+                verification = self.verify(deep=True)
+                if not verification.healthy:
+                    raise StorageValidationError(
+                        store_name="storage_reset",
+                        path=self.paths.project_root,
+                        operation="reset",
+                        reason="post-reset deep verification failed",
+                    )
+                receipt_path = (
+                    self.paths.data_root
+                    / "storage-resets"
+                    / f"{datetime.now(tz=UTC).strftime('%Y%m%dT%H%M%S.%fZ')}.json"
+                )
+                self.atomic.write_json(
+                    receipt_path,
+                    {
+                        "schema_version": 1,
+                        "status": "completed",
+                        "profile": plan.profile,
+                        "digest": plan.digest,
+                        "completed_at": datetime.now(tz=UTC).isoformat(),
+                        "deleted_file_count": plan.file_count,
+                        "deleted_byte_count": plan.byte_count,
+                        "preserved_raw_count": plan.preserved_raw_count,
+                        "preserved_raw_bytes": plan.preserved_raw_bytes,
+                    },
+                    create_only=True,
+                )
+                shutil.rmtree(staging)
+                return ResetReceipt(
+                    "completed",
+                    plan.profile,
+                    plan.digest,
+                    plan.file_count,
+                    plan.byte_count,
+                    plan.preserved_raw_count,
+                    plan.preserved_raw_bytes,
+                    receipt_path,
+                )
+            except Exception as exc:
+                try:
+                    if receipt_path is not None:
+                        receipt_path.unlink(missing_ok=True)
+                    self._remove_new_reset_state()
+                    for source, destination in reversed(moved):
+                        source.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(destination, source)
+                    shutil.rmtree(staging, ignore_errors=True)
+                except Exception as rollback_exc:
+                    return ResetReceipt(
+                        "rollback_failed",
+                        plan.profile,
+                        plan.digest,
+                        plan.file_count,
+                        plan.byte_count,
+                        plan.preserved_raw_count,
+                        plan.preserved_raw_bytes,
+                        reason=f"{type(exc).__name__}; rollback: {type(rollback_exc).__name__}",
+                    )
+                return ResetReceipt(
+                    "rolled_back",
+                    plan.profile,
+                    plan.digest,
+                    plan.file_count,
+                    plan.byte_count,
+                    plan.preserved_raw_count,
+                    plan.preserved_raw_bytes,
+                    reason=type(exc).__name__,
+                )
+
+    def _remove_new_reset_state(self) -> None:
+        for target in self._reset_targets():
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+
     def _reset_targets(self) -> tuple[Path, ...]:
         data = self.paths.data_root
         targets = [
@@ -218,7 +350,9 @@ class StorageOperations:
                 continue
             if validate_parquet and path.suffix == ".parquet":
                 try:
-                    pq.read_metadata(path)
+                    parquet = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
+                    for index in range(parquet.num_row_groups):
+                        parquet.read_row_group(index)  # type: ignore[no-untyped-call]
                 except Exception as exc:
                     raise StorageValidationError(
                         store_name="storage_reset",

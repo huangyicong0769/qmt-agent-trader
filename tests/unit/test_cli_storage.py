@@ -12,7 +12,7 @@ from qmt_agent_trader.persistence.errors import StorageUnavailableError
 def test_storage_help_lists_all_operations() -> None:
     result = CliRunner().invoke(app, ["storage", "--help"])
     assert result.exit_code == 0
-    for command in ("inventory", "verify", "migrate", "backup", "locks", "quarantine"):
+    for command in ("inventory", "verify", "migrate", "backup", "locks", "quarantine", "reset"):
         assert command in result.stdout
 
 
@@ -40,6 +40,42 @@ def test_storage_migrate_dry_run_has_no_mutation(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     assert json.loads(result.stdout)["dry_run"] is True
     assert list(tmp_path.rglob("*")) == before
+
+
+def test_storage_reset_requires_dry_run_digest_and_executes(monkeypatch, tmp_path) -> None:
+    settings = Settings(project_root=tmp_path)
+    monkeypatch.setattr("qmt_agent_trader.cli.main._settings", lambda: settings)
+    stale = tmp_path / "sessions/legacy.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("legacy")
+    runner = CliRunner()
+
+    planned = runner.invoke(
+        app, ["storage", "reset", "--profile", "preserve-raw", "--dry-run"]
+    )
+    assert planned.exit_code == 0
+    plan = json.loads(planned.stdout)
+    assert plan["status"] == "planned"
+    assert stale.exists()
+
+    missing = runner.invoke(app, ["storage", "reset", "--profile", "preserve-raw"])
+    assert missing.exit_code == 1
+    assert json.loads(missing.stdout)["status"] == "rejected"
+
+    completed = runner.invoke(
+        app,
+        [
+            "storage",
+            "reset",
+            "--profile",
+            "preserve-raw",
+            "--confirm",
+            plan["digest"],
+        ],
+    )
+    assert completed.exit_code == 0
+    assert json.loads(completed.stdout)["status"] == "completed"
+    assert not stale.exists()
 
 
 def test_every_storage_command_happy_path(monkeypatch, tmp_path) -> None:
@@ -88,6 +124,7 @@ def test_every_storage_command_has_structured_failure_exit(monkeypatch) -> None:
         ["backup"],
         ["locks"],
         ["quarantine", "sessions", "bad.json"],
+        ["reset", "--profile", "preserve-raw", "--dry-run"],
     ]
     for command in commands:
         result = runner.invoke(app, ["storage", *command])
