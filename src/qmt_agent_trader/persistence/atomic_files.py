@@ -156,7 +156,7 @@ class AtomicFileStore:
                 for index in range(parquet.num_row_groups):
                     parquet.read_row_group(index)  # type: ignore[no-untyped-call]
             finally:
-                parquet.close()  # type: ignore[no-untyped-call]
+                parquet.close()
             with temp.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(temp, path)
