@@ -24,4 +24,4 @@ path, lock, atomic-file, migration, and verification seams remain authoritative.
 - [x] Expose dry-run and confirmed execution through `qmt-agent storage reset`.
 - [x] Cover success, drift rejection, corrupt raw, symlink safety, and injected failure rollback.
 - [x] Run full repository verification, execute the real reset, and verify the clean state.
-- [ ] Merge the verified atomic commits to `main` and rerun the final gate.
+- [x] Merge the verified atomic commits to `main` and rerun the final gate.
