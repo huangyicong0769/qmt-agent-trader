@@ -57,12 +57,13 @@ def test_trade_risk_check_reports_tampered_plan_without_side_effects(
         artifact_store=_artifact_store(paths.order_plans_root),
     )
     path.write_text(
-        path.read_text(encoding="utf-8").replace("paper_account", "tampered_account"),
+        path.read_text(encoding="utf-8").replace("paper_account", "bogus_account"),
         encoding="utf-8",
     )
     monkeypatch.setattr("qmt_agent_trader.cli.main.run_order_plan_risk_checks", _fail_if_called)
     monkeypatch.setattr("qmt_agent_trader.cli.main.append_order_plan_event", _fail_if_called)
     monkeypatch.setattr("qmt_agent_trader.cli.main._audit_logger", _fail_if_called)
+    monkeypatch.setattr("typer.rich_utils.MAX_WIDTH", 2000)
 
     result = runner.invoke(
         app,
@@ -70,7 +71,7 @@ def test_trade_risk_check_reports_tampered_plan_without_side_effects(
     )
 
     assert result.exit_code == 2
-    assert "error" in result.output.lower()
+    assert "hash_mismatch" in result.output.lower()
     assert "traceback" not in result.output.lower()
 
 
@@ -96,11 +97,11 @@ def test_trade_commands_reject_orphan_event_history_without_side_effects(
     monkeypatch.setattr("qmt_agent_trader.cli.main.run_order_plan_risk_checks", _fail_if_called)
     monkeypatch.setattr("qmt_agent_trader.cli.main.append_order_plan_event", _fail_if_called)
     monkeypatch.setattr("qmt_agent_trader.cli.main._audit_logger", _fail_if_called)
+    monkeypatch.setattr("typer.rich_utils.MAX_WIDTH", 2000)
 
     result = runner.invoke(
         app,
         ["trade", command, "--plan", plan.order_plan_id],
-        env={"COLUMNS": "2000"},
     )
 
     assert result.exit_code == 2
