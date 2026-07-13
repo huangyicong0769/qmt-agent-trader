@@ -60,6 +60,12 @@ class FactorRankResearchRunner:
             else None
         )
         self.factor_frame = compute_factor_frame(self.bars, config.factor_name, registry=registry)
+        if config.lower_is_better:
+            self.factor_frame = self.factor_frame.copy()
+            self.factor_frame["factor_value"] = -pd.to_numeric(
+                self.factor_frame["factor_value"],
+                errors="coerce",
+            )
         self._bars_by_date_symbol = {
             trade_date: frame.set_index("symbol", drop=False)
             for trade_date, frame in self.bars.groupby("trade_date", sort=True)
@@ -116,8 +122,13 @@ class FactorRankResearchRunner:
                     signal_date,
                 )
                 if factors is not None and not factors.empty:
-                    targets = self._target_quantities(
+                    selected_symbols = self._select_symbols(
                         factors=factors,
+                        positions=positions,
+                        top_n=top_n,
+                    )
+                    targets = self._target_quantities(
+                        selected_symbols=selected_symbols,
                         day_bars=day_bars,
                         trade_date=trade_date,
                         equity=equity_before,
@@ -126,6 +137,46 @@ class FactorRankResearchRunner:
                         scenario=scenario,
                     )
                     before_symbols = set(positions)
+                    planned_turnover = self._planned_one_way_turnover(
+                        positions=positions,
+                        targets=targets,
+                        trade_date=trade_date,
+                        day_bars=day_bars,
+                        equity=equity_before,
+                    )
+                    if planned_turnover < self.config.min_turnover_threshold:
+                        rebalance_points.append(
+                            ResearchRebalancePoint(
+                                signal_date=f"{signal_date:%Y-%m-%d}",
+                                trade_date=f"{trade_date:%Y-%m-%d}",
+                                equity_before=equity_before,
+                                gross_traded_notional=0.0,
+                                one_way_turnover=0.0,
+                                selected_count=len(selected_symbols),
+                                retained_count=len(before_symbols & set(selected_symbols)),
+                                entered_count=0,
+                                exited_count=0,
+                                skipped=True,
+                                skip_reason="below_min_turnover_threshold",
+                            )
+                        )
+                        market_value = self._position_value_strict(
+                            positions,
+                            trade_date=trade_date,
+                            day_bars=day_bars,
+                            field="close",
+                            error_code="MISSING_HELD_POSITION_BAR",
+                        )
+                        equity_points.append(
+                            ResearchEquityPoint(
+                                trade_date=f"{trade_date:%Y-%m-%d}",
+                                cash=cash,
+                                market_value=market_value,
+                                equity=cash + market_value,
+                                stale_position_count=0,
+                            )
+                        )
+                        continue
                     orders = [
                         (symbol, targets.get(symbol, 0) - positions.get(symbol, 0))
                         for symbol in sorted(set(positions) | set(targets))
@@ -357,7 +408,7 @@ class FactorRankResearchRunner:
     def _target_quantities(
         self,
         *,
-        factors: pd.DataFrame,
+        selected_symbols: list[str],
         day_bars: pd.DataFrame,
         trade_date: date,
         equity: float,
@@ -365,12 +416,12 @@ class FactorRankResearchRunner:
         max_position: float,
         scenario: SensitivityScenario,
     ) -> dict[str, int]:
-        selected = factors["symbol"].astype(str).tolist()[:top_n]
-        if not selected:
+        if not selected_symbols:
             return {}
-        weight = min(1.0 / len(selected), max_position)
+        investable_weight = max(0.0, 1.0 - self.config.cash_buffer_pct)
+        weight = min(investable_weight / len(selected_symbols), max_position)
         targets: dict[str, int] = {}
-        for symbol in selected:
+        for symbol in selected_symbols:
             reference_price = self._required_price(
                 symbol=symbol,
                 trade_date=trade_date,
@@ -381,6 +432,48 @@ class FactorRankResearchRunner:
             price = fixed_bps_slippage(reference_price, Side.BUY, bps=scenario.slippage_bps)
             targets[symbol] = int((equity * weight) / price // 100 * 100)
         return targets
+
+    def _select_symbols(
+        self,
+        *,
+        factors: pd.DataFrame,
+        positions: dict[str, int],
+        top_n: int,
+    ) -> list[str]:
+        ranked_symbols = factors["symbol"].astype(str).tolist()
+        retention_set = set(ranked_symbols[: top_n + self.config.rank_buffer])
+        retained = [symbol for symbol in positions if symbol in retention_set]
+        vacancies = max(0, top_n - len(retained))
+        new_entries = [symbol for symbol in ranked_symbols if symbol not in retained][:vacancies]
+        return retained + new_entries
+
+    def _planned_one_way_turnover(
+        self,
+        *,
+        positions: dict[str, int],
+        targets: dict[str, int],
+        trade_date: date,
+        day_bars: pd.DataFrame,
+        equity: float,
+    ) -> float:
+        if equity <= 0:
+            return 0.0
+        symbols = set(positions) | set(targets)
+        current_weights: dict[str, float] = {}
+        target_weights: dict[str, float] = {}
+        for symbol in symbols:
+            price = self._required_price(
+                symbol=symbol,
+                trade_date=trade_date,
+                day_bars=day_bars,
+                field="open",
+                error_code="MISSING_EXECUTION_BAR",
+            )
+            current_weights[symbol] = positions.get(symbol, 0) * price / equity
+            target_weights[symbol] = targets.get(symbol, 0) * price / equity
+        return 0.5 * sum(
+            abs(target_weights[symbol] - current_weights[symbol]) for symbol in symbols
+        )
 
     @staticmethod
     def _apply_trade(
