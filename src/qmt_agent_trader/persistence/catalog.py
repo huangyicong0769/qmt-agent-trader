@@ -9,6 +9,7 @@ from typing import Literal
 from qmt_agent_trader.persistence.paths import PersistencePaths
 
 StoreKind = Literal["duckdb", "parquet", "json", "jsonl", "artifact", "code"]
+StoreLayout = Literal["single_file", "directory"]
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class StoreDefinition:
     mutable: bool
     lock_resource: str
     backup: str
+    layout: StoreLayout
     governed: bool = False
     verifier_id: str = "generic"
 
@@ -44,6 +46,7 @@ class StoreCatalog:
                 True,
                 str(paths.control_db_path),
                 "checkpoint-copy",
+                "single_file",
             ),
             StoreDefinition(
                 "lake_raw",
@@ -55,6 +58,7 @@ class StoreCatalog:
                 True,
                 str(paths.lake_root / "raw"),
                 "copy",
+                "directory",
             ),
             StoreDefinition(
                 "lake_silver",
@@ -66,6 +70,7 @@ class StoreCatalog:
                 True,
                 str(paths.lake_root / "silver"),
                 "copy",
+                "directory",
             ),
             StoreDefinition(
                 "lake_gold",
@@ -77,6 +82,7 @@ class StoreCatalog:
                 True,
                 str(paths.lake_root / "gold"),
                 "copy",
+                "directory",
             ),
             StoreDefinition(
                 "lake_metadata",
@@ -88,6 +94,7 @@ class StoreCatalog:
                 True,
                 str(paths.lake_root / "metadata"),
                 "copy",
+                "directory",
             ),
             StoreDefinition(
                 "factor_registry",
@@ -99,6 +106,7 @@ class StoreCatalog:
                 True,
                 str(data / "factors/registry.json"),
                 "copy",
+                "single_file",
                 verifier_id="versioned_registry_v2",
             ),
             StoreDefinition(
@@ -111,6 +119,7 @@ class StoreCatalog:
                 True,
                 str(data / "strategies/registry.json"),
                 "copy",
+                "single_file",
                 verifier_id="versioned_registry_v2",
             ),
             StoreDefinition(
@@ -123,6 +132,7 @@ class StoreCatalog:
                 True,
                 str(data / "todos"),
                 "copy",
+                "directory",
                 verifier_id="versioned_record_todos_v2",
             ),
             StoreDefinition(
@@ -135,6 +145,7 @@ class StoreCatalog:
                 True,
                 str(paths.experiments_root),
                 "copy",
+                "directory",
                 verifier_id="versioned_record_experiments_v2",
             ),
             StoreDefinition(
@@ -147,6 +158,7 @@ class StoreCatalog:
                 True,
                 str(paths.sessions_root),
                 "copy",
+                "directory",
                 verifier_id="versioned_record_sessions_v2",
             ),
             StoreDefinition(
@@ -159,6 +171,7 @@ class StoreCatalog:
                 True,
                 str(paths.registries_root / "universes"),
                 "copy",
+                "directory",
                 verifier_id="versioned_record_universes_v2",
             ),
             StoreDefinition(
@@ -169,8 +182,9 @@ class StoreCatalog:
                 "governance",
                 1,
                 False,
-                str(paths.approvals_root),
+                f"artifact-store:{paths.approvals_root.resolve()}",
                 "copy",
+                "directory",
                 True,
             ),
             StoreDefinition(
@@ -181,8 +195,9 @@ class StoreCatalog:
                 "governance+events",
                 1,
                 True,
-                str(paths.order_plans_root),
+                f"artifact-store:{paths.order_plans_root.resolve()}",
                 "copy",
+                "directory",
                 True,
             ),
             StoreDefinition(
@@ -193,8 +208,9 @@ class StoreCatalog:
                 "governance-events",
                 1,
                 True,
-                str(paths.order_plans_root),
+                f"artifact-store:{paths.order_plans_root.resolve()}",
                 "copy",
+                "directory",
                 verifier_id="order_plan_event_stream_v1",
             ),
             StoreDefinition(
@@ -205,8 +221,9 @@ class StoreCatalog:
                 "backtest-evidence",
                 1,
                 False,
-                str(paths.reports_root / "backtests"),
+                f"artifact-store:{(paths.reports_root / 'backtests').resolve()}",
                 "copy",
+                "directory",
                 True,
             ),
             StoreDefinition(
@@ -217,8 +234,9 @@ class StoreCatalog:
                 "research-evidence",
                 1,
                 False,
-                str(paths.reports_root / "research"),
+                f"artifact-store:{(paths.reports_root / 'research').resolve()}",
                 "copy",
+                "directory",
                 True,
             ),
             StoreDefinition(
@@ -231,6 +249,7 @@ class StoreCatalog:
                 True,
                 str(paths.audit_root),
                 "copy",
+                "directory",
             ),
             StoreDefinition(
                 "generated_code",
@@ -240,8 +259,12 @@ class StoreCatalog:
                 "review-candidates",
                 1,
                 False,
-                str(paths.project_root / "src/qmt_agent_trader/agent/generated"),
+                "artifact-store:"
+                + str(
+                    (paths.project_root / "src/qmt_agent_trader/agent/generated").resolve()
+                ),
                 "copy",
+                "directory",
                 True,
             ),
         )

@@ -567,6 +567,21 @@ def test_quarantine_rejects_traversal_and_moves_invalid_record(
     assert receipt.path.exists() and receipt.manifest_path.exists()
 
 
+def test_uninitialized_single_file_quarantine_rejects_sibling(
+    operations: StorageOperations,
+) -> None:
+    assert not operations.paths.control_db_path.exists()
+    sibling = operations.paths.control_db_path / "sibling.duckdb"
+    sibling.parent.mkdir(parents=True, exist_ok=True)
+    sibling.write_bytes(b"not-a-database")
+
+    with pytest.raises(StorageValidationError) as exc_info:
+        operations.quarantine("control_db", "sibling.duckdb")
+
+    assert exc_info.value.reason == "record path is unsafe or missing"
+    assert sibling.exists()
+
+
 def test_verify_and_quarantine_share_versioned_record_hash_validation(
     operations: StorageOperations,
 ) -> None:
@@ -847,6 +862,7 @@ def test_locks_report_maps_catalog_resources_and_marks_unknown(
     report = {item["path"]: item for item in operations.locks_report()}
 
     assert report[str(known_path)]["known_resource"] == "sessions"
+    assert report[str(known_path)]["resource"] == known.lock_resource
     assert report[str(unknown_path)]["known_resource"] is None
     assert report[str(unknown_path)]["resource_status"] == "unknown"
     assert report[str(known_path)]["active"] is False

@@ -40,3 +40,30 @@ def test_catalog_names_every_real_store_and_excludes_operational_roots(tmp_path:
     excluded = {paths.cache_root, paths.locks_root, paths.backup_root, paths.quarantine_root}
     assert not excluded & {store.path for store in catalog.stores}
     assert all(store.owner and store.lock_resource and store.backup for store in catalog.stores)
+
+
+def test_catalog_declares_layout_for_every_store(tmp_path: Path) -> None:
+    paths = PersistencePaths.from_settings(Settings(project_root=tmp_path))
+    catalog = StoreCatalog.canonical(paths)
+
+    single_files = {"control_db", "factor_registry", "strategy_registry"}
+    assert {store.name for store in catalog.stores if store.layout == "single_file"} == (
+        single_files
+    )
+    assert all(store.layout in {"single_file", "directory"} for store in catalog.stores)
+
+
+def test_governed_catalog_lock_resources_match_artifact_stores(tmp_path: Path) -> None:
+    paths = PersistencePaths.from_settings(Settings(project_root=tmp_path))
+    catalog = StoreCatalog.canonical(paths)
+
+    expected_roots = {
+        "approvals": paths.approvals_root,
+        "order_plans": paths.order_plans_root,
+        "order_plan_events": paths.order_plans_root,
+        "backtest_reports": paths.reports_root / "backtests",
+        "research_reports": paths.reports_root / "research",
+        "generated_code": paths.project_root / "src/qmt_agent_trader/agent/generated",
+    }
+    for name, root in expected_roots.items():
+        assert catalog.by_name(name).lock_resource == f"artifact-store:{root.resolve()}"

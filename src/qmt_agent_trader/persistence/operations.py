@@ -20,7 +20,7 @@ import yaml
 from qmt_agent_trader.persistence.artifacts import artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.audit import AuditJsonlStore
-from qmt_agent_trader.persistence.catalog import StoreCatalog, StoreDefinition
+from qmt_agent_trader.persistence.catalog import StoreCatalog, StoreDefinition, StoreLayout
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
 from qmt_agent_trader.persistence.errors import (
     StorageBackupError,
@@ -52,6 +52,7 @@ class StoreInventory:
     source_of_truth: str
     schema_version: int | None
     mutable: bool
+    layout: StoreLayout
     lock_policy: str
     backup_policy: str
     health: str
@@ -103,6 +104,7 @@ class StorageOperations:
                 source_of_truth=store.source_of_truth,
                 schema_version=store.schema_version,
                 mutable=store.mutable,
+                layout=store.layout,
                 lock_policy=store.lock_resource,
                 backup_policy=store.backup,
                 health="present" if store.path.exists() else "not_initialized",
@@ -342,25 +344,40 @@ class StorageOperations:
     def locks_report(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         known = {
-            self.locks.lock_path_for_resource(store.lock_resource): store.name
+            self.locks.lock_path_for_resource(store.lock_resource): (
+                store.name,
+                store.lock_resource,
+            )
             for store in self.catalog.stores
         }
         database_digest = hashlib.sha256(
             str(self.paths.control_db_path.resolve()).encode()
         ).hexdigest()
-        known[self.paths.locks_root / f"database-{database_digest}.lock"] = "control_db"
-        known[self.paths.locks_root / "writer-admission.lock"] = "writer_admission"
+        known[self.paths.locks_root / f"database-{database_digest}.lock"] = (
+            "control_db",
+            str(self.paths.control_db_path.resolve()),
+        )
+        known[self.paths.locks_root / "writer-admission.lock"] = (
+            "writer_admission",
+            "writer-admission",
+        )
         if not self.paths.locks_root.exists():
             return result
         for path in sorted(self.paths.locks_root.glob("*.lock")):
             active = _lock_is_active(path)
-            resource = known.get(path)
+            known_metadata = known.get(path)
             result.append(
                 {
                     "path": str(path),
-                    "resource": path.stem,
-                    "known_resource": resource,
-                    "resource_status": "known" if resource is not None else "unknown",
+                    "resource": (
+                        known_metadata[1] if known_metadata is not None else path.stem
+                    ),
+                    "known_resource": (
+                        known_metadata[0] if known_metadata is not None else None
+                    ),
+                    "resource_status": (
+                        "known" if known_metadata is not None else "unknown"
+                    ),
                     "active": active,
                 }
             )
@@ -385,9 +402,10 @@ class StorageOperations:
                 reason="unknown store",
             ) from None
         raw = Path(record)
-        root = definition.path.parent if definition.path.is_file() else definition.path
+        is_single_file = definition.layout == "single_file"
+        root = definition.path.parent if is_single_file else definition.path
         source = (root / raw).resolve()
-        expected_file = definition.path.resolve() if definition.path.is_file() else None
+        expected_file = definition.path.resolve() if is_single_file else None
         invalid_single_file = expected_file is not None and source != expected_file
         if (
             raw.is_absolute()
