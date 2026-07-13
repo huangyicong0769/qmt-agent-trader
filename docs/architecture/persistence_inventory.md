@@ -113,9 +113,11 @@ The baseline was produced from current code using searches for `write_text`, `wr
 - Order plans, approvals, reports, and generated code require a canonical `ArtifactStore`;
   ordinary reads do not migrate or adopt legacy files.
 - Order-plan content, manifests, and event streams share the artifact-root lock. Event corruption
-  fails closed for append, read, operational verification, and execution. A structurally valid
-  event stream is not healthy unless its governance binding resolves to the corresponding verified
-  order-plan artifact; `storage verify` validates that artifact binding too.
+  fails closed for append, read, operational verification, event-only quarantine, and execution.
+  An existing event stream uses the same bound validity rule at every one of these boundaries.
+  Event validity includes parsing the referenced `OrderPlan`, repository identity, and `plan_hash`;
+  a valid artifact envelope alone is insufficient. A failed first JSONL append restores the
+  pre-write absence of the stream rather than leaving a zero-byte file.
 - `ArtifactManifest` accepts schema v1 only. Both `byte_length` and `content_hash` are strong
   verification invariants for reads, diagnostics, and operational verification.
 - A manifest retains ownership of its safe `relative_path` even when artifact content is missing;
@@ -135,7 +137,7 @@ The baseline was produced from current code using searches for `write_text`, `wr
 `StoreCatalog.canonical(PersistencePaths)` is now the single executable inventory
 boundary. `qmt-agent storage inventory` emits one structured entry per real
 logical store: DuckDB, raw/silver/gold/metadata lake layers, factor/strategy
-registries, todos, experiments, sessions, canonical and legacy universes,
+registries, todos, experiments, sessions, the canonical universe root,
 approvals, order plans/events, separate governed `reports/backtests` and
 `reports/research`, audit streams, and governed generated code at the production
 composition root `src/qmt_agent_trader/agent/generated`. Configured

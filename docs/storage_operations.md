@@ -23,6 +23,21 @@ For order-plan governance, a valid event stream is insufficient by itself:
 verification also requires the bound order-plan manifest and content to pass schema-v1,
 byte-length, content-hash, identity, and relative-path checks. Orphan streams and streams
 bound to missing or tampered plans are unhealthy.
+
+Event-stream diagnostics distinguish the operator action required:
+
+- `ORPHAN_EVENT_STREAM`: the stream exists but has no valid event identity or no
+  valid bound plan. Append is refused; `storage quarantine order_plan_events <file>`
+  is allowed.
+- `INVALID_ORDER_PLAN`: the stream points to an artifact whose envelope,
+  `OrderPlan` payload, identity, or `plan_hash` is invalid.
+- `MISSING_ORDER_PLAN`: the stream points to a missing manifest or content file.
+
+For a failed first JSONL write, rollback restores the stream's prior absence.
+Directory-fsync failure after a successful append is different: durability is
+uncertain, the event may already be present, and the operation does not claim
+that the append was rolled back.
+
 Run `migrate --dry-run` first: it reads the migration registry without creating
 the database or directories. The apply command runs only the immutable built-in
 non-destructive catalog; destructive migrations require a separate explicitly
