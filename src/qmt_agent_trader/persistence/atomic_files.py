@@ -227,6 +227,7 @@ class AtomicFileStore:
 
     def _append_encoded_jsonl(self, path: Path, encoded: bytes, *, fsync: bool) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        was_missing = not path.exists()
         descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
         original_length = os.fstat(descriptor).st_size
         try:
@@ -256,6 +257,18 @@ class AtomicFileStore:
             ) from exc
         finally:
             os.close(descriptor)
+        if fsync and was_missing:
+            try:
+                _fsync_directory(path.parent)
+            except Exception as exc:
+                raise StorageError(
+                    store_name="atomic_files",
+                    path=path,
+                    operation="append_jsonl",
+                    reason="JSONL append succeeded but directory fsync failed",
+                    recoverable=False,
+                    original_error=exc,
+                ) from exc
 
     def _write(
         self,
