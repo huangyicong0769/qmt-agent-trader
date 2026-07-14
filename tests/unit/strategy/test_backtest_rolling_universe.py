@@ -173,8 +173,8 @@ def _stock_universe_spec(*, mode: str) -> dict[str, object]:
 
 def _write_backtest_bars(lake: DataLake) -> None:
     rows: list[dict[str, object]] = []
-    start = date(2024, 1, 1)
-    for offset in range(41):
+    start = date(2023, 12, 12)
+    for offset in range(61):
         trade_date = f"{start + timedelta(days=offset):%Y%m%d}"
         rows.extend(
             [
@@ -184,6 +184,7 @@ def _write_backtest_bars(lake: DataLake) -> None:
             ]
         )
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    _write_trade_state_sources(lake, rows)
     lake.write_parquet(
         pd.DataFrame(
             [
@@ -193,6 +194,37 @@ def _write_backtest_bars(lake: DataLake) -> None:
         ),
         "raw",
         "tushare/trade_cal",
+    )
+
+
+def _write_trade_state_sources(
+    lake: DataLake,
+    rows: list[dict[str, object]],
+) -> None:
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": row["ts_code"],
+                    "trade_date": row["trade_date"],
+                    "up_limit": float(row["close"]) * 1.1,
+                    "down_limit": float(row["close"]) * 0.9,
+                }
+                for row in rows
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
     )
 
 
