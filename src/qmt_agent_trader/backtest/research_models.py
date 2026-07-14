@@ -76,7 +76,7 @@ class FactorRankResearchResult:
     total_explicit_cost: float = 0.0
     total_slippage_cost: float = 0.0
     same_trade_gross_return: float = 0.0
-    average_top_n_overlap: float = 0.0
+    average_top_n_overlap: float | None = None
 
     @property
     def equity_curve(self) -> tuple[float, ...]:

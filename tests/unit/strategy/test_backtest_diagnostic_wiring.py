@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 
 from qmt_agent_trader.backtest.research_models import (
@@ -87,6 +89,21 @@ def test_missing_cost_drag_is_not_computed_not_passed() -> None:
 
 
 def test_missing_overlap_is_not_computed_not_passed() -> None:
-    diagnostics = StrategyDiagnosticsEvaluator().evaluate(minimal_evidence())
+    result = replace(factor_rank_result(), average_top_n_overlap=None)
+    config = StrategyBacktestConfig(
+        strategy_id="factor_rank",
+        start_date="20240101",
+        end_date="20240331",
+    )
+    metrics = execution_adapter._build_canonical_metrics(result, config)
+    evidence = execution_adapter._diagnostic_evidence(
+        result.as_dict(),
+        {"valid": True},
+        canonical_metrics=metrics,
+        factor_frame=pd.DataFrame(),
+        bars=pd.DataFrame(),
+        initial_cash=config.initial_cash,
+    )
+    diagnostics = StrategyDiagnosticsEvaluator().evaluate(evidence)
     checks = {check.name: check for check in diagnostics.checks}
     assert checks["average_top_n_overlap"].status == DiagnosticStatus.NOT_COMPUTED
