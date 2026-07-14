@@ -45,7 +45,12 @@ Thumbs.db
 /approvals/
 /reports/
 /sessions/
+
+# Local agent workflow artifacts
+/.superpower/
 /.superpowers/
+/docs/superpower/
+/docs/superpowers/
 
 # Agent-generated source and report artifacts
 /src/qmt_agent_trader/agent/generated/
