@@ -1,5 +1,7 @@
 import pandas as pd
+import pytest
 
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.models import UniverseSpec
 from qmt_agent_trader.universe.resolver import (
@@ -243,3 +245,30 @@ def test_snapshot_uses_validated_non_null_trade_state(tmp_path) -> None:
 
     assert result["status"] == "OK"
     assert result["symbols"] == ["000001.SZ"]
+
+
+def test_market_cap_asof_rejects_duplicate_symbol_date(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "total_mv": 100.0,
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "total_mv": 101.0,
+                },
+            ]
+        ),
+        "raw",
+        "tushare/daily_basic",
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        UniverseResolver(lake)._market_cap_asof("20240102")
+
+    assert exc_info.value.code == "DUPLICATE_UNIVERSE_SOURCE_KEY"
