@@ -149,7 +149,7 @@ def test_agent_can_save_generated_strategy_candidate(registry):
     assert listed["strategies"][0]["status"] == "GENERATED_BY_LLM"
 
 
-def test_saved_strategy_id_can_be_used_for_backtest(registry):
+def test_saved_generated_strategy_id_is_blocked_from_canonical_backtest(registry):
     context = ToolContext(run_id="strategy-save-backtest")
     spec = registry.run_tool(
         "create_strategy_spec",
@@ -182,8 +182,9 @@ def test_saved_strategy_id_can_be_used_for_backtest(registry):
         context,
     )
 
-    assert result["status"] != "error"
-    assert result["strategy_id"] == spec["strategy_id"]
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "GENERATED_STRATEGY_EXECUTION_NOT_IMPLEMENTED"
+    assert result["unsupported_fields"] == ["code_path"]
 
 
 def test_multi_factor_strategy_backtest_executes_all_requested_factors(registry, lake):

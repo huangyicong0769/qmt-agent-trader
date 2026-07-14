@@ -29,7 +29,7 @@ from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_st
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.strategy.adapter_capabilities import validate_factor_rank_adapter_spec
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
-from qmt_agent_trader.strategy.models import FactorLeg, StrategySpec
+from qmt_agent_trader.strategy.models import FactorLeg, SavedStrategy, StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
 
 BACKTEST_BASE_FIELDS = [
@@ -72,6 +72,7 @@ class StrategyBacktestConfig(BaseModel):
     symbols_by_date: dict[str, list[str]] | None = None
     universe_mode: Literal["snapshot", "rolling"] = "snapshot"
     strategy_spec: StrategySpec | None = None
+    implementation_code_path: str | None = None
     factor_name: str | None = None
 
 
@@ -126,16 +127,28 @@ def run_strategy_backtest(
     reports_dir: Path,
 ) -> StrategyBacktestResult:
     run_id = new_id("research")
-    spec = config.strategy_spec or _strategy_spec_from_registry(registry, config.strategy_id)
+    saved_strategy = _strategy_from_registry(registry, config.strategy_id)
+    spec = config.strategy_spec or (saved_strategy.spec if saved_strategy is not None else None)
+    effective_code_path = config.implementation_code_path or (
+        saved_strategy.code_path if saved_strategy is not None else None
+    )
     if spec is not None:
-        capability_issues = validate_factor_rank_adapter_spec(spec)
+        capability_issues = validate_factor_rank_adapter_spec(
+            spec,
+            code_path=effective_code_path,
+        )
         if capability_issues:
+            generated_code = any(issue.field == "code_path" for issue in capability_issues)
             return StrategyBacktestResult(
                 run_id=run_id,
                 strategy_id=config.strategy_id,
                 strategy_version=spec.version,
                 status="BLOCKED",
-                reason="UNSUPPORTED_STRATEGY_SEMANTICS",
+                reason=(
+                    "GENERATED_STRATEGY_EXECUTION_NOT_IMPLEMENTED"
+                    if generated_code
+                    else "UNSUPPORTED_STRATEGY_SEMANTICS"
+                ),
                 unsupported_fields=[issue.field for issue in capability_issues],
                 capability_issues=[asdict(issue) for issue in capability_issues],
             )
@@ -363,12 +376,11 @@ def _canonical_result_evidence(
     }
 
 
-def _strategy_spec_from_registry(
+def _strategy_from_registry(
     registry: StrategyRegistry,
     strategy_id: str,
-) -> StrategySpec | None:
-    saved = registry.get_strategy(strategy_id)
-    return saved.spec if saved is not None else None
+) -> SavedStrategy | None:
+    return registry.get_strategy(strategy_id)
 
 
 def _first_factor_id(spec: StrategySpec | None) -> str | None:
