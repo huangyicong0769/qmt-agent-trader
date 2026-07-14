@@ -474,7 +474,12 @@ class UniverseResolver:
         )
 
     def _load_recent_bars(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
-        bars = load_daily_bars(self.lake, end=as_of_date, include_trade_state=True)
+        bars = load_daily_bars(
+            self.lake,
+            end=as_of_date,
+            include_trade_state=True,
+            asset_types=list(asset_types),
+        )
         bars = bars[bars["asset_type"].isin(asset_types)].copy()
         return (
             bars.sort_values(["symbol", "trade_date"], kind="stable")

@@ -119,6 +119,7 @@ def test_runtime_instances_keep_tool_dependencies_isolated(tmp_path) -> None:
             "symbol": "000001.SZ",
             "start_date": "20260101",
             "end_date": "20260110",
+            "include_trade_state": False,
         },
         ToolContext(run_id="runtime-a", call_mode=ToolCallMode.AUTONOMOUS_AGENT),
     )
