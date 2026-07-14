@@ -26,7 +26,13 @@ loads that many prior open sessions before the requested start. Insufficient cal
 history raises `INSUFFICIENT_FACTOR_WARMUP_HISTORY`. Warm-up bars feed factor
 calculation only: execution schedules, trades, equity points, and performance metrics
 remain confined to the requested session window. Report metadata separately identifies
-the loaded panel start and the performance start/end.
+the loaded panel start and the performance start/end. Calendar evidence must also be
+continuous from the first warm-up session through the requested end. A missing whole
+panel session raises `MISSING_FACTOR_WARMUP_SESSION`; per-symbol shortfalls are exposed
+as `insufficient_history_by_symbol` and the symbol is excluded from ranking until its
+required history exists. Factor coverage, IC, and walk-forward diagnostics use only
+performance dates, and reports disclose the diagnostic window and excluded warm-up row
+counts.
 
 ## Portfolio semantics
 
@@ -42,7 +48,17 @@ omitted, the authoritative strategy frequency is used.
 When a strategy ID exists in the Registry, its canonical spec fingerprint and Registry
 copy are authoritative. An inline spec cannot replace a saved spec with the same ID;
 such a conflict returns `SAVED_STRATEGY_SPEC_MISMATCH`. The config ID must also equal
-the inline `StrategySpec.strategy_id`.
+the inline `StrategySpec.strategy_id`. Effective identity is resolved from the top-level
+ID, otherwise the inline spec ID, otherwise a temporary factor strategy ID. Registry
+identity, generated-code capability, and temporary factor-spec construction all finish
+before universe resolution or cache access.
+
+Successful-result caching uses schema `factor-rank-v3` and engine semantic version
+`2026-07-opening-state-warmup-v1`. Its provenance manifest fingerprints the effective
+strategy spec, saved strategy state and code tree, factor implementations, resolved
+universe payload, market bars, trade calendar, trade-state sources, stock basics, and
+every daily-basic, financial, or macro dataset selected by factor-required fields. The
+same manifest is stored in the completed response and report config.
 
 The adapter ranks normalized factor values descending. `lower_is_better` negates the
 declared single factor before ranking and IC diagnostics. Existing holdings inside
@@ -84,6 +100,12 @@ Raw daily-bar duplicates are rejected before normalization, and exact factor-sou
 duplicates are rejected before joins as `DUPLICATE_EXACT_FACTOR_INPUT`; neither path
 uses last-row-wins deduplication.
 
+ASOF factor sources also require unique visible identities. Duplicate
+`(symbol, visible_date)` or marketwide `visible_date` values raise
+`DUPLICATE_ASOF_VISIBLE_KEY`; storage order is never a tie-break. Universe market-cap
+inputs validate daily-basic symbol-date uniqueness before latest-row selection and raise
+`DUPLICATE_UNIVERSE_SOURCE_KEY` on conflict.
+
 Trade-state columns are usable only with source evidence. Missing
 `raw/tushare/suspend_d`, `raw/tushare/stk_limit`, or historical
 `raw/tushare/namechange` blocks execution with `TRADE_STATE_SOURCE_NOT_READY`.
@@ -91,6 +113,23 @@ Trade-state columns are usable only with source evidence. Missing
 `TRADE_STATE_PARTIAL_COVERAGE`. Sparse suspension rows and non-overlapping historical
 name intervals become `False` only after their datasets are proven present, and the
 completed panel records source and completeness metadata for every state field.
+Stock limit prices must be finite, positive, satisfy `down_limit < up_limit`, and cover
+every stock bar. Execution eligibility is opening-only:
+`limit_up_at_open` and `limit_down_at_open` compare the execution open with the validated
+limits; a close at a limit cannot block an earlier opening trade. Suspension and ST
+state come from dated suspension and historical name-change evidence, never the current
+company name.
+
+Every normalized bar is tagged `asset_type=stock` or `asset_type=etf`. Stock-only
+`stk_limit` evidence is never applied to ETF rows. Until a dedicated ETF execution-state
+source is implemented, requesting enriched ETF bars fails with
+`UNSUPPORTED_ETF_TRADE_STATE_MODEL`.
+
+The research runner accepts only prevalidated canonical rows containing OHLC, volume,
+amount, turnover, and all four opening execution-state fields. Missing state columns
+raise `MISSING_EXECUTION_STATE_COLUMNS`, null state raises `UNKNOWN_EXECUTION_STATE`,
+and other missing canonical fields raise `MISSING_CANONICAL_BAR_COLUMNS`. The runner
+coerces fields that exist but never synthesizes absent numeric values or boolean state.
 
 Abrupt daily cross-sectional coverage collapse blocks broad-universe runs. Universe
 limits are optional and any truncation records candidate, pre-limit, selected, effective
