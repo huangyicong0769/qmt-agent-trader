@@ -455,12 +455,27 @@ def run_strategy_backtest(
         "valid": True,
         "execution_delay_days": config.execution_delay_days,
     }
+    performance_factor_frame = _performance_window(
+        runner.factor_frame,
+        session_window.expected_dates,
+    )
+    performance_bars = _performance_window(
+        runner.bars,
+        session_window.expected_dates,
+    )
+    diagnostic_window = {
+        "start": session_window.expected_dates[0].isoformat(),
+        "end": session_window.expected_dates[-1].isoformat(),
+        "excluded_factor_rows": len(runner.factor_frame)
+        - len(performance_factor_frame),
+        "excluded_bar_rows": len(runner.bars) - len(performance_bars),
+    }
     evidence = _diagnostic_evidence(
         result_dict,
         leakage_report,
         canonical_metrics=metrics,
-        factor_frame=runner.factor_frame,
-        bars=runner.bars,
+        factor_frame=performance_factor_frame,
+        bars=performance_bars,
         initial_cash=config.initial_cash,
     )
     diagnostics = StrategyDiagnosticsEvaluator().evaluate(evidence).as_dict()
@@ -485,6 +500,7 @@ def run_strategy_backtest(
         "config": config.model_dump(mode="json"),
         "data_window": data_window,
         "input_panel_metadata": panel_metadata,
+        "diagnostic_window": diagnostic_window,
         "metrics": metrics,
         "leakage_report": leakage_report,
         "diagnostics": diagnostics,
@@ -1147,6 +1163,16 @@ def _suggest_repair_for_factor_input_metadata(
             },
         },
     }
+
+
+def _performance_window(
+    frame: pd.DataFrame,
+    expected_dates: tuple[date, ...],
+) -> pd.DataFrame:
+    if frame.empty or "trade_date" not in frame.columns:
+        return frame.copy()
+    dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date
+    return frame.loc[dates.isin(set(expected_dates))].copy()
 
 
 def _diagnostic_evidence(
