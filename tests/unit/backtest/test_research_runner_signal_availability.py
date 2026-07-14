@@ -29,7 +29,7 @@ def _bars(days: int, symbols: tuple[str, ...] = ("A", "B")) -> pd.DataFrame:
 
 def _scenario() -> SensitivityScenario:
     return SensitivityScenario(
-        cost_multiplier=0.0,
+        cost_multiplier=1.0,
         slippage_bps=0.0,
         execution_delay_days=1,
         top_n=1,

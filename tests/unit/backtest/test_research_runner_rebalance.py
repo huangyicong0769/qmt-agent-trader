@@ -47,7 +47,7 @@ def _run(monkeypatch, **updates):
     )
     return FactorRankResearchRunner(bars, config).run(
         SensitivityScenario(
-            cost_multiplier=0.0,
+            cost_multiplier=1.0,
             slippage_bps=0.0,
             execution_delay_days=1,
             top_n=config.top_n,
@@ -109,7 +109,7 @@ def test_rank_buffer_retains_holding_inside_exit_band(monkeypatch) -> None:
         )
         return FactorRankResearchRunner(bars, config).run(
             SensitivityScenario(
-                cost_multiplier=0.0,
+                    cost_multiplier=1.0,
                 slippage_bps=0.0,
                 execution_delay_days=1,
                 top_n=1,

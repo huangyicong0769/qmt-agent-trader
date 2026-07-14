@@ -55,6 +55,28 @@ class FactorRankResearchConfig:
     symbols_by_date: dict[str, list[str]] | None = None
     base_cost_config: CostConfig = field(default_factory=CostConfig)
 
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.initial_cash) or self.initial_cash <= 0:
+            raise ValueError("initial_cash must be finite and positive")
+        if self.top_n <= 0:
+            raise ValueError("top_n must be positive")
+        if not 0 < self.max_single_position_pct <= 1:
+            raise ValueError("max_single_position_pct must be in (0, 1]")
+        if not 0 <= self.cash_buffer_pct < 1:
+            raise ValueError("cash_buffer_pct must be in [0, 1)")
+        if not 0 <= self.min_turnover_threshold <= 1:
+            raise ValueError("min_turnover_threshold must be in [0, 1]")
+        if self.rank_buffer < 0:
+            raise ValueError("rank_buffer must be non-negative")
+        if self.rebalance_frequency not in {"daily", "weekly", "monthly"}:
+            raise ValueError(
+                f"unsupported rebalance_frequency: {self.rebalance_frequency}"
+            )
+        if not self.expected_trade_dates:
+            raise ValueError("expected_trade_dates cannot be empty")
+        if self.expected_trade_dates != tuple(sorted(set(self.expected_trade_dates))):
+            raise ValueError("expected_trade_dates must be sorted and unique")
+
 
 class FactorRankResearchRunner:
     """Run after-close signals at a delayed open and value every trading day."""
@@ -112,6 +134,7 @@ class FactorRankResearchRunner:
         )
 
     def run(self, scenario: SensitivityScenario) -> FactorRankResearchResult:
+        scenario.validate_for_factor_rank()
         top_n = scenario.top_n or self.config.top_n
         max_position = scenario.max_single_position_pct or self.config.max_single_position_pct
         if top_n <= 0:

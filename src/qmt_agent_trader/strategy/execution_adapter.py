@@ -62,11 +62,11 @@ class StrategyBacktestConfig(BaseModel):
     start_date: str
     end_date: str
     universe: str = "stock_etf"
-    initial_cash: float = 1_000_000
-    execution_delay_days: int = 1
-    slippage_bps: float = 5.0
-    top_n: int = 20
-    max_single_position_pct: float = 0.10
+    initial_cash: float = Field(default=1_000_000, gt=0)
+    execution_delay_days: int = Field(default=1, ge=1)
+    slippage_bps: float = Field(default=5.0, ge=0)
+    top_n: int = Field(default=20, gt=0)
+    max_single_position_pct: float = Field(default=0.10, gt=0, le=1)
     rebalance_frequency: Literal["daily", "weekly", "monthly"] = "daily"
     min_turnover_threshold: float = Field(default=0.0, ge=0, le=1)
     rank_buffer: int = Field(default=0, ge=0)
