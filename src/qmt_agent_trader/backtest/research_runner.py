@@ -11,6 +11,7 @@ import pandas as pd
 
 from qmt_agent_trader.backtest.commission import CostConfig, calculate_cost_breakdown
 from qmt_agent_trader.backtest.errors import (
+    BacktestAccountingError,
     BacktestDataIntegrityError,
     BacktestUniverseIntegrityError,
 )
@@ -32,6 +33,8 @@ from qmt_agent_trader.core.types import Side
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import compute_factor_frame
 from qmt_agent_trader.universe.timeline import RollingUniverseTimeline
+
+_CASH_EPSILON = 1e-8
 
 
 @dataclass(frozen=True)
@@ -202,12 +205,22 @@ class FactorRankResearchRunner:
                             field="close",
                             error_code="MISSING_HELD_POSITION_BAR",
                         )
+                        _assert_ledger_invariants(
+                            cash=cash,
+                            positions=positions,
+                            trade_date=trade_date,
+                        )
+                        equity_after = cash + market_value
+                        _assert_equity_invariant(
+                            equity=equity_after,
+                            trade_date=trade_date,
+                        )
                         equity_points.append(
                             ResearchEquityPoint(
                                 trade_date=f"{trade_date:%Y-%m-%d}",
                                 cash=cash,
                                 market_value=market_value,
-                                equity=cash + market_value,
+                                equity=equity_after,
                                 stale_position_count=0,
                             )
                         )
@@ -243,7 +256,12 @@ class FactorRankResearchRunner:
                         notional = quantity * price
                         breakdown = calculate_cost_breakdown(notional, side, scaled_costs)
                         if side == Side.BUY and notional + breakdown.total > cash:
-                            affordable = int(cash / max(price, 1e-9) // 100 * 100)
+                            affordable = _max_affordable_buy_quantity(
+                                cash=cash,
+                                price=price,
+                                desired_quantity=quantity,
+                                cost_config=scaled_costs,
+                            )
                             quantity = min(quantity, affordable)
                             if quantity <= 0:
                                 rejected_orders += 1
@@ -258,6 +276,11 @@ class FactorRankResearchRunner:
                             quantity=quantity,
                             notional=notional,
                             cost=breakdown.total,
+                        )
+                        _assert_ledger_invariants(
+                            cash=cash,
+                            positions=positions,
+                            trade_date=trade_date,
                         )
                         gross_notional += notional
                         total_explicit_cost += breakdown.total
@@ -307,6 +330,11 @@ class FactorRankResearchRunner:
                         )
                     )
 
+            _assert_ledger_invariants(
+                cash=cash,
+                positions=positions,
+                trade_date=trade_date,
+            )
             market_value = self._position_value_strict(
                 positions,
                 trade_date=trade_date,
@@ -314,12 +342,17 @@ class FactorRankResearchRunner:
                 field="close",
                 error_code="MISSING_HELD_POSITION_BAR",
             )
+            equity_after = cash + market_value
+            _assert_equity_invariant(
+                equity=equity_after,
+                trade_date=trade_date,
+            )
             equity_points.append(
                 ResearchEquityPoint(
                     trade_date=f"{trade_date:%Y-%m-%d}",
                     cash=cash,
                     market_value=market_value,
-                    equity=cash + market_value,
+                    equity=equity_after,
                     stale_position_count=0,
                 )
             )
@@ -580,6 +613,79 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
             data[column] = False
         data[column] = data[column].fillna(False).astype(bool)
     return data.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+
+
+def _max_affordable_buy_quantity(
+    *,
+    cash: float,
+    price: float,
+    desired_quantity: int,
+    cost_config: CostConfig,
+) -> int:
+    desired_lots = max(0, desired_quantity // 100)
+    low = 0
+    high = desired_lots
+    while low < high:
+        middle = (low + high + 1) // 2
+        quantity = middle * 100
+        notional = quantity * price
+        total = notional + calculate_cost_breakdown(
+            notional,
+            Side.BUY,
+            cost_config,
+        ).total
+        if total <= cash + _CASH_EPSILON:
+            low = middle
+        else:
+            high = middle - 1
+    return low * 100
+
+
+def _assert_ledger_invariants(
+    *,
+    cash: float,
+    positions: dict[str, int],
+    trade_date: date,
+) -> None:
+    if not math.isfinite(cash):
+        raise BacktestAccountingError(
+            code="NON_FINITE_CASH",
+            message="cash must remain finite",
+            trade_date=f"{trade_date:%Y-%m-%d}",
+            field="cash",
+            details={"cash": cash},
+        )
+    if cash < -_CASH_EPSILON:
+        raise BacktestAccountingError(
+            code="NEGATIVE_CASH_AFTER_TRADE",
+            message="post-trade cash violated the non-negative invariant",
+            trade_date=f"{trade_date:%Y-%m-%d}",
+            field="cash",
+            details={"cash": cash, "tolerance": _CASH_EPSILON},
+        )
+    invalid_positions = {
+        symbol: quantity for symbol, quantity in positions.items() if quantity <= 0
+    }
+    if invalid_positions:
+        raise BacktestAccountingError(
+            code="INVALID_POSITION_QUANTITY",
+            message="completed ledger positions must have positive quantities",
+            trade_date=f"{trade_date:%Y-%m-%d}",
+            field="positions",
+            symbols=tuple(sorted(invalid_positions)),
+            details={"positions": invalid_positions},
+        )
+
+
+def _assert_equity_invariant(*, equity: float, trade_date: date) -> None:
+    if not math.isfinite(equity) or equity < -_CASH_EPSILON:
+        raise BacktestAccountingError(
+            code="INVALID_EQUITY_VALUE",
+            message="daily equity must be finite and non-negative",
+            trade_date=f"{trade_date:%Y-%m-%d}",
+            field="equity",
+            details={"equity": equity},
+        )
 
 
 def _scaled_cost_config(config: CostConfig, multiplier: float) -> CostConfig:
