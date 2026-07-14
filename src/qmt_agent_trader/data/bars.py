@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 import pandas as pd
 
+from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
 
 CANONICAL_BAR_COLUMNS = [
@@ -40,13 +41,21 @@ def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
         empty.attrs["column_quality"] = {}
         return empty
 
-    rename_map = {"ts_code": "symbol", "vol": "volume"}
-    data = data.rename(columns=rename_map)
-    required = {"symbol", "trade_date", "open", "high", "low", "close"}
+    symbol_column = "ts_code" if "ts_code" in data.columns else "symbol"
+    required = {symbol_column, "trade_date", "open", "high", "low", "close"}
     missing = required.difference(data.columns)
     if missing:
         raise ValueError(f"tushare daily bars missing columns: {sorted(missing)}")
+    require_unique_symbol_dates(
+        data,
+        symbol_column=symbol_column,
+        date_column="trade_date",
+        code="DUPLICATE_SYMBOL_DATE_BAR",
+        field="raw_daily_bars",
+    )
 
+    rename_map = {"ts_code": "symbol", "vol": "volume"}
+    data = data.rename(columns=rename_map)
     data["trade_date"] = pd.to_datetime(data["trade_date"].astype(str), format="%Y%m%d").dt.date
     for column in ["volume", "amount"]:
         if column not in data.columns:
@@ -81,8 +90,7 @@ def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
 
     normalized = (
         data[CANONICAL_BAR_COLUMNS]
-        .drop_duplicates(["symbol", "trade_date"], keep="last")
-        .sort_values(["symbol", "trade_date"])
+        .sort_values(["symbol", "trade_date"], kind="stable")
         .reset_index(drop=True)
     )
     normalized.attrs["column_quality"] = column_quality

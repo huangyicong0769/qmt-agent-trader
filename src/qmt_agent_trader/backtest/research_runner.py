@@ -30,6 +30,7 @@ from qmt_agent_trader.backtest.research_models import (
 from qmt_agent_trader.backtest.sensitivity import SensitivityMetrics, SensitivityScenario
 from qmt_agent_trader.backtest.slippage import fixed_bps_slippage
 from qmt_agent_trader.core.types import Side
+from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import compute_factor_frame
 from qmt_agent_trader.universe.timeline import RollingUniverseTimeline
@@ -112,8 +113,10 @@ class FactorRankResearchRunner:
             else None
         )
         self.factor_frame = compute_factor_frame(self.bars, config.factor_name, registry=registry)
-        _require_unique_symbol_trade_dates(
+        require_unique_symbol_dates(
             self.factor_frame,
+            symbol_column="symbol",
+            date_column="trade_date",
             code="DUPLICATE_FACTOR_SYMBOL_DATE",
             field="factor_frame",
         )
@@ -677,8 +680,10 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     data = bars.copy()
     data["symbol"] = data["symbol"].astype(str)
     data["trade_date"] = pd.to_datetime(data["trade_date"]).dt.date
-    _require_unique_symbol_trade_dates(
+    require_unique_symbol_dates(
         data,
+        symbol_column="symbol",
+        date_column="trade_date",
         code="DUPLICATE_SYMBOL_DATE_BAR",
         field="bars",
     )
@@ -690,47 +695,6 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
             data[column] = False
         data[column] = data[column].fillna(False).astype(bool)
     return data.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
-
-
-def _require_unique_symbol_trade_dates(
-    frame: pd.DataFrame,
-    *,
-    code: str,
-    field: str,
-) -> None:
-    required = {"symbol", "trade_date"}
-    missing = required.difference(frame.columns)
-    if missing:
-        raise BacktestDataIntegrityError(
-            code="INVALID_SYMBOL_DATE_FRAME",
-            message="symbol-date frame lacks identity columns",
-            field=field,
-            details={"missing_columns": sorted(missing)},
-        )
-    mask = frame.duplicated(["symbol", "trade_date"], keep=False)
-    if not mask.any():
-        return
-    keys = (
-        frame.loc[mask, ["symbol", "trade_date"]]
-        .drop_duplicates()
-        .sort_values(["trade_date", "symbol"])
-    )
-    raise BacktestDataIntegrityError(
-        code=code,
-        message="symbol-date identity must be unique",
-        symbols=tuple(sorted(keys["symbol"].astype(str).unique())),
-        field=field,
-        details={
-            "duplicate_key_count": len(keys),
-            "sample": [
-                {
-                    "symbol": str(row.symbol),
-                    "trade_date": f"{pd.Timestamp(row.trade_date):%Y-%m-%d}",
-                }
-                for row in keys.head(20).itertuples(index=False)
-            ],
-        },
-    )
 
 
 def _max_affordable_buy_quantity(

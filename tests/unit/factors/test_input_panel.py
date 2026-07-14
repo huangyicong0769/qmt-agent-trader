@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
 
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.input_panel import (
@@ -221,3 +223,29 @@ def test_daily_panel_coverage_uses_prior_rolling_symbol_reference() -> None:
     assert metadata["daily_symbol_counts"]["2024-01-06"] == 3
     assert metadata["daily_cross_sectional_coverage"]["2024-01-06"] == 0.03
 
+
+def test_exact_factor_source_duplicates_fail_closed(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    _write_daily(lake, start=date(2024, 1, 2), days=1)
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240102", "pb": 1.0},
+                {"ts_code": "000001.SZ", "trade_date": "20240102", "pb": 1.2},
+            ]
+        ),
+        "raw",
+        "tushare/daily_basic",
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        build_target_frequency_panel(
+            lake,
+            target_frequency=Frequency.DAILY,
+            target_start="20240102",
+            target_end="20240102",
+            required_fields=["symbol", "trade_date", "open", "close", "pb"],
+            symbols=["000001.SZ"],
+        )
+
+    assert exc_info.value.code == "DUPLICATE_EXACT_FACTOR_INPUT"
