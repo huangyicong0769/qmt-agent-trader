@@ -571,23 +571,27 @@ class UniverseResolver:
         frequency: str,
     ) -> list[str]:
         dates = _trade_dates(self.lake, spec.asset_types, start=start_date, end=end_date)
-        if frequency == "daily":
-            return dates
-        parsed = [(_parse_date(item), item) for item in dates]
-        selected: list[str] = []
-        seen: set[tuple[int, int] | tuple[int, int, int]] = set()
-        for parsed_date, key in parsed:
-            if frequency == "weekly":
-                bucket: tuple[int, int] | tuple[int, int, int] = parsed_date.isocalendar()[:2]
-            elif frequency == "monthly":
-                bucket = (parsed_date.year, parsed_date.month, 1)
-            else:
-                raise ValueError(f"unsupported rebalance frequency: {frequency}")
-            if bucket in seen:
-                continue
-            seen.add(bucket)
-            selected.append(key)
-        return selected
+        return _period_end_dates(dates, frequency)
+
+
+def _period_end_dates(dates: list[str], frequency: str) -> list[str]:
+    if not dates:
+        return []
+    if frequency == "daily":
+        return dates
+    last_by_bucket: dict[tuple[int, int], str] = {}
+    for key in dates:
+        parsed = _parse_date(key)
+        if frequency == "weekly":
+            iso = parsed.isocalendar()
+            bucket = (iso.year, iso.week)
+        elif frequency == "monthly":
+            bucket = (parsed.year, parsed.month)
+        else:
+            raise ValueError(f"unsupported rebalance frequency: {frequency}")
+        last_by_bucket[bucket] = key
+    selected = [dates[0], *last_by_bucket.values()]
+    return list(dict.fromkeys(selected))
 
 
 def _candidate_frame_for_symbols(

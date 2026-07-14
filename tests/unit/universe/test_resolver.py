@@ -1,5 +1,5 @@
 from qmt_agent_trader.universe.models import UniverseSpec
-from qmt_agent_trader.universe.resolver import _apply_limit
+from qmt_agent_trader.universe.resolver import _apply_limit, _period_end_dates
 
 
 def _spec(max_symbols=None) -> UniverseSpec:
@@ -37,3 +37,15 @@ def test_explicit_limit_is_reported_as_truncation() -> None:
         "effective_limit": 2_000,
         "truncation_source": "request_limit",
     }
+
+
+def test_weekly_resolve_dates_use_anchor_and_period_ends() -> None:
+    dates = ["20240102", "20240103", "20240105", "20240108", "20240112"]
+
+    assert _period_end_dates(dates, "weekly") == ["20240102", "20240105", "20240112"]
+
+
+def test_monthly_resolve_dates_use_anchor_and_period_ends() -> None:
+    dates = ["20240102", "20240131", "20240201", "20240229"]
+
+    assert _period_end_dates(dates, "monthly") == ["20240102", "20240131", "20240229"]
