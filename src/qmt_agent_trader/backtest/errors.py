@@ -47,9 +47,9 @@ class BacktestDataIntegrityError(BacktestIntegrityError):
     """Required market or calendar data is absent or invalid."""
 
 
-class BacktestUniverseIntegrityError(BacktestDataIntegrityError):
+class BacktestUniverseIntegrityError(BacktestIntegrityError):
     """Point-in-time universe membership cannot be resolved."""
 
 
-class BacktestAccountingError(BacktestDataIntegrityError):
+class BacktestAccountingError(BacktestIntegrityError):
     """The simulated ledger violates an accounting invariant."""
