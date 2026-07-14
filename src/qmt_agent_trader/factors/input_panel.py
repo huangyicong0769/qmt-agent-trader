@@ -10,6 +10,7 @@ import pandas as pd
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.field_sources import FieldSourceIndex, FieldSourceSpec, FillPolicy
 from qmt_agent_trader.data.frequency import Frequency
+from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.macro import get_macro_dataset, macro_visible_date
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
@@ -176,10 +177,15 @@ def _join_exact_field(
 
     data = raw.rename(columns={source.entity_column: "symbol"}).copy()
     data["trade_date"] = _coerce_date(data[source.visible_time_column])
-    data = (
-        data[["symbol", "trade_date", field]]
-        .dropna(subset=["symbol", "trade_date"])
-        .drop_duplicates(["symbol", "trade_date"], keep="last")
+    require_unique_symbol_dates(
+        data,
+        symbol_column="symbol",
+        date_column="trade_date",
+        code="DUPLICATE_EXACT_FACTOR_INPUT",
+        field=f"raw/{source.raw_dataset_name}:{field}",
+    )
+    data = data[["symbol", "trade_date", field]].dropna(
+        subset=["symbol", "trade_date"]
     )
     joined = panel.merge(data, on=["symbol", "trade_date"], how="left")
     return joined
