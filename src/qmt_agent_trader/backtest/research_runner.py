@@ -523,11 +523,11 @@ class FactorRankResearchRunner:
 
     @staticmethod
     def _can_execute(bar: pd.Series, side: Side) -> bool:
-        if bool(bar.get("suspended", False)):
+        if bool(bar["suspended"]):
             return False
         if side == Side.BUY:
-            return not bool(bar.get("st", False)) and not bool(bar.get("limit_up", False))
-        return not bool(bar.get("limit_down", False))
+            return not bool(bar["st"]) and not bool(bar["limit_up_at_open"])
+        return not bool(bar["limit_down_at_open"])
 
     def _required_price(
         self,
@@ -705,7 +705,7 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     for column in ["high", "low", "volume", "amount", "turnover"]:
         if column not in data.columns:
             data[column] = 0.0
-    for column in ["suspended", "limit_up", "limit_down", "st"]:
+    for column in ["suspended", "st", "limit_up_at_open", "limit_down_at_open"]:
         if column not in data.columns:
             data[column] = False
         data[column] = data[column].fillna(False).astype(bool)

@@ -45,8 +45,8 @@ def bars_for_symbols(
                     "volume": 1_000_000,
                     "amount": 10_000_000,
                     "suspended": False,
-                    "limit_up": False,
-                    "limit_down": False,
+                    "limit_up_at_open": False,
+                    "limit_down_at_open": False,
                     "st": False,
                 }
             )
