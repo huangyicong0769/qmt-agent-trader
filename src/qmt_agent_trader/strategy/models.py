@@ -164,7 +164,9 @@ def strategy_spec_from_agent_spec(data: dict[str, Any]) -> StrategySpec:
         portfolio=PortfolioConstructionSpec.model_validate(portfolio_data or {}),
         rebalance=RebalanceSpec.model_validate(payload.get("rebalance") or {}),
         execution=ExecutionAssumptionSpec.model_validate(execution_data or {}),
-        risk_constraints=dict(payload.get("risk_constraints") or constraints),
+        risk_constraints=dict(
+            payload.get("risk_constraints") or _unconsumed_constraints(constraints)
+        ),
         tags=[str(item) for item in payload.get("tags", [])],
     )
 
@@ -190,3 +192,18 @@ def _normalize_execution(data: dict[str, Any]) -> dict[str, Any]:
     if "5bps" in slippage_model and "slippage_bps" not in normalized:
         normalized["slippage_bps"] = 5.0
     return normalized
+
+
+def _unconsumed_constraints(constraints: dict[str, Any]) -> dict[str, Any]:
+    executed_fields = {
+        "factor_weights",
+        "factor_directions",
+        "top_n",
+        "max_single_position_pct",
+        "cash_buffer_pct",
+        "long_only",
+        "execution_delay_days",
+        "slippage_bps",
+        "cost_model",
+    }
+    return {key: value for key, value in constraints.items() if key not in executed_fields}

@@ -59,6 +59,7 @@ def test_strategy_spec_preserves_weights_directions_and_constraints(registry) ->
     assert spec["portfolio"]["cash_buffer_pct"] == 0.03
     assert spec["execution"]["execution_delay_days"] == 2
     assert spec["execution"]["slippage_bps"] == 7.0
+    assert spec["risk_constraints"] == {}
 
 
 def test_strategy_spec_draft_can_be_saved_and_resolved_by_strategy_id(registry) -> None:
