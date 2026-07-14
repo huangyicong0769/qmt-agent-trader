@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from qmt_agent_trader.data.bars import normalize_tushare_daily
+from qmt_agent_trader.data.bars import load_daily_bars, normalize_tushare_daily
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
 from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
@@ -143,9 +143,7 @@ class UniverseResolver:
             "changed_dates": changed_dates,
             "diagnostics_by_date": diagnostics_by_date,
             "limit_metadata_by_date": limit_metadata_by_date,
-            "truncated": any(
-                bool(item["truncated"]) for item in limit_metadata_by_date.values()
-            ),
+            "truncated": any(bool(item["truncated"]) for item in limit_metadata_by_date.values()),
             "effective_limit": spec.max_symbols if spec.max_symbols is not None else limit,
             "truncation_source": (
                 "spec.max_symbols"
@@ -156,9 +154,7 @@ class UniverseResolver:
             ),
             "pre_limit_selected_count": max(
                 (
-                    value
-                    if isinstance(value := item["pre_limit_selected_count"], int)
-                    else 0
+                    value if isinstance(value := item["pre_limit_selected_count"], int) else 0
                     for item in limit_metadata_by_date.values()
                 ),
                 default=0,
@@ -231,9 +227,9 @@ class UniverseResolver:
             return _candidate_frame_for_symbols(selection.symbols, recent, stock_basic)
         if selection.mode == "industry":
             stock_matches = stock_basic[
-                stock_basic.get("industry", pd.Series(dtype=object)).astype(str).isin(
-                    selection.industries
-                )
+                stock_basic.get("industry", pd.Series(dtype=object))
+                .astype(str)
+                .isin(selection.industries)
             ]
             return _candidate_frame_for_symbols(
                 stock_matches.get("ts_code", pd.Series(dtype=object)).astype(str).tolist(),
@@ -323,23 +319,23 @@ class UniverseResolver:
                 return "not_yet_listed"
             if listed_days < filters.min_listed_days:
                 return "listed_days_below_minimum"
-        if filters.exclude_st and (
-            bool(row.get("st", False)) or "ST" in str(row.get("name", "")).upper()
-        ):
+        if filters.exclude_st and (bool(row["st"]) or "ST" in str(row.get("name", "")).upper()):
             return "st"
-        if filters.exclude_suspended and bool(row.get("suspended", False)):
+        if filters.exclude_suspended and bool(row["suspended"]):
             return "suspended"
-        if filters.min_avg_amount_20d is not None and _float_or_none(
-            row.get("avg_amount_20d")
-        ) is None:
+        if (
+            filters.min_avg_amount_20d is not None
+            and _float_or_none(row.get("avg_amount_20d")) is None
+        ):
             return "amount_coverage_missing"
         if filters.min_avg_amount_20d is not None and float(row.get("avg_amount_20d") or 0) < float(
             filters.min_avg_amount_20d
         ):
             return "avg_amount_20d_below_minimum"
-        if filters.min_avg_volume_20d is not None and _float_or_none(
-            row.get("avg_volume_20d")
-        ) is None:
+        if (
+            filters.min_avg_volume_20d is not None
+            and _float_or_none(row.get("avg_volume_20d")) is None
+        ):
             return "volume_coverage_missing"
         if filters.min_avg_volume_20d is not None and float(row.get("avg_volume_20d") or 0) < float(
             filters.min_avg_volume_20d
@@ -406,8 +402,7 @@ class UniverseResolver:
                 and spec.ranking.field in {"avg_amount_20d", "avg_volume_20d"}
             )
             or any(
-                rule.field in {"avg_amount_20d", "avg_volume_20d"}
-                for rule in spec.selection.rules
+                rule.field in {"avg_amount_20d", "avg_volume_20d"} for rule in spec.selection.rules
             )
         )
         if needs_20d:
@@ -438,8 +433,7 @@ class UniverseResolver:
             )
             if raw.empty:
                 continue
-            normalized = normalize_tushare_daily(raw)
-            normalized["asset_type"] = asset_type
+            normalized = normalize_tushare_daily(raw, asset_type=asset_type)
             frames.append(normalized)
         if not frames:
             return pd.DataFrame(columns=["symbol", "avg_amount_20d", "avg_volume_20d"])
@@ -465,71 +459,21 @@ class UniverseResolver:
             return pd.DataFrame(columns=["symbol", "market_cap"])
         raw = raw.rename(columns={"ts_code": "symbol", "total_mv": "market_cap"})
         raw["trade_date"] = pd.to_datetime(raw["trade_date"].astype(str), format="%Y%m%d").dt.date
-        return raw.sort_values(["symbol", "trade_date"]).groupby("symbol", as_index=False).tail(1)[
-            ["symbol", "market_cap"]
-        ]
+        return (
+            raw.sort_values(["symbol", "trade_date"])
+            .groupby("symbol", as_index=False)
+            .tail(1)[["symbol", "market_cap"]]
+        )
 
     def _load_recent_bars(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
-        frames: list[pd.DataFrame] = []
-        for dataset, asset_type in _datasets_for_asset_types(asset_types):
-            path = self.lake.dataset_path("raw", dataset)
-            if not path.exists():
-                continue
-            escaped_path = str(path).replace("'", "''")
-            frame = self.lake.query_external(
-                f"""
-                WITH source AS (
-                    SELECT *
-                    FROM read_parquet('{escaped_path}')
-                    WHERE CAST(trade_date AS VARCHAR) <= $end_date
-                ),
-                ranked AS (
-                    SELECT
-                        *,
-                        row_number() OVER (
-                            PARTITION BY ts_code
-                            ORDER BY CAST(trade_date AS VARCHAR) DESC
-                        ) AS rn
-                    FROM source
-                )
-                SELECT * EXCLUDE (rn)
-                FROM ranked
-                WHERE rn = 1
-                """,
-                {"end_date": as_of_date},
-            )
-            if frame.empty:
-                continue
-            normalized = normalize_tushare_daily(frame)
-            if not normalized.empty:
-                normalized["asset_type"] = asset_type
-                frames.append(normalized)
-        if not frames:
-            return pd.DataFrame(
-                columns=["symbol", "trade_date", "st", "suspended", "asset_type"]
-            )
-        recent = pd.concat(frames, ignore_index=True)
-        return self._apply_fast_st_state(recent)
-
-    def _apply_fast_st_state(self, recent: pd.DataFrame) -> pd.DataFrame:
-        stock_basic = self._stock_basic()
-        if (
-            stock_basic.empty
-            or "ts_code" not in stock_basic.columns
-            or "name" not in stock_basic.columns
-        ):
-            return recent
-        st_symbols = set(
-            stock_basic.loc[
-                stock_basic["name"].astype(str).str.contains("ST", case=False, na=False),
-                "ts_code",
-            ].astype(str)
+        bars = load_daily_bars(self.lake, end=as_of_date, include_trade_state=True)
+        bars = bars[bars["asset_type"].isin(asset_types)].copy()
+        return (
+            bars.sort_values(["symbol", "trade_date"], kind="stable")
+            .groupby("symbol", as_index=False, group_keys=False)
+            .tail(1)
+            .reset_index(drop=True)
         )
-        if not st_symbols:
-            return recent
-        data = recent.copy()
-        data["st"] = data["st"] | data["symbol"].astype(str).isin(st_symbols)
-        return data
 
     def _stock_basic(self) -> pd.DataFrame:
         path = self.lake.dataset_path("raw", "tushare/stock_basic")
