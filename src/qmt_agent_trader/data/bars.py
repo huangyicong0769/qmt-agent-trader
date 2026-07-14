@@ -14,6 +14,7 @@ from qmt_agent_trader.data.trade_state import normalize_stock_opening_trade_stat
 CANONICAL_BAR_COLUMNS = [
     "symbol",
     "trade_date",
+    "asset_type",
     "open",
     "high",
     "low",
@@ -34,7 +35,10 @@ _REQUIRED_TRADE_STATE_DATASETS = {
 }
 
 
-def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
+def normalize_tushare_daily(frame: pd.DataFrame, *, asset_type: str | None = None) -> pd.DataFrame:
+    resolved_asset_type = asset_type or "stock"
+    if resolved_asset_type not in {"stock", "etf"}:
+        raise ValueError(f"unsupported asset_type: {resolved_asset_type}")
     if frame.empty:
         empty = pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
         empty.attrs["column_quality"] = {}
@@ -64,6 +68,7 @@ def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
 
     rename_map = {"ts_code": "symbol", "vol": "volume"}
     data = data.rename(columns=rename_map)
+    data["asset_type"] = resolved_asset_type
     data["trade_date"] = pd.to_datetime(data["trade_date"].astype(str), format="%Y%m%d").dt.date
     for column in ["volume", "amount"]:
         if column not in data.columns:
@@ -125,25 +130,28 @@ def load_daily_bars(
         "amount",
         "turnover",
     ]
-    raw_frames = [
-        lake.read_parquet_filtered(
-            "raw",
-            "tushare/daily",
-            columns=daily_columns,
-            start=start,
-            end=end,
-            symbols=symbols,
-        ),
-        lake.read_parquet_filtered(
-            "raw",
-            "tushare/fund_daily",
-            columns=daily_columns,
-            start=start,
-            end=end,
-            symbols=symbols,
-        ),
+    stock_raw = lake.read_parquet_filtered(
+        "raw",
+        "tushare/daily",
+        columns=daily_columns,
+        start=start,
+        end=end,
+        symbols=symbols,
+    )
+    etf_raw = lake.read_parquet_filtered(
+        "raw",
+        "tushare/fund_daily",
+        columns=daily_columns,
+        start=start,
+        end=end,
+        symbols=symbols,
+    )
+    normalized = [
+        normalized_frame
+        for frame, asset_type in ((stock_raw, "stock"), (etf_raw, "etf"))
+        if not frame.empty
+        for normalized_frame in [normalize_tushare_daily(frame, asset_type=asset_type)]
     ]
-    normalized = [normalize_tushare_daily(frame) for frame in raw_frames if not frame.empty]
     bars = (
         pd.concat(normalized, ignore_index=True)
         if normalized
@@ -156,6 +164,15 @@ def load_daily_bars(
         result = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
         result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
         return result
+
+    etf_bars = bars[bars["asset_type"] == "etf"]
+    if not etf_bars.empty:
+        raise BacktestDataIntegrityError(
+            code="UNSUPPORTED_ETF_TRADE_STATE_MODEL",
+            message="ETF rows cannot use stock-only stk_limit evidence",
+            field="trade_state",
+            symbols=tuple(sorted(etf_bars["symbol"].astype(str).unique())),
+        )
 
     _require_trade_state_sources(lake)
     suspend = lake.read_parquet_filtered(

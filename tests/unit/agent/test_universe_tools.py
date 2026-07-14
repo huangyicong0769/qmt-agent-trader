@@ -37,6 +37,40 @@ def lake(tmp_path: Path) -> DataLake:
         "raw",
         "tushare/stock_basic",
     )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000002.SZ",
+                    "trade_date": "20240103",
+                    "suspend_type": "S",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": symbol,
+                    "trade_date": trade_date,
+                    "up_limit": 11.5,
+                    "down_limit": 8.5,
+                }
+                for symbol in ("000001.SZ", "000002.SZ")
+                for trade_date in ("20240102", "20240103")
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
     return lake
 
 

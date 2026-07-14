@@ -102,9 +102,7 @@ def test_ranked_universe_ties_use_symbol_ascending_tiebreak(tmp_path) -> None:
             "avg_amount_20d": [100.0, 100.0, 100.0],
         }
     )
-    resolver = UniverseResolver(
-        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
-    )
+    resolver = UniverseResolver(DataLake(tmp_path / "lake", tmp_path / "research.duckdb"))
 
     ranked = resolver._apply_ranking(frame, spec)
     symbols = _ordered_unique_symbols(ranked, spec)
@@ -148,9 +146,7 @@ def test_resolver_preserves_ranked_top_symbols_before_limit(tmp_path, monkeypatc
             "avg_amount_20d": [200.0, 100.0, 300.0],
         }
     )
-    resolver = UniverseResolver(
-        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
-    )
+    resolver = UniverseResolver(DataLake(tmp_path / "lake", tmp_path / "research.duckdb"))
     monkeypatch.setattr(resolver, "_load_recent_bars", lambda *_args: pd.DataFrame())
     monkeypatch.setattr(resolver, "_stock_basic", lambda: pd.DataFrame())
     monkeypatch.setattr(
@@ -173,3 +169,77 @@ def test_resolver_preserves_ranked_top_symbols_before_limit(tmp_path, monkeypatc
     selected, _ = _apply_limit(symbols, spec=spec, limit=None)
 
     assert selected == ["000003.SZ", "000001.SZ"]
+
+
+def test_snapshot_uses_validated_non_null_trade_state(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.0,
+                    "vol": 100.0,
+                    "amount": 1_000.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "up_limit": 11.0,
+                    "down_limit": 9.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "Example Co",
+                    "list_status": "L",
+                    "list_date": "20200101",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
+    )
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "validated-stock",
+            "name": "Validated stock",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+        }
+    )
+
+    result = UniverseResolver(lake).build(spec, as_of_date="20240102")
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["000001.SZ"]

@@ -65,7 +65,12 @@ def test_query_bars_filters_symbol_alias_and_includes_symbol(tmp_path) -> None:
     set_data_lake(lake)
 
     result = query_bars_tool.run(
-        {"symbol": "159259", "start_date": "20250801", "end_date": "20250831"},
+        {
+            "symbol": "159259",
+            "start_date": "20250801",
+            "end_date": "20250831",
+            "include_trade_state": False,
+        },
         ToolContext(run_id="bars"),
     )
 
@@ -117,6 +122,7 @@ def test_query_bars_keeps_identity_fields_when_fields_are_requested(tmp_path) ->
             "start_date": "20260601",
             "end_date": "20260626",
             "fields": ["close", "volume"],
+            "include_trade_state": False,
         },
         ToolContext(run_id="bars-fields"),
     )
@@ -198,6 +204,7 @@ def test_query_bars_reports_partial_coverage_for_multi_symbol_request(tmp_path) 
             "symbols": ["000001.SZ", "000002.SZ", "000003.SZ"],
             "start_date": "20260629",
             "end_date": "20260629",
+            "include_trade_state": False,
         },
         ToolContext(run_id="bars-partial"),
     )
@@ -287,6 +294,7 @@ def test_query_bars_reports_stale_symbols_when_end_is_not_covered(tmp_path) -> N
             "symbols": ["000001.SZ", "000002.SZ"],
             "start_date": "20260626",
             "end_date": "20260629",
+            "include_trade_state": False,
         },
         ToolContext(run_id="bars-stale"),
     )
@@ -330,6 +338,7 @@ def test_query_bars_coverage_uses_full_raw_range_not_return_limit(tmp_path) -> N
             "start_date": "20260621",
             "end_date": "20260625",
             "limit": 2,
+            "include_trade_state": False,
         },
         ToolContext(run_id="bars-limit-coverage"),
     )
