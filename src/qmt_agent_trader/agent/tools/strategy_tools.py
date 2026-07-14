@@ -43,6 +43,7 @@ from qmt_agent_trader.strategy.adapter_capabilities import (
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
+    strategy_spec_fingerprint,
     validate_backtest_config_matches_spec,
 )
 from qmt_agent_trader.strategy.loader import static_check_strategy_file
@@ -549,11 +550,24 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     if isinstance(strategy_spec_result, dict):
         return strategy_spec_result
     strategy_spec = strategy_spec_result
-    if strategy_spec is None and strategy_id:
+    if strategy_id:
         saved_strategy = _strategy_registry().get_strategy(str(strategy_id))
-        if saved_strategy is not None:
-            strategy_spec = saved_strategy.spec
-        elif not factor_name:
+    if saved_strategy is not None and strategy_spec is not None:
+        if strategy_spec_fingerprint(saved_strategy.spec) != strategy_spec_fingerprint(
+            strategy_spec
+        ):
+            return {
+                "status": "BLOCKED",
+                "reason": "SAVED_STRATEGY_SPEC_MISMATCH",
+                "strategy_id": str(strategy_id),
+                "research_only": True,
+                "live_trading_allowed": False,
+            }
+        strategy_spec = saved_strategy.spec
+    elif saved_strategy is not None:
+        strategy_spec = saved_strategy.spec
+    elif strategy_spec is None and strategy_id:
+        if not factor_name:
             return {
                 "status": "STRATEGY_NOT_FOUND",
                 "strategy_id": str(strategy_id),
@@ -562,6 +576,15 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
                     "or save the spec draft first"
                 ),
                 "suggested_next_tools": ["save_strategy_spec_draft", "list_strategy_candidates"],
+                "research_only": True,
+                "live_trading_allowed": False,
+            }
+    if strategy_spec is not None and strategy_id:
+        if str(strategy_id) != strategy_spec.strategy_id:
+            return {
+                "status": "BLOCKED",
+                "reason": "CONFIG_SPEC_MISMATCH",
+                "unsupported_fields": ["config.strategy_id"],
                 "research_only": True,
                 "live_trading_allowed": False,
             }
