@@ -145,7 +145,7 @@ def _create_strategy_spec(input_data: dict[str, Any], context: ToolContext) -> d
         factors=_factor_legs_from_selected(selected_factors, constraints),
         portfolio=_portfolio_from_constraints(constraints),
         rebalance={"frequency": rebalance_freq},
-        risk_constraints=constraints,
+        risk_constraints=_risk_constraints_from_constraints(constraints),
         execution=_execution_from_constraints(constraints),
     )
     return {
@@ -1316,6 +1316,21 @@ def _execution_from_constraints(constraints: dict[str, Any]) -> dict[str, Any]:
     if "cost_model" in constraints:
         execution["cost_model"] = str(constraints["cost_model"])
     return execution
+
+
+def _risk_constraints_from_constraints(constraints: dict[str, Any]) -> dict[str, Any]:
+    executed_fields = {
+        "factor_weights",
+        "factor_directions",
+        "top_n",
+        "max_single_position_pct",
+        "cash_buffer_pct",
+        "long_only",
+        "execution_delay_days",
+        "slippage_bps",
+        "cost_model",
+    }
+    return {key: value for key, value in constraints.items() if key not in executed_fields}
 
 
 def _render_strategy_code(name: str, spec: StrategySpec) -> str:
