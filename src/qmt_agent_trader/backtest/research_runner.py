@@ -90,6 +90,11 @@ class FactorRankResearchRunner:
             else None
         )
         self.factor_frame = compute_factor_frame(self.bars, config.factor_name, registry=registry)
+        _require_unique_symbol_trade_dates(
+            self.factor_frame,
+            code="DUPLICATE_FACTOR_SYMBOL_DATE",
+            field="factor_frame",
+        )
         if config.lower_is_better:
             self.factor_frame = self.factor_frame.copy()
             self.factor_frame["factor_value"] = -pd.to_numeric(
@@ -428,8 +433,9 @@ class FactorRankResearchRunner:
         if day_bars.empty or symbol not in day_bars.index:
             return None
         match = day_bars.loc[symbol]
-        row = match.iloc[0] if isinstance(match, pd.DataFrame) else match
-        return row if isinstance(row, pd.Series) else None
+        if isinstance(match, pd.DataFrame):
+            raise RuntimeError("duplicate symbol bar reached lookup after uniqueness validation")
+        return match if isinstance(match, pd.Series) else None
 
     @staticmethod
     def _can_execute(bar: pd.Series, side: Side) -> bool:
@@ -605,6 +611,11 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
     data = bars.copy()
     data["symbol"] = data["symbol"].astype(str)
     data["trade_date"] = pd.to_datetime(data["trade_date"]).dt.date
+    _require_unique_symbol_trade_dates(
+        data,
+        code="DUPLICATE_SYMBOL_DATE_BAR",
+        field="bars",
+    )
     for column in ["high", "low", "volume", "amount", "turnover"]:
         if column not in data.columns:
             data[column] = 0.0
@@ -613,6 +624,47 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
             data[column] = False
         data[column] = data[column].fillna(False).astype(bool)
     return data.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+
+
+def _require_unique_symbol_trade_dates(
+    frame: pd.DataFrame,
+    *,
+    code: str,
+    field: str,
+) -> None:
+    required = {"symbol", "trade_date"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise BacktestDataIntegrityError(
+            code="INVALID_SYMBOL_DATE_FRAME",
+            message="symbol-date frame lacks identity columns",
+            field=field,
+            details={"missing_columns": sorted(missing)},
+        )
+    mask = frame.duplicated(["symbol", "trade_date"], keep=False)
+    if not mask.any():
+        return
+    keys = (
+        frame.loc[mask, ["symbol", "trade_date"]]
+        .drop_duplicates()
+        .sort_values(["trade_date", "symbol"])
+    )
+    raise BacktestDataIntegrityError(
+        code=code,
+        message="symbol-date identity must be unique",
+        symbols=tuple(sorted(keys["symbol"].astype(str).unique())),
+        field=field,
+        details={
+            "duplicate_key_count": len(keys),
+            "sample": [
+                {
+                    "symbol": str(row.symbol),
+                    "trade_date": f"{pd.Timestamp(row.trade_date):%Y-%m-%d}",
+                }
+                for row in keys.head(20).itertuples(index=False)
+            ],
+        },
+    )
 
 
 def _max_affordable_buy_quantity(
