@@ -1053,7 +1053,7 @@ def _walk_forward_from_daily_ic(
 def _format_trade_date(value: Any) -> str:
     try:
         timestamp = pd.to_datetime(value)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return str(value)
     if pd.isna(timestamp):
         return str(value)
