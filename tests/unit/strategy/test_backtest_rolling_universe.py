@@ -9,8 +9,9 @@ import pytest
 
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ToolContext
-from qmt_agent_trader.agent.tools import build_agent_registry
+from qmt_agent_trader.agent.tools import build_agent_registry, strategy_tools
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.universe.resolver import UniverseResolver
 
 
 @pytest.fixture
@@ -115,6 +116,45 @@ def test_backtest_blocks_on_empty_rolling_universe(registry, lake: DataLake) -> 
     assert result["reason"] == "ROLLING_UNIVERSE_EMPTY"
     assert result["empty_dates"] == ["20240101", "20240102"]
     assert result["suggested_next_tools"] == ["inspect_universe", "build_universe", "query_bars"]
+
+
+def test_universe_frequency_is_explicitly_separate_from_strategy_frequency(
+    monkeypatch,
+    lake: DataLake,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_build(self, spec, **kwargs):
+        observed["frequency"] = kwargs["rebalance_frequency"]
+        return {
+            "status": "OK",
+            "rolling_symbols": {"20240102": ["000001.SZ"]},
+            "metadata": {"resolve_dates": ["20240102"], "empty_dates": []},
+        }
+
+    monkeypatch.setattr(UniverseResolver, "build", fake_build)
+    monkeypatch.setattr(strategy_tools, "_get_lake", lambda: lake)
+
+    strategy_tools._run_backtest(
+        {
+            "strategy_spec": {
+                "strategy_id": "weekly_value",
+                "name": "Weekly value",
+                "kind": "FACTOR_RANK_LONG_ONLY",
+                "factors": [{"factor_id": "pb_rank", "ascending": True}],
+                "portfolio": {"top_n": 10},
+                "rebalance": {"frequency": "weekly"},
+            },
+            "universe_spec": _stock_universe_spec(mode="rolling"),
+            "universe_mode": "rolling",
+            "universe_rebalance_frequency": "monthly",
+            "start_date": "20240101",
+            "end_date": "20240331",
+        },
+        ToolContext(run_id="separate-universe-frequency"),
+    )
+
+    assert observed["frequency"] == "monthly"
 
 
 def _stock_universe_spec(*, mode: str) -> dict[str, object]:
