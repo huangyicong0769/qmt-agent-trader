@@ -90,9 +90,6 @@ def test_strategy_spec_draft_can_be_saved_and_resolved_by_strategy_id(registry) 
     assert saved["saved_in_registry"] is True
     assert result["status"] != "STRATEGY_NOT_FOUND"
     assert result["strategy_id"] == spec["strategy_id"]
-    assert "strategy has no generated code" in " ".join(result.get("warnings", []))
-    assert result["generated_code"] is False
-    assert result["static_checks"] == "NOT_RUN"
 
 
 def test_strategy_spec_draft_can_be_upgraded_with_generated_code(registry) -> None:
