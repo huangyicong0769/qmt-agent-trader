@@ -6,11 +6,12 @@ import json
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from qmt_agent_trader.backtest.research_models import FactorRankResearchResult
 from qmt_agent_trader.backtest.research_runner import (
     FactorRankResearchConfig,
     FactorRankResearchRunner,
@@ -255,6 +256,7 @@ def run_strategy_backtest(
     result = runner.run(scenario)
 
     result_dict = result.as_dict()
+    metrics = _build_canonical_metrics(result, config)
     leakage_report: dict[str, object] = {
         "valid": True,
         "execution_delay_days": config.execution_delay_days,
@@ -262,29 +264,12 @@ def run_strategy_backtest(
     evidence = _diagnostic_evidence(
         result_dict,
         leakage_report,
+        canonical_metrics=metrics,
         factor_frame=runner.factor_frame,
         bars=runner.bars,
         initial_cash=config.initial_cash,
     )
     diagnostics = StrategyDiagnosticsEvaluator().evaluate(evidence).as_dict()
-    metrics = {
-        "total_return": round(result.metrics.total_return, 6),
-        "net_total_return": round(result.metrics.total_return, 6),
-        "same_trade_gross_return": round(result.same_trade_gross_return, 6),
-        "cost_drag": round(result.same_trade_gross_return - result.metrics.total_return, 6),
-        "sharpe": round(result.metrics.sharpe, 6),
-        "max_drawdown": round(result.metrics.max_drawdown, 6),
-        "turnover": round(result.metrics.turnover, 6),
-        "average_one_way_turnover": round(result.metrics.turnover, 6),
-        "average_top_n_overlap": round(result.average_top_n_overlap, 6),
-        "explicit_cost_to_initial_cash": round(
-            result.total_explicit_cost / config.initial_cash, 6
-        ),
-        "slippage_cost_to_initial_cash": round(
-            result.total_slippage_cost / config.initial_cash, 6
-        ),
-        "trade_count": len(result.trades),
-    }
     canonical_evidence = _canonical_result_evidence(result_dict, metrics)
     report = {
         "schema_version": "2.0",
@@ -355,6 +340,34 @@ def run_strategy_backtest(
         data_quality=canonical_evidence["data_quality"],
         cost_attribution=canonical_evidence["cost_attribution"],
     )
+
+
+def _build_canonical_metrics(
+    result: FactorRankResearchResult,
+    config: StrategyBacktestConfig,
+) -> dict[str, object]:
+    net_return = result.metrics.total_return
+    gross_return = result.same_trade_gross_return
+    return {
+        "total_return": round(net_return, 6),
+        "net_total_return": round(net_return, 6),
+        "same_trade_gross_return": round(gross_return, 6),
+        "cost_drag": round(gross_return - net_return, 6),
+        "sharpe": round(result.metrics.sharpe, 6),
+        "max_drawdown": round(result.metrics.max_drawdown, 6),
+        "turnover": round(result.metrics.turnover, 6),
+        "average_one_way_turnover": round(result.metrics.turnover, 6),
+        "average_top_n_overlap": round(result.average_top_n_overlap, 6),
+        "explicit_cost_to_initial_cash": round(
+            result.total_explicit_cost / config.initial_cash,
+            6,
+        ),
+        "slippage_cost_to_initial_cash": round(
+            result.total_slippage_cost / config.initial_cash,
+            6,
+        ),
+        "trade_count": len(result.trades),
+    }
 
 
 def _canonical_result_evidence(
@@ -880,11 +893,11 @@ def _diagnostic_evidence(
     result_dict: dict[str, Any],
     leakage_report: dict[str, object],
     *,
+    canonical_metrics: Mapping[str, object],
     factor_frame: pd.DataFrame,
     bars: pd.DataFrame,
     initial_cash: float,
 ) -> dict[str, Any]:
-    metrics = result_dict.get("metrics", {})
     observation_count = len(factor_frame)
     non_null = (
         int(factor_frame["factor_value"].notna().sum())
@@ -894,11 +907,6 @@ def _diagnostic_evidence(
     coverage = non_null / observation_count if observation_count else 0.0
     trades = result_dict.get("trades", [])
     trade_count = len(trades) if isinstance(trades, list) else 0
-    total_cost = (
-        sum(float(item.get("cost", 0.0)) for item in trades if isinstance(item, dict))
-        if isinstance(trades, list)
-        else 0.0
-    )
     rejected_orders = int(result_dict.get("rejected_orders", 0) or 0)
     factor_report: dict[str, Any] = {
         "observation_count": observation_count,
@@ -916,15 +924,22 @@ def _diagnostic_evidence(
         },
         "factor_report": factor_report,
         "performance_report": {
-            "max_drawdown": metrics.get("max_drawdown", 0.0),
+            "max_drawdown": canonical_metrics["max_drawdown"],
         },
         "trade_blotter": trades,
-        "turnover_report": {"average_turnover": metrics.get("turnover", 0.0)},
-        "cost_report": {
-            "cost_to_initial_cash": total_cost / initial_cash if initial_cash else 0.0,
-            "cost_drag": metrics.get("cost_drag", 0.0),
+        "turnover_report": {
+            "average_turnover": canonical_metrics["average_one_way_turnover"],
         },
-        "churn_report": {"average_top_n_overlap": metrics.get("average_top_n_overlap", 0.0)},
+        "cost_report": {
+            "cost_to_initial_cash": (
+                float(cast(float | int, canonical_metrics["explicit_cost_to_initial_cash"]))
+                + float(cast(float | int, canonical_metrics["slippage_cost_to_initial_cash"]))
+            ),
+            "cost_drag": canonical_metrics["cost_drag"],
+        },
+        "churn_report": {
+            "average_top_n_overlap": canonical_metrics["average_top_n_overlap"],
+        },
         "rejection_report": {
             "rate": rejected_orders / (trade_count + rejected_orders)
             if trade_count + rejected_orders
