@@ -67,6 +67,7 @@ def test_rolling_backtest_uses_per_date_resolved_symbol_sets(
     ]
 
     report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
+    assert report["config"]["provenance_manifest"] == result["provenance_manifest"]
     trades = report["payload"]["trades"]
     early_c_trades = [
         trade

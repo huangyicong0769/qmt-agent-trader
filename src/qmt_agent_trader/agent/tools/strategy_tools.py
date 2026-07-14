@@ -30,6 +30,9 @@ from qmt_agent_trader.backtest.errors import BacktestIntegrityError
 from qmt_agent_trader.core.config import get_settings
 from qmt_agent_trader.core.ids import SHANGHAI_TZ, new_id, shanghai_now_iso
 from qmt_agent_trader.core.types import ApprovalStatus
+from qmt_agent_trader.data.field_sources import FieldSourceIndex
+from qmt_agent_trader.data.frequency import Frequency
+from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
@@ -37,6 +40,7 @@ from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
 from qmt_agent_trader.persistence.locks import LockManager
 from qmt_agent_trader.persistence.paths import PersistencePaths
+from qmt_agent_trader.persistence.provenance import fingerprint_path_tree
 from qmt_agent_trader.strategy.adapter_capabilities import (
     validate_factor_rank_adapter_spec,
 )
@@ -70,7 +74,8 @@ _cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
     "strategy_tool_cache", default=None
 )
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
-BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v2"
+BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v3"
+BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-opening-state-warmup-v1"
 
 
 @dataclass(frozen=True)
@@ -666,13 +671,22 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             ),
         }
     )
+    provenance = _backtest_provenance_manifest(
+        lake,
+        config=config,
+        requested_factor_ids=requested_factor_ids,
+        saved_strategy=saved_strategy,
+        effective_code_path=effective_code_path,
+        resolved_universe=resolved_universe,
+    )
+    config = config.model_copy(update={"provenance_manifest": provenance})
     cost_estimate = _backtest_cost_estimate(config)
     timeout_seconds_used = _backtest_timeout_seconds_for_call(input_data, context)
     cache_key = _backtest_cache_key(
-        lake,
         config=config,
         factor_name=factor_name,
         requested_factor_ids=requested_factor_ids,
+        provenance=provenance,
     )
     cached = _get_cached_backtest(cache_key)
     if cached is not None:
@@ -735,6 +749,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
                 "cache_hit": False,
                 "timeout_seconds_used": timeout_seconds_used,
                 "cost_estimate": cost_estimate,
+                "provenance_manifest": provenance,
             }
         )
         _put_cached_backtest(cache_key, payload)
@@ -2263,20 +2278,90 @@ def _backtest_cost_estimate(config: StrategyBacktestConfig) -> dict[str, Any]:
     }
 
 
-def _backtest_cache_key(
+def _backtest_provenance_manifest(
     lake: DataLake,
+    *,
+    config: StrategyBacktestConfig,
+    requested_factor_ids: list[str],
+    saved_strategy: SavedStrategy | None,
+    effective_code_path: str | None,
+    resolved_universe: dict[str, Any] | None,
+) -> dict[str, Any]:
+    strategy_spec = config.strategy_spec
+    dataset_names = {
+        "tushare/daily",
+        "tushare/fund_daily",
+        "tushare/trade_cal",
+        "tushare/suspend_d",
+        "tushare/stk_limit",
+        "tushare/namechange",
+        "tushare/stock_basic",
+    }
+    factor_registry = _factor_registry(lake)
+    source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
+    for factor_id in requested_factor_ids:
+        saved_factor = factor_registry.get_factor(factor_id)
+        if saved_factor is None:
+            continue
+        for field in saved_factor.required_columns:
+            source = source_index.best_source_for_field(
+                field,
+                target_frequency=Frequency.DAILY,
+            )
+            if source is not None:
+                dataset_names.add(source.raw_dataset_name)
+    dataset_fingerprints = {
+        name: fingerprint_path_tree(lake.dataset_path("raw", name))
+        for name in sorted(dataset_names)
+    }
+    code_path = effective_code_path or (
+        saved_strategy.code_path if saved_strategy is not None else None
+    )
+    return {
+        "cache_schema_version": BACKTEST_CACHE_SCHEMA_VERSION,
+        "engine_semantic_version": BACKTEST_ENGINE_SEMANTIC_VERSION,
+        "strategy_spec_fingerprint": (
+            strategy_spec_fingerprint(strategy_spec)
+            if strategy_spec is not None
+            else None
+        ),
+        "saved_strategy": {
+            "strategy_id": (
+                saved_strategy.strategy_id if saved_strategy is not None else None
+            ),
+            "version": saved_strategy.version if saved_strategy is not None else None,
+            "status": (
+                saved_strategy.status.value if saved_strategy is not None else None
+            ),
+            "spec_fingerprint": (
+                strategy_spec_fingerprint(saved_strategy.spec)
+                if saved_strategy is not None
+                else None
+            ),
+            "code_path": code_path,
+            "code_fingerprint": (
+                fingerprint_path_tree(Path(code_path)) if code_path else None
+            ),
+        },
+        "factor_fingerprints": _factor_fingerprint(lake, requested_factor_ids),
+        "dataset_fingerprints": dataset_fingerprints,
+        "universe_resolution": resolved_universe,
+    }
+
+
+def _backtest_cache_key(
     *,
     config: StrategyBacktestConfig,
     factor_name: str,
     requested_factor_ids: list[str],
+    provenance: dict[str, Any],
 ) -> str:
     payload = {
         "schema_version": BACKTEST_CACHE_SCHEMA_VERSION,
         "config": config.model_dump(mode="json"),
         "factor_name": factor_name,
         "requested_factor_ids": requested_factor_ids,
-        "data_fingerprint": _data_fingerprint(lake),
-        "factor_fingerprint": _factor_fingerprint(lake, requested_factor_ids),
+        "provenance": provenance,
     }
     raw = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -2293,16 +2378,6 @@ def _put_cached_backtest(cache_key: str, payload: dict[str, Any]) -> None:
         cache.put("backtest", cache_key, payload)
 
 
-def _data_fingerprint(lake: DataLake) -> dict[str, tuple[int, int]]:
-    result: dict[str, tuple[int, int]] = {}
-    for name in ("tushare/daily", "tushare/fund_daily", "tushare/suspend_d", "tushare/stk_limit"):
-        path = lake.dataset_path("raw", name)
-        if path.exists():
-            stat = path.stat()
-            result[name] = (stat.st_mtime_ns, stat.st_size)
-    return result
-
-
 def _factor_fingerprint(lake: DataLake, factor_ids: list[str]) -> dict[str, str]:
     registry = _factor_registry(lake)
     result: dict[str, str] = {}
@@ -2313,12 +2388,8 @@ def _factor_fingerprint(lake: DataLake, factor_ids: list[str]) -> dict[str, str]
         implementation = str(saved.implementation_ref)
         if implementation.startswith("file:"):
             path = Path(implementation.removeprefix("file:"))
-            try:
-                stat = path.stat()
-            except OSError:
-                result[factor_id] = implementation
-            else:
-                result[factor_id] = f"{implementation}:{stat.st_mtime_ns}:{stat.st_size}"
+            fingerprint = fingerprint_path_tree(path)
+            result[factor_id] = f"{implementation}:{fingerprint}"
         else:
             result[factor_id] = f"{implementation}:{saved.version}:{saved.lookback}"
     return result

@@ -1,5 +1,4 @@
 from qmt_agent_trader.agent.tools import strategy_tools
-from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.strategy.execution_adapter import StrategyBacktestConfig
 
 
@@ -23,14 +22,7 @@ def test_strategy_backtest_config_serializes_declared_semantics() -> None:
     assert payload["lower_is_better"] is True
 
 
-def test_backtest_cache_key_changes_with_execution_semantics(tmp_path, monkeypatch) -> None:
-    lake = DataLake(tmp_path, tmp_path / "research.duckdb")
-    monkeypatch.setattr(strategy_tools, "_data_fingerprint", lambda _lake: "data")
-    monkeypatch.setattr(
-        strategy_tools,
-        "_factor_fingerprint",
-        lambda _lake, _factor_ids: "factor",
-    )
+def test_backtest_cache_key_changes_with_execution_semantics() -> None:
     base = StrategyBacktestConfig(
         strategy_id="strategy",
         start_date="20240101",
@@ -41,10 +33,10 @@ def test_backtest_cache_key_changes_with_execution_semantics(tmp_path, monkeypat
 
     def key(config: StrategyBacktestConfig) -> str:
         return strategy_tools._backtest_cache_key(
-            lake,
             config=config,
             factor_name="momentum_20d",
             requested_factor_ids=["momentum_20d"],
+            provenance={"dataset_fingerprints": {"tushare/daily": "stable"}},
         )
 
     assert key(base) != key(weekly)

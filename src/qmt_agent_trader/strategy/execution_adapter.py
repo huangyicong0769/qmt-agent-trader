@@ -91,6 +91,7 @@ class StrategyBacktestConfig(BaseModel):
     strategy_spec: StrategySpec | None = None
     implementation_code_path: str | None = None
     factor_name: str | None = None
+    provenance_manifest: dict[str, Any] | None = None
 
 
 class StrategyBacktestResult(BaseModel):
