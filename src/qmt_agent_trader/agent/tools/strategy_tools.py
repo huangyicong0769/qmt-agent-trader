@@ -8,7 +8,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from pprint import pformat
@@ -71,6 +71,17 @@ _cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
 )
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
 BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v2"
+
+
+@dataclass(frozen=True)
+class _ResolvedBacktestIntent:
+    strategy_id: str
+    strategy_spec: StrategySpec
+    saved_strategy: SavedStrategy | None
+    effective_code_path: str | None
+    factor_name: str
+    requested_factor_ids: tuple[str, ...]
+    strategy_frequency: Literal["daily", "weekly", "monthly"]
 
 
 def wire(sandbox: CodeSandbox, store: ExperimentStore, lake: DataLake) -> None:
@@ -542,123 +553,59 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
                 "allowed_values": ["daily", "weekly", "monthly"],
             }
 
-    strategy_id = input_data.get("strategy_id", "")
-    factor_name = input_data.get("factor_name", "")
-    spec_data = input_data.get("strategy_spec")
-    saved_strategy: SavedStrategy | None = None
-    strategy_spec_result = _parse_backtest_strategy_spec(spec_data, input_data)
-    if isinstance(strategy_spec_result, dict):
-        return strategy_spec_result
-    strategy_spec = strategy_spec_result
-    if strategy_id:
-        saved_strategy = _strategy_registry().get_strategy(str(strategy_id))
-    if saved_strategy is not None and strategy_spec is not None:
-        if strategy_spec_fingerprint(saved_strategy.spec) != strategy_spec_fingerprint(
-            strategy_spec
-        ):
-            return {
-                "status": "BLOCKED",
-                "reason": "SAVED_STRATEGY_SPEC_MISMATCH",
-                "strategy_id": str(strategy_id),
-                "research_only": True,
-                "live_trading_allowed": False,
-            }
-        strategy_spec = saved_strategy.spec
-    elif saved_strategy is not None:
-        strategy_spec = saved_strategy.spec
-    elif strategy_spec is None and strategy_id:
-        if not factor_name:
-            return {
-                "status": "STRATEGY_NOT_FOUND",
-                "strategy_id": str(strategy_id),
-                "message": (
-                    "strategy_id not found in StrategyRegistry; pass strategy_spec "
-                    "or save the spec draft first"
-                ),
-                "suggested_next_tools": ["save_strategy_spec_draft", "list_strategy_candidates"],
-                "research_only": True,
-                "live_trading_allowed": False,
-            }
-    if strategy_spec is not None and strategy_id:
-        if str(strategy_id) != strategy_spec.strategy_id:
-            return {
+    start_date = input_data.get("start_date", "20200101")
+    end_date = input_data.get("end_date", _today_yyyymmdd())
+    initial_cash = float(input_data.get("initial_cash", 1_000_000))
+    requested_top_n = int(input_data.get("top_n", 20))
+    intent_result = _resolve_backtest_intent(
+        input_data,
+        requested_strategy_frequency=cast(
+            Literal["daily", "weekly", "monthly"] | None,
+            requested_strategy_frequency,
+        ),
+        requested_top_n=requested_top_n,
+    )
+    if isinstance(intent_result, dict):
+        return intent_result
+    intent = intent_result
+    strategy_spec = intent.strategy_spec
+    saved_strategy = intent.saved_strategy
+    effective_code_path = intent.effective_code_path
+    factor_name = intent.factor_name
+    requested_factor_ids = list(intent.requested_factor_ids)
+    top_n = int(input_data.get("top_n", strategy_spec.portfolio.top_n))
+    single_factor = strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
+    semantic_config = StrategyBacktestConfig(
+        strategy_id=strategy_spec.strategy_id,
+        strategy_spec=strategy_spec,
+        implementation_code_path=effective_code_path,
+        factor_name=factor_name,
+        start_date=str(start_date),
+        end_date=str(end_date),
+        initial_cash=initial_cash,
+        top_n=top_n,
+        max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
+        slippage_bps=strategy_spec.execution.slippage_bps,
+        execution_delay_days=strategy_spec.execution.execution_delay_days,
+        rebalance_frequency=intent.strategy_frequency,
+        min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
+        rank_buffer=strategy_spec.rebalance.rank_buffer,
+        cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
+        lower_is_better=bool(single_factor and single_factor.ascending),
+    )
+    config_issues = validate_backtest_config_matches_spec(semantic_config, strategy_spec)
+    if config_issues:
+        return _with_backtest_evidence_status(
+            {
                 "status": "BLOCKED",
                 "reason": "CONFIG_SPEC_MISMATCH",
-                "unsupported_fields": ["config.strategy_id"],
-                "research_only": True,
-                "live_trading_allowed": False,
-            }
-    if strategy_spec is not None:
-        strategy_id = strategy_id or strategy_spec.strategy_id
-        if not factor_name and strategy_spec.factors:
-            factor_name = strategy_spec.factors[0].factor_id
-    effective_code_path = _effective_implementation_code_path(input_data, saved_strategy)
-    if strategy_spec is not None:
-        capability_issues = validate_factor_rank_adapter_spec(
-            strategy_spec,
-            code_path=effective_code_path,
-        )
-        if capability_issues:
-            generated_code = any(issue.field == "code_path" for issue in capability_issues)
-            return {
-                "status": "BLOCKED",
-                "reason": (
-                    "GENERATED_STRATEGY_EXECUTION_NOT_IMPLEMENTED"
-                    if generated_code
-                    else "UNSUPPORTED_STRATEGY_SEMANTICS"
-                ),
-                "unsupported_fields": [issue.field for issue in capability_issues],
-                "capability_issues": [asdict(issue) for issue in capability_issues],
+                "unsupported_fields": [item.field for item in config_issues],
+                "capability_issues": [asdict(item) for item in config_issues],
                 "execution_backend": "factor_rank_baseline_adapter",
                 "research_only": True,
                 "live_trading_allowed": False,
             }
-    start_date = input_data.get("start_date", "20200101")
-    end_date = input_data.get("end_date", _today_yyyymmdd())
-    initial_cash = float(input_data.get("initial_cash", 1_000_000))
-    top_n = int(input_data.get("top_n", strategy_spec.portfolio.top_n if strategy_spec else 20))
-    semantic_config: StrategyBacktestConfig | None = None
-    if strategy_spec is not None:
-        single_factor = (
-            strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
         )
-        semantic_config = StrategyBacktestConfig(
-            strategy_id=strategy_spec.strategy_id,
-            strategy_spec=strategy_spec,
-            implementation_code_path=effective_code_path,
-            factor_name=str(factor_name) if factor_name else None,
-            start_date=str(start_date),
-            end_date=str(end_date),
-            initial_cash=initial_cash,
-            top_n=top_n,
-            max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
-            slippage_bps=strategy_spec.execution.slippage_bps,
-            execution_delay_days=strategy_spec.execution.execution_delay_days,
-            rebalance_frequency=cast(
-                Literal["daily", "weekly", "monthly"],
-                requested_strategy_frequency or strategy_spec.rebalance.frequency,
-            ),
-            min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
-            rank_buffer=strategy_spec.rebalance.rank_buffer,
-            cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
-            lower_is_better=bool(single_factor and single_factor.ascending),
-        )
-        config_issues = validate_backtest_config_matches_spec(
-            semantic_config,
-            strategy_spec,
-        )
-        if config_issues:
-            return _with_backtest_evidence_status(
-                {
-                    "status": "BLOCKED",
-                    "reason": "CONFIG_SPEC_MISMATCH",
-                    "unsupported_fields": [item.field for item in config_issues],
-                    "capability_issues": [asdict(item) for item in config_issues],
-                    "execution_backend": "factor_rank_baseline_adapter",
-                    "research_only": True,
-                    "live_trading_allowed": False,
-                }
-            )
     symbols = _requested_symbols(input_data)
     universe_state = _resolve_backtest_universe(
         lake,
@@ -668,32 +615,18 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         symbols=symbols,
         start_date=str(start_date),
         end_date=str(end_date),
+        strategy_frequency=intent.strategy_frequency,
     )
     if universe_state["status"] != "OK":
         payload = dict(universe_state["payload"])
-        if strategy_spec is not None:
-            payload.setdefault("strategy_id", strategy_spec.strategy_id)
-        elif strategy_id:
-            payload.setdefault("strategy_id", str(strategy_id))
+        payload.setdefault("strategy_id", strategy_spec.strategy_id)
         return payload
     symbols = universe_state["symbols"]
     symbols_by_date = universe_state["symbols_by_date"]
     universe_info = universe_state["universe_info"]
     resolved_universe = universe_state["resolved_universe"]
-    if not factor_name:
-        return {
-            "status": "INVALID_REQUEST",
-            "message": "必须提供 factor_name、strategy_spec 或已保存的 strategy_id。",
-            "suggested_next_tools": ["create_strategy_spec", "save_strategy_spec_draft"],
-        }
-
     registry_root = _factor_registry_root(lake)
     factor_registry = _factor_registry(lake, registry_root)
-    requested_factor_ids = (
-        [factor.factor_id for factor in strategy_spec.factors]
-        if strategy_spec is not None and strategy_spec.factors
-        else [str(factor_name)]
-    )
     missing_factor_ids = [
         item for item in requested_factor_ids if factor_registry.get_factor(item) is None
     ]
@@ -721,41 +654,6 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         }
     saved = factor_registry.get_factor(str(factor_name))
     factor_name = saved.factor_id if saved is not None else requested_factor_ids[0]
-    if strategy_spec is None:
-        temporary_frequency = cast(
-            Literal["daily", "weekly", "monthly"],
-            requested_strategy_frequency or "daily",
-        )
-        strategy_spec = StrategySpec(
-            strategy_id=strategy_id or f"factor_{factor_name}",
-            name=f"Factor baseline: {factor_name}",
-            kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
-            factors=[{"factor_id": factor_name}],
-            portfolio={"top_n": top_n},
-            rebalance={"frequency": temporary_frequency},
-        )
-    if semantic_config is None:
-        single_factor = (
-            strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
-        )
-        semantic_config = StrategyBacktestConfig(
-            strategy_id=strategy_spec.strategy_id,
-            strategy_spec=strategy_spec,
-            implementation_code_path=effective_code_path,
-            factor_name=str(factor_name),
-            start_date=str(start_date),
-            end_date=str(end_date),
-            initial_cash=initial_cash,
-            top_n=strategy_spec.portfolio.top_n,
-            max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
-            slippage_bps=strategy_spec.execution.slippage_bps,
-            execution_delay_days=strategy_spec.execution.execution_delay_days,
-            rebalance_frequency=strategy_spec.rebalance.frequency,
-            min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
-            rank_buffer=strategy_spec.rebalance.rank_buffer,
-            cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
-            lower_is_better=bool(single_factor and single_factor.ascending),
-        )
     config = semantic_config.model_copy(
         update={
             "factor_name": factor_name,
@@ -841,6 +739,122 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         )
         _put_cached_backtest(cache_key, payload)
     return _with_backtest_evidence_status(payload)
+
+
+def _resolve_backtest_intent(
+    input_data: dict[str, Any],
+    *,
+    requested_strategy_frequency: Literal["daily", "weekly", "monthly"] | None,
+    requested_top_n: int,
+) -> _ResolvedBacktestIntent | dict[str, Any]:
+    parsed = _parse_backtest_strategy_spec(input_data.get("strategy_spec"), input_data)
+    if isinstance(parsed, dict):
+        return parsed
+    inline_spec = parsed
+    top_level_id = str(input_data.get("strategy_id") or "").strip()
+    factor_name = str(input_data.get("factor_name") or "").strip()
+    effective_id = (
+        top_level_id
+        or (inline_spec.strategy_id if inline_spec is not None else "")
+        or (f"factor_{factor_name}" if factor_name else "")
+    )
+    saved_strategy = (
+        _strategy_registry().get_strategy(effective_id) if effective_id else None
+    )
+    if saved_strategy is not None and inline_spec is not None:
+        if strategy_spec_fingerprint(saved_strategy.spec) != strategy_spec_fingerprint(
+            inline_spec
+        ):
+            return {
+                "status": "BLOCKED",
+                "reason": "SAVED_STRATEGY_SPEC_MISMATCH",
+                "strategy_id": effective_id,
+                "research_only": True,
+                "live_trading_allowed": False,
+            }
+    strategy_spec = saved_strategy.spec if saved_strategy is not None else inline_spec
+    if strategy_spec is None and top_level_id and not factor_name:
+        return {
+            "status": "STRATEGY_NOT_FOUND",
+            "strategy_id": top_level_id,
+            "message": (
+                "strategy_id not found in StrategyRegistry; pass strategy_spec "
+                "or save the spec draft first"
+            ),
+            "suggested_next_tools": [
+                "save_strategy_spec_draft",
+                "list_strategy_candidates",
+            ],
+            "research_only": True,
+            "live_trading_allowed": False,
+        }
+    if strategy_spec is not None and top_level_id:
+        if top_level_id != strategy_spec.strategy_id:
+            return {
+                "status": "BLOCKED",
+                "reason": "CONFIG_SPEC_MISMATCH",
+                "unsupported_fields": ["config.strategy_id"],
+                "research_only": True,
+                "live_trading_allowed": False,
+            }
+    if not factor_name and strategy_spec is not None and strategy_spec.factors:
+        factor_name = strategy_spec.factors[0].factor_id
+    if not factor_name:
+        return {
+            "status": "INVALID_REQUEST",
+            "message": "必须提供 factor_name、strategy_spec 或已保存的 strategy_id。",
+            "suggested_next_tools": [
+                "create_strategy_spec",
+                "save_strategy_spec_draft",
+            ],
+        }
+    strategy_frequency = requested_strategy_frequency or (
+        strategy_spec.rebalance.frequency if strategy_spec is not None else "daily"
+    )
+    if strategy_spec is None:
+        strategy_spec = StrategySpec(
+            strategy_id=effective_id or f"factor_{factor_name}",
+            name=f"Factor baseline: {factor_name}",
+            kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
+            factors=[{"factor_id": factor_name}],
+            portfolio={"top_n": requested_top_n},
+            rebalance={"frequency": strategy_frequency},
+        )
+        effective_id = strategy_spec.strategy_id
+    effective_code_path = _effective_implementation_code_path(
+        input_data, saved_strategy
+    )
+    capability_issues = validate_factor_rank_adapter_spec(
+        strategy_spec,
+        code_path=effective_code_path,
+    )
+    if capability_issues:
+        generated_code = any(issue.field == "code_path" for issue in capability_issues)
+        return {
+            "status": "BLOCKED",
+            "reason": (
+                "GENERATED_STRATEGY_EXECUTION_NOT_IMPLEMENTED"
+                if generated_code
+                else "UNSUPPORTED_STRATEGY_SEMANTICS"
+            ),
+            "unsupported_fields": [issue.field for issue in capability_issues],
+            "capability_issues": [asdict(issue) for issue in capability_issues],
+            "execution_backend": "factor_rank_baseline_adapter",
+            "research_only": True,
+            "live_trading_allowed": False,
+        }
+    requested_factor_ids = tuple(
+        factor.factor_id for factor in strategy_spec.factors
+    ) or (factor_name,)
+    return _ResolvedBacktestIntent(
+        strategy_id=effective_id,
+        strategy_spec=strategy_spec,
+        saved_strategy=saved_strategy,
+        effective_code_path=effective_code_path,
+        factor_name=factor_name,
+        requested_factor_ids=requested_factor_ids,
+        strategy_frequency=strategy_frequency,
+    )
 
 
 def _effective_implementation_code_path(
@@ -1823,7 +1837,11 @@ def _resolve_backtest_universe(
     symbols: list[str],
     start_date: str,
     end_date: str,
+    strategy_frequency: Literal["daily", "weekly", "monthly"],
 ) -> dict[str, Any]:
+    universe_frequency = str(
+        input_data.get("universe_rebalance_frequency") or strategy_frequency
+    )
     if symbols:
         universe_info: dict[str, Any] = {
             "universe_requested": input_data.get("universe"),
@@ -1868,6 +1886,7 @@ def _resolve_backtest_universe(
         requested_value=requested_value,
         strategy_spec=strategy_spec,
         saved_strategy=saved_strategy,
+        universe_frequency=universe_frequency,
     )
     if spec_result.get("status") != "OK":
         return {"status": spec_result.get("status", "BLOCKED"), "payload": spec_result}
@@ -1886,14 +1905,6 @@ def _resolve_backtest_universe(
         }
     resolver = UniverseResolver(lake)
     if universe_mode == "rolling":
-        strategy_frequency = (
-            strategy_spec.rebalance.frequency
-            if strategy_spec is not None
-            else spec.rebalance_frequency
-        )
-        universe_frequency = str(
-            input_data.get("universe_rebalance_frequency") or strategy_frequency
-        )
         resolved = resolver.build(
             spec,
             mode="rolling",
@@ -2049,6 +2060,7 @@ def _backtest_universe_spec(
     requested_value: Any,
     strategy_spec: StrategySpec | None,
     saved_strategy: SavedStrategy | None,
+    universe_frequency: str,
 ) -> dict[str, Any]:
     if input_data.get("universe_id"):
         registry = UniverseRegistry(registry_root_from_payload(input_data, lake))
@@ -2103,7 +2115,7 @@ def _backtest_universe_spec(
             "spec": broad_universe_spec(
                 str(broad_value),
                 mode=str(input_data.get("universe_mode") or input_data.get("mode") or "snapshot"),
-                rebalance_frequency=str(input_data.get("rebalance_frequency") or "daily"),
+                rebalance_frequency=universe_frequency,
             ),
             "source": "broad_universe",
         }

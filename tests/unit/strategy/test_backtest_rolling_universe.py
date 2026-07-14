@@ -88,6 +88,7 @@ def test_backtest_blocks_on_empty_rolling_universe(registry, lake: DataLake) -> 
         _bar("000001.SZ", "20240102", 10.1, st=True),
     ]
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    _write_trade_state_sources(lake, rows)
     lake.write_parquet(
         pd.DataFrame(
             [
@@ -221,8 +222,29 @@ def _write_trade_state_sources(
         "raw",
         "tushare/stk_limit",
     )
+    st_rows = [row for row in rows if bool(row.get("st", False))]
+    st_periods = [
+        {
+            "ts_code": symbol,
+            "name": "ST test",
+            "start_date": min(
+                str(row["trade_date"])
+                for row in st_rows
+                if row["ts_code"] == symbol
+            ),
+            "end_date": max(
+                str(row["trade_date"])
+                for row in st_rows
+                if row["ts_code"] == symbol
+            ),
+        }
+        for symbol in sorted({str(row["ts_code"]) for row in st_rows})
+    ]
     lake.write_parquet(
-        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        pd.DataFrame(
+            st_periods,
+            columns=["ts_code", "name", "start_date", "end_date"],
+        ),
         "raw",
         "tushare/namechange",
     )
