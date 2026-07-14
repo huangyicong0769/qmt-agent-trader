@@ -119,8 +119,8 @@ def test_backtest_allows_explicit_small_symbol_list_when_user_requested_it(
 def _write_bars(lake: DataLake, *, symbols: list[str] | None = None) -> None:
     symbols = symbols or ["000001.SZ", "000002.SZ"]
     rows = []
-    start = date(2024, 1, 1)
-    for offset in range(46):
+    start = date(2023, 12, 12)
+    for offset in range(66):
         trade_date = f"{start + timedelta(days=offset):%Y%m%d}"
         for symbol_index, symbol in enumerate(symbols):
             rows.append(
@@ -136,6 +136,31 @@ def _write_bars(lake: DataLake, *, symbols: list[str] | None = None) -> None:
                 }
             )
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": row["ts_code"],
+                    "trade_date": row["trade_date"],
+                    "up_limit": float(row["close"]) * 1.1,
+                    "down_limit": float(row["close"]) * 0.9,
+                }
+                for row in rows
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
     lake.write_parquet(
         pd.DataFrame(
             [
