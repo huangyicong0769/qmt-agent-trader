@@ -39,3 +39,65 @@ def test_missing_trade_calendar_raises(tmp_path) -> None:
         load_open_sessions(data_lake(tmp_path), start="20240102", end="20240104")
 
     assert exc_info.value.code == "TRADING_CALENDAR_NOT_READY"
+
+
+def test_partial_calendar_cannot_hide_missing_session(tmp_path) -> None:
+    lake = data_lake(tmp_path)
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": "20240102", "is_open": 1},
+                {"exchange": "SSE", "cal_date": "20240104", "is_open": 1},
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        load_open_sessions(lake, start="20240102", end="20240104")
+
+    assert exc_info.value.code == "TRADING_CALENDAR_PARTIAL_COVERAGE"
+    assert exc_info.value.details["missing_dates"] == ["2024-01-03"]
+
+
+def test_conflicting_calendar_states_raise(tmp_path) -> None:
+    lake = data_lake(tmp_path)
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": "20240102", "is_open": 1},
+                {"exchange": "SZSE", "cal_date": "20240102", "is_open": 0},
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        load_open_sessions(lake, start="20240102", end="20240102")
+
+    assert exc_info.value.code == "TRADING_CALENDAR_CONFLICTING_STATE"
+
+
+@pytest.mark.parametrize(
+    ("cal_date", "is_open"),
+    [
+        ("not-a-date", 1),
+        ("20240102", 2),
+    ],
+)
+def test_invalid_calendar_values_raise(tmp_path, cal_date, is_open) -> None:
+    lake = data_lake(tmp_path)
+    lake.write_parquet(
+        pd.DataFrame(
+            [{"exchange": "SSE", "cal_date": cal_date, "is_open": is_open}]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        load_open_sessions(lake, start="20240102", end="20240102")
+
+    assert exc_info.value.code == "TRADING_CALENDAR_INVALID"
