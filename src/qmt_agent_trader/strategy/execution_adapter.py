@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping
@@ -55,6 +56,16 @@ BACKTEST_BASE_FIELDS = [
 ]
 MIN_REQUIRED_FIELD_COVERAGE = 0.80
 MIN_CROSS_SECTIONAL_COVERAGE = 0.50
+
+
+def strategy_spec_fingerprint(spec: StrategySpec) -> str:
+    encoded = json.dumps(
+        spec.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class StrategyBacktestConfig(BaseModel):
@@ -198,7 +209,47 @@ def run_strategy_backtest(
 ) -> StrategyBacktestResult:
     run_id = new_id("research")
     saved_strategy = _strategy_from_registry(registry, config.strategy_id)
-    spec = config.strategy_spec or (saved_strategy.spec if saved_strategy is not None else None)
+    inline_spec = config.strategy_spec
+    if inline_spec is not None and config.strategy_id != inline_spec.strategy_id:
+        issue = AdapterCapabilityIssue(
+            field="config.strategy_id",
+            observed=config.strategy_id,
+            supported=inline_spec.strategy_id,
+            message="config strategy_id must equal StrategySpec.strategy_id",
+        )
+        return StrategyBacktestResult(
+            run_id=run_id,
+            strategy_id=config.strategy_id,
+            strategy_version=inline_spec.version,
+            status="BLOCKED",
+            reason="CONFIG_SPEC_MISMATCH",
+            unsupported_fields=[issue.field],
+            capability_issues=[asdict(issue)],
+            research_only=True,
+            live_trading_allowed=False,
+        )
+    if saved_strategy is not None and inline_spec is not None:
+        saved_fingerprint = strategy_spec_fingerprint(saved_strategy.spec)
+        inline_fingerprint = strategy_spec_fingerprint(inline_spec)
+        if saved_fingerprint != inline_fingerprint:
+            issue = AdapterCapabilityIssue(
+                field="strategy_spec",
+                observed=inline_fingerprint,
+                supported=saved_fingerprint,
+                message="inline StrategySpec differs from the saved Registry strategy",
+            )
+            return StrategyBacktestResult(
+                run_id=run_id,
+                strategy_id=config.strategy_id,
+                strategy_version=saved_strategy.spec.version,
+                status="BLOCKED",
+                reason="SAVED_STRATEGY_SPEC_MISMATCH",
+                unsupported_fields=[issue.field],
+                capability_issues=[asdict(issue)],
+                research_only=True,
+                live_trading_allowed=False,
+            )
+    spec = saved_strategy.spec if saved_strategy is not None else inline_spec
     effective_code_path = config.implementation_code_path or (
         saved_strategy.code_path if saved_strategy is not None else None
     )

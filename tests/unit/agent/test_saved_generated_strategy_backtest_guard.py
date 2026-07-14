@@ -34,12 +34,14 @@ def _saved_strategy(
     *,
     strategy_id: str,
     code_path: str | None,
+    top_n: int = 20,
 ) -> SavedStrategy:
     spec = StrategySpec(
         strategy_id=strategy_id,
         name=strategy_id,
         kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
         factors=[{"factor_id": "momentum_20d"}],
+        portfolio={"top_n": top_n},
     )
     saved = SavedStrategy(
         strategy_id=strategy_id,
@@ -134,3 +136,38 @@ def test_direct_adapter_call_blocks_registry_generated_implementation(
     assert result.status == "BLOCKED"
     assert result.reason == "GENERATED_STRATEGY_EXECUTION_NOT_IMPLEMENTED"
     assert result.unsupported_fields == ["code_path"]
+
+
+def test_inline_spec_cannot_replace_saved_strategy(
+    wired_strategy_tools,
+    monkeypatch,
+) -> None:
+    saved = _saved_strategy(
+        wired_strategy_tools,
+        strategy_id="saved_value",
+        code_path=None,
+        top_n=10,
+    )
+    conflicting_spec = saved.spec.model_copy(
+        update={"portfolio": saved.spec.portfolio.model_copy(update={"top_n": 20})}
+    )
+    monkeypatch.setattr(
+        strategy_tools,
+        "_resolve_backtest_universe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("identity conflict must block before universe resolution")
+        ),
+    )
+
+    result = strategy_tools._run_backtest(
+        {
+            "strategy_id": "saved_value",
+            "strategy_spec": conflicting_spec.model_dump(mode="json"),
+            "start_date": "20240101",
+            "end_date": "20240331",
+        },
+        ToolContext(run_id="saved-spec-conflict"),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "SAVED_STRATEGY_SPEC_MISMATCH"
