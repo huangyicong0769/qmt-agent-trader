@@ -128,7 +128,7 @@ def test_backtest_composite_strategy_unions_all_factor_required_columns(tmp_path
             strategy_id=spec.strategy_id,
             strategy_spec=spec,
             factor_name="pb_rank",
-            start_date="20240101",
+            start_date="20240301",
             end_date="20240320",
             symbols=["000001.SZ", "000002.SZ"],
             top_n=1,
@@ -218,7 +218,11 @@ def test_backtest_technical_factor_still_runs_from_bars(tmp_path: Path) -> None:
     result = run_strategy_backtest(
         lake,
         StrategyRegistry(tmp_path / "strategies"),
-        _config("momentum_20d", symbols=["000001.SZ", "000002.SZ"]),
+        _config(
+            "momentum_20d",
+            start_date="20240201",
+            symbols=["000001.SZ", "000002.SZ"],
+        ),
         reports_dir=tmp_path / "reports",
     )
 
