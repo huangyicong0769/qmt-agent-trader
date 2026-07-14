@@ -305,12 +305,10 @@ class StrategyDiagnosticsEvaluator:
         config: StrategyDiagnosticConfig,
     ) -> DiagnosticCheck:
         if not _has_metric(evidence, "churn_report", "average_top_n_overlap"):
-            return DiagnosticCheck(
-                name="average_top_n_overlap",
-                status=DiagnosticStatus.PASS,
-                observed="not_available_legacy_evidence",
-                threshold=config.min_average_top_n_overlap,
-                message="legacy evidence does not contain selection overlap",
+            return _not_computed_check(
+                "average_top_n_overlap",
+                config.min_average_top_n_overlap,
+                "selection overlap was not computed; do not infer churn quality",
             )
         observed = _float_metric(evidence, "churn_report", "average_top_n_overlap")
         return DiagnosticCheck(
@@ -331,12 +329,10 @@ class StrategyDiagnosticsEvaluator:
         config: StrategyDiagnosticConfig,
     ) -> DiagnosticCheck:
         if not _has_metric(evidence, "cost_report", "cost_drag"):
-            return DiagnosticCheck(
-                name="cost_drag",
-                status=DiagnosticStatus.PASS,
-                observed="not_available_legacy_evidence",
-                threshold=config.max_cost_drag,
-                message="legacy evidence does not contain same-trade cost drag",
+            return _not_computed_check(
+                "cost_drag",
+                config.max_cost_drag,
+                "same-trade cost drag was not computed; do not infer cost quality",
             )
         observed = _float_metric(evidence, "cost_report", "cost_drag")
         return DiagnosticCheck(

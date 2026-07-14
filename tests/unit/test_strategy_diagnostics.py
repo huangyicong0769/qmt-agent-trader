@@ -19,7 +19,8 @@ def test_strategy_diagnostics_warn_on_thin_evidence() -> None:
         },
         "performance_report": {"max_drawdown": 0.0},
         "turnover_report": {"turnovers": [0.2, 0.3]},
-        "cost_report": {"cost_to_initial_cash": 0.001},
+        "cost_report": {"cost_to_initial_cash": 0.001, "cost_drag": 0.001},
+        "churn_report": {"average_top_n_overlap": 0.8},
         "rejection_report": {"rate": 0.0},
         "trade_blotter": {"count": 1},
     }
@@ -61,7 +62,8 @@ def test_strategy_diagnostics_pass_when_thresholds_are_met() -> None:
         },
         "performance_report": {"max_drawdown": 0.02},
         "turnover_report": {"average_turnover": 0.1},
-        "cost_report": {"cost_to_initial_cash": 0.001},
+        "cost_report": {"cost_to_initial_cash": 0.001, "cost_drag": 0.001},
+        "churn_report": {"average_top_n_overlap": 0.8},
         "rejection_report": {"rate": 0.0},
         "trade_blotter": {"count": 1},
     }

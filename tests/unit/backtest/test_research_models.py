@@ -35,3 +35,5 @@ def test_result_serializes_dated_equity_and_legacy_curve() -> None:
     assert payload["equity_curve"] == [100.0, 110.0]
     assert payload["equity_points"][1]["trade_date"] == "2024-01-03"
     assert payload["data_quality"]["validated_valuation_dates"] == 0
+    assert "missing_held_price_events" not in payload["data_quality"]
+    assert "stale_valuation_dates" not in payload["data_quality"]

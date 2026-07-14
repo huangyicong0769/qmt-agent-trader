@@ -63,8 +63,6 @@ class ResearchDataQuality:
     low_cross_section_dates: tuple[str, ...] = ()
     rejected_order_count: int = 0
     warnings: tuple[str, ...] = ()
-    missing_held_price_events: int = 0
-    stale_valuation_dates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
