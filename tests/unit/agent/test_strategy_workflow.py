@@ -11,11 +11,12 @@ import pytest
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.sandbox import CodeSandbox
 from qmt_agent_trader.agent.schemas import ExperimentStatus, ToolContext
-from qmt_agent_trader.agent.tools import build_agent_registry
+from qmt_agent_trader.agent.tools import build_agent_registry, strategy_tools
 from qmt_agent_trader.agent.workflows.strategy_engineering import (
     StrategyEngineeringWorkflow,
 )
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.strategy.execution_adapter import StrategyBacktestResult
 
 
 @pytest.fixture
@@ -88,6 +89,42 @@ def test_strategy_workflow_does_not_call_broker(registry, store):
     assert not any("broker" in a for a in artifacts)
     assert not any("gateway" in a for a in artifacts)
     assert not any("submit_order" in a for a in artifacts)
+
+
+def test_factor_only_backtest_builds_temporary_weekly_spec(
+    lake,
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def fake_run_strategy_backtest(_lake, _registry, config, *, reports_dir):
+        captured["config"] = config
+        return StrategyBacktestResult(
+            run_id="research_fixture",
+            strategy_id=config.strategy_id,
+            strategy_version=config.strategy_spec.version,
+            status="BLOCKED",
+            reason="fixture",
+        )
+
+    monkeypatch.setattr(strategy_tools, "run_strategy_backtest", fake_run_strategy_backtest)
+    monkeypatch.setattr(strategy_tools, "_get_cached_backtest", lambda _key: None)
+    monkeypatch.setattr(strategy_tools, "_get_lake", lambda: lake)
+
+    result = strategy_tools._run_backtest(
+        {
+            "factor_name": "momentum_20d",
+            "rebalance_frequency": "weekly",
+            "symbols": ["000001.SZ"],
+            "start_date": "20240101",
+            "end_date": "20240331",
+        },
+        ToolContext(run_id="temporary-weekly"),
+    )
+
+    assert "config" in captured, result
+    assert captured["config"].strategy_spec.rebalance.frequency == "weekly"
+    assert captured["config"].rebalance_frequency == "weekly"
 
 
 def test_agent_can_list_generated_strategy_candidates(registry):

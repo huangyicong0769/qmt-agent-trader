@@ -531,6 +531,16 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     if lake is None:
         return {"status": "NOT_IMPLEMENTED", "message": "data lake not wired"}
 
+    requested_strategy_frequency = input_data.get("rebalance_frequency")
+    if requested_strategy_frequency is not None:
+        requested_strategy_frequency = str(requested_strategy_frequency)
+        if requested_strategy_frequency not in {"daily", "weekly", "monthly"}:
+            return {
+                "status": "INVALID_REQUEST",
+                "reason": "UNSUPPORTED_REBALANCE_FREQUENCY",
+                "allowed_values": ["daily", "weekly", "monthly"],
+            }
+
     strategy_id = input_data.get("strategy_id", "")
     factor_name = input_data.get("factor_name", "")
     spec_data = input_data.get("strategy_spec")
@@ -601,7 +611,10 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
             slippage_bps=strategy_spec.execution.slippage_bps,
             execution_delay_days=strategy_spec.execution.execution_delay_days,
-            rebalance_frequency=strategy_spec.rebalance.frequency,
+            rebalance_frequency=cast(
+                Literal["daily", "weekly", "monthly"],
+                requested_strategy_frequency or strategy_spec.rebalance.frequency,
+            ),
             min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
             rank_buffer=strategy_spec.rebalance.rank_buffer,
             cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
@@ -686,12 +699,17 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     saved = factor_registry.get_factor(str(factor_name))
     factor_name = saved.factor_id if saved is not None else requested_factor_ids[0]
     if strategy_spec is None:
+        temporary_frequency = cast(
+            Literal["daily", "weekly", "monthly"],
+            requested_strategy_frequency or "daily",
+        )
         strategy_spec = StrategySpec(
             strategy_id=strategy_id or f"factor_{factor_name}",
             name=f"Factor baseline: {factor_name}",
             kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
             factors=[{"factor_id": factor_name}],
             portfolio={"top_n": top_n},
+            rebalance={"frequency": temporary_frequency},
         )
     if semantic_config is None:
         single_factor = (
@@ -1080,6 +1098,10 @@ run_backtest_tool: AgentTool = tool(
                 "include_exclusions": {"type": "boolean"},
                 "limit": {"type": "integer"},
                 "rebalance_frequency": {"type": "string"},
+                "universe_rebalance_frequency": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly"],
+                },
             },
             "anyOf": [
                 {"required": ["factor_name"]},
@@ -1841,14 +1863,20 @@ def _resolve_backtest_universe(
         }
     resolver = UniverseResolver(lake)
     if universe_mode == "rolling":
+        strategy_frequency = (
+            strategy_spec.rebalance.frequency
+            if strategy_spec is not None
+            else spec.rebalance_frequency
+        )
+        universe_frequency = str(
+            input_data.get("universe_rebalance_frequency") or strategy_frequency
+        )
         resolved = resolver.build(
             spec,
             mode="rolling",
             start_date=start_date,
             end_date=end_date,
-            rebalance_frequency=str(
-                input_data.get("rebalance_frequency") or spec.rebalance_frequency
-            ),
+            rebalance_frequency=universe_frequency,
             limit=(int(input_data["limit"]) if input_data.get("limit") is not None else None),
             include_exclusions=bool(input_data.get("include_exclusions", False)),
         )
