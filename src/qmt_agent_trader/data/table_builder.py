@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.data.integrity import require_unique_keys
 from qmt_agent_trader.data.storage import DataLake
 
 ALLOWED_SILVER_TABLES = {
@@ -300,7 +301,13 @@ def _concat(frames: list[pd.DataFrame], keys: list[str]) -> pd.DataFrame:
     merged = pd.concat(non_empty, ignore_index=True, sort=False)
     available_keys = [key for key in keys if key in merged.columns]
     if available_keys:
-        merged = merged.drop_duplicates(available_keys, keep="last").sort_values(available_keys)
+        require_unique_keys(
+            merged,
+            keys=available_keys,
+            code="DUPLICATE_TABLE_SOURCE_KEY",
+            field="silver_table_source",
+        )
+        merged = merged.sort_values(available_keys)
     return merged.reset_index(drop=True)
 
 
