@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
 from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.storage import DataLake
+
+
+def _parse_boundary(value: str) -> date:
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(value), fmt).date()
+        except ValueError:
+            continue
+    raise BacktestDataIntegrityError(
+        code="TRADING_CALENDAR_INVALID",
+        message="calendar boundary is invalid",
+        field="trade_cal",
+        details={"value": value},
+    )
+
+
+def _natural_dates(start: date, end: date) -> tuple[date, ...]:
+    if end < start:
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_INVALID",
+            message="calendar end precedes start",
+            field="trade_cal",
+        )
+    return tuple(start + timedelta(days=i) for i in range((end - start).days + 1))
 
 
 def load_open_sessions(
@@ -17,6 +41,9 @@ def load_open_sessions(
     end: str,
     exchanges: tuple[str, ...] = ("SSE", "SZSE"),
 ) -> tuple[date, ...]:
+    start_date = _parse_boundary(start)
+    end_date = _parse_boundary(end)
+    expected_dates = _natural_dates(start_date, end_date)
     dataset = "tushare/trade_cal"
     if not lake.dataset_path("raw", dataset).exists():
         raise BacktestDataIntegrityError(
@@ -29,9 +56,6 @@ def load_open_sessions(
         "raw",
         dataset,
         columns=["exchange", "cal_date", "is_open"],
-        start=start,
-        end=end,
-        date_column="cal_date",
     )
     required = {"cal_date", "is_open"}
     missing = required.difference(frame.columns)
@@ -44,8 +68,49 @@ def load_open_sessions(
         )
     if "exchange" in frame.columns:
         frame = frame[frame["exchange"].astype(str).isin(exchanges)]
-    frame = frame[pd.to_numeric(frame["is_open"], errors="coerce") == 1]
-    dates = tuple(sorted(pd.to_datetime(frame["cal_date"].astype(str)).dt.date.unique()))
+    normalized_dates = pd.to_datetime(
+        frame["cal_date"].astype(str),
+        format="mixed",
+        errors="coerce",
+    )
+    normalized_states = pd.to_numeric(frame["is_open"], errors="coerce")
+    invalid = normalized_dates.isna() | normalized_states.isna() | ~normalized_states.isin([0, 1])
+    if invalid.any():
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_INVALID",
+            message="trade calendar contains invalid date or state values",
+            field="trade_cal",
+            details={"invalid_row_count": int(invalid.sum())},
+        )
+    normalized = pd.DataFrame(
+        {
+            "cal_date": normalized_dates.dt.date,
+            "is_open": normalized_states.astype(int),
+        }
+    )
+    normalized = normalized[
+        normalized["cal_date"].between(start_date, end_date, inclusive="both")
+    ]
+    observed_dates = set(normalized["cal_date"].tolist())
+    missing_dates = [item for item in expected_dates if item not in observed_dates]
+    if missing_dates:
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_PARTIAL_COVERAGE",
+            message="trade calendar lacks evidence for natural dates in requested range",
+            field="trade_cal",
+            details={"missing_dates": [item.isoformat() for item in missing_dates]},
+        )
+    state_counts = normalized.groupby("cal_date")["is_open"].nunique()
+    conflicting_dates = sorted(state_counts[state_counts > 1].index.tolist())
+    if conflicting_dates:
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_CONFLICTING_STATE",
+            message="trade calendar has conflicting exchange states for a date",
+            field="trade_cal",
+            details={"conflicting_dates": [item.isoformat() for item in conflicting_dates]},
+        )
+    states = normalized.groupby("cal_date", sort=True)["is_open"].first()
+    dates = tuple(item for item, state in states.items() if state == 1)
     if not dates:
         raise BacktestDataIntegrityError(
             code="TRADING_CALENDAR_EMPTY",
