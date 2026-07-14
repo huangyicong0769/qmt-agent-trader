@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.field_sources import FieldSourceIndex, FieldSourceSpec, FillPolicy
 from qmt_agent_trader.data.frequency import Frequency
@@ -51,6 +52,22 @@ def build_target_frequency_panel(
             "suggested_next_step": "fetch tushare daily or fund_daily for the target range",
         }
         return panel, metadata
+
+    metadata["trade_state_quality"] = dict(
+        panel.attrs.get("trade_state_quality") or {}
+    )
+    incomplete_trade_states = [
+        field
+        for field in ("suspended", "limit_up", "limit_down", "st")
+        if metadata["trade_state_quality"].get(field, {}).get("complete") is not True
+    ]
+    if incomplete_trade_states:
+        raise BacktestDataIntegrityError(
+            code="TRADE_STATE_PARTIAL_COVERAGE",
+            message="factor input panel lacks complete trade-state evidence",
+            field="trade_state",
+            details={"incomplete_fields": incomplete_trade_states},
+        )
 
     panel = panel.copy()
     panel["trade_date"] = _coerce_date(panel["trade_date"])
