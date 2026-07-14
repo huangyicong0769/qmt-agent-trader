@@ -393,7 +393,7 @@ class FactorRankResearchRunner:
             total_explicit_cost=total_explicit_cost,
             total_slippage_cost=total_slippage_cost,
             same_trade_gross_return=same_trade_gross_return,
-            average_top_n_overlap=(sum(overlaps) / len(overlaps) if overlaps else 0.0),
+            average_top_n_overlap=(sum(overlaps) / len(overlaps) if overlaps else None),
         )
 
     def _bars_on(self, trade_date: object) -> pd.DataFrame:

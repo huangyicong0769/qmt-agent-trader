@@ -475,7 +475,11 @@ def _build_canonical_metrics(
         "max_drawdown": round(result.metrics.max_drawdown, 6),
         "turnover": round(result.metrics.turnover, 6),
         "average_one_way_turnover": round(result.metrics.turnover, 6),
-        "average_top_n_overlap": round(result.average_top_n_overlap, 6),
+        "average_top_n_overlap": (
+            None
+            if result.average_top_n_overlap is None
+            else round(result.average_top_n_overlap, 6)
+        ),
         "explicit_cost_to_initial_cash": round(
             result.total_explicit_cost / config.initial_cash,
             6,
@@ -1031,6 +1035,10 @@ def _diagnostic_evidence(
         "coverage": coverage,
     }
     factor_report.update(_factor_predictive_report(factor_frame, bars))
+    churn_report: dict[str, object] = {}
+    average_overlap = canonical_metrics.get("average_top_n_overlap")
+    if average_overlap is not None:
+        churn_report["average_top_n_overlap"] = average_overlap
     return {
         "leakage_report": leakage_report,
         "data_quality": {
@@ -1055,9 +1063,7 @@ def _diagnostic_evidence(
             ),
             "cost_drag": canonical_metrics["cost_drag"],
         },
-        "churn_report": {
-            "average_top_n_overlap": canonical_metrics["average_top_n_overlap"],
-        },
+        "churn_report": churn_report,
         "rejection_report": {
             "rate": rejected_orders / (trade_count + rejected_orders)
             if trade_count + rejected_orders
