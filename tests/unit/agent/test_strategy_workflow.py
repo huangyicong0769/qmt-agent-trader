@@ -451,8 +451,8 @@ def test_same_strategy_identity_keeps_two_run_versions_and_lists_both(registry) 
 
 def _write_multi_factor_bars(lake: DataLake) -> None:
     rows = []
-    start = date(2024, 1, 1)
-    for offset in range(46):
+    start = date(2023, 12, 12)
+    for offset in range(66):
         trade_date = f"{start + timedelta(days=offset):%Y%m%d}"
         for symbol_index, symbol in enumerate(["000001.SZ", "000002.SZ", "000003.SZ"]):
             base = 10 + symbol_index * 5
@@ -471,6 +471,31 @@ def _write_multi_factor_bars(lake: DataLake) -> None:
                 }
             )
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": row["ts_code"],
+                    "trade_date": row["trade_date"],
+                    "up_limit": float(row["close"]) * 1.1,
+                    "down_limit": float(row["close"]) * 0.9,
+                }
+                for row in rows
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
     lake.write_parquet(
         pd.DataFrame(
             [

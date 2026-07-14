@@ -25,6 +25,7 @@ def build_target_frequency_panel(
     target_end: str | date,
     required_fields: list[str],
     symbols: list[str] | None = None,
+    require_trade_state: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     start = _parse_date(target_start)
     end = _parse_date(target_end)
@@ -44,6 +45,7 @@ def build_target_frequency_panel(
         start=_date_key(start),
         end=_date_key(end),
         symbols=symbols,
+        include_trade_state=require_trade_state,
     )
     if panel.empty:
         metadata["status"] = "NO_DATA"
@@ -53,21 +55,22 @@ def build_target_frequency_panel(
         }
         return panel, metadata
 
-    metadata["trade_state_quality"] = dict(
-        panel.attrs.get("trade_state_quality") or {}
-    )
-    incomplete_trade_states = [
-        field
-        for field in ("suspended", "limit_up", "limit_down", "st")
-        if metadata["trade_state_quality"].get(field, {}).get("complete") is not True
-    ]
-    if incomplete_trade_states:
-        raise BacktestDataIntegrityError(
-            code="TRADE_STATE_PARTIAL_COVERAGE",
-            message="factor input panel lacks complete trade-state evidence",
-            field="trade_state",
-            details={"incomplete_fields": incomplete_trade_states},
+    if require_trade_state:
+        metadata["trade_state_quality"] = dict(
+            panel.attrs.get("trade_state_quality") or {}
         )
+        incomplete_trade_states = [
+            field
+            for field in ("suspended", "limit_up", "limit_down", "st")
+            if metadata["trade_state_quality"].get(field, {}).get("complete") is not True
+        ]
+        if incomplete_trade_states:
+            raise BacktestDataIntegrityError(
+                code="TRADE_STATE_PARTIAL_COVERAGE",
+                message="factor input panel lacks complete trade-state evidence",
+                field="trade_state",
+                details={"incomplete_fields": incomplete_trade_states},
+            )
 
     panel = panel.copy()
     panel["trade_date"] = _coerce_date(panel["trade_date"])
