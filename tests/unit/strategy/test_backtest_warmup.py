@@ -58,6 +58,32 @@ def test_insufficient_warmup_history_fails_closed(tmp_path) -> None:
     assert exc_info.value.details["available_sessions"] == 1
 
 
+def test_calendar_gap_between_warmup_and_performance_fails_closed(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": "20240102", "is_open": 1},
+                {"exchange": "SSE", "cal_date": "20240104", "is_open": 1},
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        load_session_window(
+            lake,
+            start="20240104",
+            end="20240104",
+            warmup_sessions=1,
+            exchanges=("SSE",),
+        )
+
+    assert exc_info.value.code == "TRADING_CALENDAR_PARTIAL_COVERAGE"
+    assert exc_info.value.details["missing_dates"] == ["2024-01-03"]
+
+
 def test_adapter_loads_factor_lookback_before_requested_start(
     tmp_path,
     monkeypatch,

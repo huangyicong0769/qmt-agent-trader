@@ -99,6 +99,24 @@ def load_session_window(
                 "start": start_date.isoformat(),
             },
         )
+    if warmup_dates:
+        full_window_dates = _natural_dates(warmup_dates[0], end_date)
+        missing_full_window_dates = [
+            item for item in full_window_dates if item not in states
+        ]
+        if missing_full_window_dates:
+            raise BacktestDataIntegrityError(
+                code="TRADING_CALENDAR_PARTIAL_COVERAGE",
+                message=(
+                    "trade calendar lacks evidence between warm-up and requested end"
+                ),
+                field="trade_cal",
+                details={
+                    "missing_dates": [
+                        item.isoformat() for item in missing_full_window_dates
+                    ]
+                },
+            )
     if not open_dates:
         raise BacktestDataIntegrityError(
             code="TRADING_CALENDAR_EMPTY",
