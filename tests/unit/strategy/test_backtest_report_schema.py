@@ -23,3 +23,22 @@ def test_strategy_backtest_report_exposes_canonical_evidence() -> None:
     assert isinstance(evidence["trade_blotter"], list)
     assert evidence["cost_attribution"]["explicit_cost"] == 12.0
     assert evidence["data_quality"]["validated_valuation_dates"] == 1
+
+
+def test_canonical_data_quality_exposes_signal_counts() -> None:
+    result = {
+        "data_quality": {
+            "validated_valuation_dates": 4,
+            "scheduled_rebalance_count": 3,
+            "available_signal_count": 2,
+            "signal_unavailable_count": 1,
+        },
+        "equity_points": [],
+        "rebalance_points": [],
+        "trades": [],
+    }
+    evidence = _canonical_result_evidence(result, {})
+
+    assert evidence["data_quality"]["scheduled_rebalance_count"] == 3
+    assert evidence["data_quality"]["available_signal_count"] == 2
+    assert evidence["data_quality"]["signal_unavailable_count"] == 1
