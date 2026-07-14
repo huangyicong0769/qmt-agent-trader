@@ -44,6 +44,7 @@ def bars_for_symbols(
                     "close": close_price,
                     "volume": 1_000_000,
                     "amount": 10_000_000,
+                    "turnover": 0.01,
                     "suspended": False,
                     "limit_up_at_open": False,
                     "limit_down_at_open": False,

@@ -15,7 +15,16 @@ def _bar(*, close: float = 10.0) -> dict[str, object]:
         "symbol": "000001.SZ",
         "trade_date": date(2024, 1, 2),
         "open": 10.0,
+        "high": max(10.0, close),
+        "low": min(10.0, close),
         "close": close,
+        "volume": 100.0,
+        "amount": 1_000.0,
+        "turnover": 0.01,
+        "suspended": False,
+        "st": False,
+        "limit_up_at_open": False,
+        "limit_down_at_open": False,
     }
 
 

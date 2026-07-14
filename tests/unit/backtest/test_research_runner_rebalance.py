@@ -22,11 +22,16 @@ def _bars(days: int = 8) -> pd.DataFrame:
                     "symbol": symbol,
                     "trade_date": date(2024, 1, 2) + timedelta(days=offset),
                     "open": price,
+                    "high": price,
+                    "low": price,
                     "close": price,
+                    "volume": 1_000.0,
+                    "amount": price * 1_000.0,
+                    "turnover": 0.01,
                     "suspended": False,
-                    "limit_up": False,
-                    "limit_down": False,
                     "st": False,
+                    "limit_up_at_open": False,
+                    "limit_down_at_open": False,
                 }
             )
     return pd.DataFrame(rows)

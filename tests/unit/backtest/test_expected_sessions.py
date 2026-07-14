@@ -24,7 +24,16 @@ def test_completely_missing_open_session_aborts_before_execution() -> None:
                 "symbol": "000001.SZ",
                 "trade_date": trade_date,
                 "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
                 "close": 10.0,
+                "volume": 100.0,
+                "amount": 1_000.0,
+                "turnover": 0.01,
+                "suspended": False,
+                "st": False,
+                "limit_up_at_open": False,
+                "limit_down_at_open": False,
             }
             for trade_date in (expected[0], expected[2])
         ]
