@@ -128,12 +128,29 @@ class FactorRankResearchRunner:
             signal_dates=signal_dates,
             delay_days=scenario.execution_delay_days,
         )
-        factor_by_date = {
-            trade_date: frame.dropna(subset=["factor_value"]).sort_values(
-                "factor_value", ascending=False
+        if signal_dates and not execution_schedule:
+            raise BacktestDataIntegrityError(
+                code="NO_EXECUTION_SESSION_AFTER_SIGNAL",
+                message="no execution session exists after any signal",
+                field="execution_schedule",
+                details={"execution_delay_days": scenario.execution_delay_days},
             )
-            for trade_date, frame in self.factor_frame.groupby("trade_date")
-        }
+        scheduled_signal_dates = tuple(dict.fromkeys(execution_schedule.values()))
+        available_signals, unavailable_signals = self._prepare_scheduled_signal_frames(
+            scheduled_signal_dates
+        )
+        if scheduled_signal_dates and not available_signals:
+            raise BacktestDataIntegrityError(
+                code="NO_EXECUTABLE_FACTOR_SIGNALS",
+                message="no scheduled factor signal is executable",
+                field="factor_frame",
+                details={
+                    "unavailable_signals": {
+                        item.isoformat(): reason
+                        for item, reason in unavailable_signals.items()
+                    }
+                },
+            )
 
         cash = self.config.initial_cash
         positions: dict[str, int] = {}
@@ -160,10 +177,23 @@ class FactorRankResearchRunner:
             )
             signal_date = execution_schedule.get(trade_date)
             if signal_date is not None:
-                factors = self._filter_factors_for_universe(
-                    factor_by_date.get(signal_date),
-                    signal_date,
-                )
+                factors = available_signals.get(signal_date)
+                if factors is None:
+                    rebalance_points.append(
+                        ResearchRebalancePoint(
+                            signal_date=f"{signal_date:%Y-%m-%d}",
+                            trade_date=f"{trade_date:%Y-%m-%d}",
+                            equity_before=equity_before,
+                            gross_traded_notional=0.0,
+                            one_way_turnover=0.0,
+                            selected_count=0,
+                            retained_count=len(positions),
+                            entered_count=0,
+                            exited_count=0,
+                            skipped=True,
+                            skip_reason=unavailable_signals[signal_date],
+                        )
+                    )
                 if factors is not None and not factors.empty:
                     selected_symbols = self._select_symbols(
                         factors=factors,
@@ -187,7 +217,10 @@ class FactorRankResearchRunner:
                         day_bars=day_bars,
                         equity=equity_before,
                     )
-                    if planned_turnover < self.config.min_turnover_threshold:
+                    skip_for_turnover = (
+                        planned_turnover < self.config.min_turnover_threshold
+                    )
+                    if skip_for_turnover:
                         rebalance_points.append(
                             ResearchRebalancePoint(
                                 signal_date=f"{signal_date:%Y-%m-%d}",
@@ -203,38 +236,15 @@ class FactorRankResearchRunner:
                                 skip_reason="below_min_turnover_threshold",
                             )
                         )
-                        market_value = self._position_value_strict(
-                            positions,
-                            trade_date=trade_date,
-                            day_bars=day_bars,
-                            field="close",
-                            error_code="MISSING_HELD_POSITION_BAR",
-                        )
-                        _assert_ledger_invariants(
-                            cash=cash,
-                            positions=positions,
-                            trade_date=trade_date,
-                        )
-                        equity_after = cash + market_value
-                        _assert_equity_invariant(
-                            equity=equity_after,
-                            trade_date=trade_date,
-                        )
-                        equity_points.append(
-                            ResearchEquityPoint(
-                                trade_date=f"{trade_date:%Y-%m-%d}",
-                                cash=cash,
-                                market_value=market_value,
-                                equity=equity_after,
-                                stale_position_count=0,
-                            )
-                        )
-                        continue
-                    orders = [
-                        (symbol, targets.get(symbol, 0) - positions.get(symbol, 0))
-                        for symbol in sorted(set(positions) | set(targets))
-                        if targets.get(symbol, 0) != positions.get(symbol, 0)
-                    ]
+                    orders = (
+                        []
+                        if skip_for_turnover
+                        else [
+                            (symbol, targets.get(symbol, 0) - positions.get(symbol, 0))
+                            for symbol in sorted(set(positions) | set(targets))
+                            if targets.get(symbol, 0) != positions.get(symbol, 0)
+                        ]
+                    )
                     orders.sort(key=lambda item: item[1] > 0)
                     self._validate_order_prices(orders, trade_date, day_bars)
                     gross_notional = 0.0
@@ -307,33 +317,34 @@ class FactorRankResearchRunner:
                                 cost=breakdown.total,
                             )
                         )
-                    after_symbols = set(positions)
-                    current_selected = set(selected_symbols)
-                    selection_jaccard = (
-                        len(previous_selected & current_selected)
-                        / max(1, len(previous_selected | current_selected))
-                        if previous_selected is not None
-                        else None
-                    )
-                    previous_selected = current_selected
-                    rebalance_points.append(
-                        ResearchRebalancePoint(
-                            signal_date=f"{signal_date:%Y-%m-%d}",
-                            trade_date=f"{trade_date:%Y-%m-%d}",
-                            equity_before=equity_before,
-                            gross_traded_notional=gross_notional,
-                            one_way_turnover=(
-                                gross_notional / (2.0 * equity_before)
-                                if equity_before > 0
-                                else 0.0
-                            ),
-                            selected_count=len(targets),
-                            retained_count=len(before_symbols & after_symbols),
-                            entered_count=len(after_symbols - before_symbols),
-                            exited_count=len(before_symbols - after_symbols),
-                            selection_jaccard=selection_jaccard,
+                    if not skip_for_turnover:
+                        after_symbols = set(positions)
+                        current_selected = set(selected_symbols)
+                        selection_jaccard = (
+                            len(previous_selected & current_selected)
+                            / max(1, len(previous_selected | current_selected))
+                            if previous_selected is not None
+                            else None
                         )
-                    )
+                        previous_selected = current_selected
+                        rebalance_points.append(
+                            ResearchRebalancePoint(
+                                signal_date=f"{signal_date:%Y-%m-%d}",
+                                trade_date=f"{trade_date:%Y-%m-%d}",
+                                equity_before=equity_before,
+                                gross_traded_notional=gross_notional,
+                                one_way_turnover=(
+                                    gross_notional / (2.0 * equity_before)
+                                    if equity_before > 0
+                                    else 0.0
+                                ),
+                                selected_count=len(targets),
+                                retained_count=len(before_symbols & after_symbols),
+                                entered_count=len(after_symbols - before_symbols),
+                                exited_count=len(before_symbols - after_symbols),
+                                selection_jaccard=selection_jaccard,
+                            )
+                        )
 
             _assert_ledger_invariants(
                 cash=cash,
@@ -394,10 +405,42 @@ class FactorRankResearchRunner:
             total_slippage_cost=total_slippage_cost,
             same_trade_gross_return=same_trade_gross_return,
             average_top_n_overlap=(sum(overlaps) / len(overlaps) if overlaps else None),
+            scheduled_rebalance_count=len(execution_schedule),
+            available_signal_count=len(available_signals),
+            signal_unavailable_count=len(unavailable_signals),
         )
 
     def _bars_on(self, trade_date: object) -> pd.DataFrame:
         return self._bars_by_date_symbol.get(trade_date, pd.DataFrame(columns=self.bars.columns))
+
+    def _prepare_scheduled_signal_frames(
+        self,
+        signal_dates: tuple[date, ...],
+    ) -> tuple[dict[date, pd.DataFrame], dict[date, str]]:
+        raw_by_date = {
+            trade_date: frame.copy()
+            for trade_date, frame in self.factor_frame.groupby("trade_date")
+        }
+        available: dict[date, pd.DataFrame] = {}
+        unavailable: dict[date, str] = {}
+        for signal_date in signal_dates:
+            raw = raw_by_date.get(signal_date)
+            if raw is None:
+                unavailable[signal_date] = "factor_signal_date_missing"
+                continue
+            clean = raw.dropna(subset=["factor_value"]).sort_values(
+                "factor_value",
+                ascending=False,
+            )
+            if clean.empty:
+                unavailable[signal_date] = "factor_signal_all_null"
+                continue
+            filtered = self._filter_factors_for_universe(clean, signal_date)
+            if filtered is None or filtered.empty:
+                unavailable[signal_date] = "factor_signal_empty_after_universe_filter"
+                continue
+            available[signal_date] = filtered
+        return available, unavailable
 
     def _filter_factors_for_universe(
         self,

@@ -77,6 +77,9 @@ class FactorRankResearchResult:
     total_slippage_cost: float = 0.0
     same_trade_gross_return: float = 0.0
     average_top_n_overlap: float | None = None
+    scheduled_rebalance_count: int = 0
+    available_signal_count: int = 0
+    signal_unavailable_count: int = 0
 
     @property
     def equity_curve(self) -> tuple[float, ...]:
@@ -100,4 +103,7 @@ class FactorRankResearchResult:
             "total_slippage_cost": self.total_slippage_cost,
             "same_trade_gross_return": self.same_trade_gross_return,
             "average_top_n_overlap": self.average_top_n_overlap,
+            "scheduled_rebalance_count": self.scheduled_rebalance_count,
+            "available_signal_count": self.available_signal_count,
+            "signal_unavailable_count": self.signal_unavailable_count,
         }
