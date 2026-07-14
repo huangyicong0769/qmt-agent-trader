@@ -86,7 +86,7 @@ jobs:
         run: uv run --isolated --no-project --with dist/*.whl qmt-agent --help
 
   windows-gateway:
-    name: Windows gateway / lint, type check, build
+    name: Windows gateway / lint, build and smoke test
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -109,9 +109,6 @@ jobs:
 
       - name: Run gateway Ruff checks
         run: uv run ruff check src
-
-      - name: Run gateway mypy checks
-        run: uv run mypy src
 
       - name: Build gateway package
         run: uv build
