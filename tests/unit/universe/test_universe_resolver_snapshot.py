@@ -44,7 +44,7 @@ def test_resolver_builds_snapshot_stock_universe_with_exclusions(tmp_path: Path)
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = UniverseResolver(lake).build(
+    result = _resolver(lake).build(
         spec,
         as_of_date="20240103",
         include_exclusions=True,
@@ -94,7 +94,7 @@ def test_resolver_tolerates_missing_list_date(tmp_path: Path) -> None:
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = UniverseResolver(lake).build(spec, as_of_date="20240103")
+    result = _resolver(lake).build(spec, as_of_date="20240103")
 
     assert result["status"] == "OK"
     assert result["symbols"] == ["000001.SZ"]
@@ -134,7 +134,7 @@ def test_resolver_reports_malformed_list_date_without_crashing(tmp_path: Path) -
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = UniverseResolver(lake).build(
+    result = _resolver(lake).build(
         spec,
         as_of_date="20240103",
         include_exclusions=True,
@@ -182,7 +182,7 @@ def test_broad_universe_uses_per_symbol_latest_asof_not_global_latest(
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = UniverseResolver(lake).build(spec, as_of_date="20260708", limit=2500)
+    result = _resolver(lake).build(spec, as_of_date="20260708", limit=2500)
 
     assert result["status"] == "OK"
     assert len(result["symbols"]) == 2000
@@ -222,7 +222,7 @@ def test_snapshot_universe_exposes_staleness_diagnostics(tmp_path: Path) -> None
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = UniverseResolver(lake).build(spec, as_of_date="20260708")
+    result = _resolver(lake).build(spec, as_of_date="20260708")
 
     diagnostics = result["metadata"]["diagnostics"]
     assert diagnostics["stale_symbol_count"] == 2
@@ -252,3 +252,49 @@ def _stock_basic(symbol: str, name: str, industry: str) -> dict[str, object]:
         "list_status": "L",
         "list_date": "20200101",
     }
+
+
+def _resolver(lake: DataLake) -> UniverseResolver:
+    bars = lake.read_parquet("raw", "tushare/daily")
+    suspended = (
+        bars["suspended"].fillna(False).astype(bool)
+        if "suspended" in bars.columns
+        else pd.Series(False, index=bars.index)
+    )
+    lake.write_parquet(
+        bars.loc[suspended, ["ts_code", "trade_date"]].assign(suspend_type="S"),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        bars[["ts_code", "trade_date"]].assign(up_limit=12.0, down_limit=8.0),
+        "raw",
+        "tushare/stk_limit",
+    )
+    stock_basic = lake.read_parquet("raw", "tushare/stock_basic")
+    st_symbols = set(
+        stock_basic.loc[
+            stock_basic["name"].astype(str).str.contains("ST", case=False, na=False),
+            "ts_code",
+        ].astype(str)
+    )
+    st_state = (
+        bars["st"].fillna(False).astype(bool)
+        if "st" in bars.columns
+        else pd.Series(False, index=bars.index)
+    )
+    st_symbols.update(bars.loc[st_state, "ts_code"].astype(str))
+    namechange = pd.DataFrame(
+        [
+            {
+                "ts_code": symbol,
+                "name": "ST fixture",
+                "start_date": bars.loc[bars["ts_code"] == symbol, "trade_date"].min(),
+                "end_date": bars.loc[bars["ts_code"] == symbol, "trade_date"].max(),
+            }
+            for symbol in sorted(st_symbols)
+        ],
+        columns=["ts_code", "name", "start_date", "end_date"],
+    )
+    lake.write_parquet(namechange, "raw", "tushare/namechange")
+    return UniverseResolver(lake)

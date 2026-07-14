@@ -831,6 +831,7 @@ def _resolve_backtest_intent(
             strategy_id=effective_id or f"factor_{factor_name}",
             name=f"Factor baseline: {factor_name}",
             kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
+            universe="",
             factors=[{"factor_id": factor_name}],
             portfolio={"top_n": requested_top_n},
             rebalance={"frequency": strategy_frequency},

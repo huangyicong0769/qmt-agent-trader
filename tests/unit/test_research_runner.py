@@ -25,6 +25,11 @@ def _bars() -> pd.DataFrame:
                 "close": 10.0 + offset,
                 "volume": 100000,
                 "amount": 1000000,
+                "turnover": 0.01,
+                "suspended": False,
+                "st": False,
+                "limit_up_at_open": False,
+                "limit_down_at_open": False,
             }
         )
         rows.append(
@@ -37,6 +42,11 @@ def _bars() -> pd.DataFrame:
                 "close": 20.0 + offset * 0.1,
                 "volume": 100000,
                 "amount": 1000000,
+                "turnover": 0.01,
+                "suspended": False,
+                "st": False,
+                "limit_up_at_open": False,
+                "limit_down_at_open": False,
             }
         )
     return pd.DataFrame(rows)

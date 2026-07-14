@@ -117,7 +117,12 @@ def load_daily_bars(
     end: str | date | None = None,
     symbols: list[str] | None = None,
     include_trade_state: bool = True,
+    asset_types: list[str] | tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
+    requested_asset_types = set(asset_types or ("stock", "etf"))
+    invalid_asset_types = requested_asset_types.difference({"stock", "etf"})
+    if invalid_asset_types:
+        raise ValueError(f"unsupported asset_types: {sorted(invalid_asset_types)}")
     daily_columns = [
         "ts_code",
         "trade_date",
@@ -130,21 +135,29 @@ def load_daily_bars(
         "amount",
         "turnover",
     ]
-    stock_raw = lake.read_parquet_filtered(
-        "raw",
-        "tushare/daily",
-        columns=daily_columns,
-        start=start,
-        end=end,
-        symbols=symbols,
+    stock_raw = (
+        lake.read_parquet_filtered(
+            "raw",
+            "tushare/daily",
+            columns=daily_columns,
+            start=start,
+            end=end,
+            symbols=symbols,
+        )
+        if "stock" in requested_asset_types
+        else pd.DataFrame()
     )
-    etf_raw = lake.read_parquet_filtered(
-        "raw",
-        "tushare/fund_daily",
-        columns=daily_columns,
-        start=start,
-        end=end,
-        symbols=symbols,
+    etf_raw = (
+        lake.read_parquet_filtered(
+            "raw",
+            "tushare/fund_daily",
+            columns=daily_columns,
+            start=start,
+            end=end,
+            symbols=symbols,
+        )
+        if "etf" in requested_asset_types
+        else pd.DataFrame()
     )
     normalized = [
         normalized_frame

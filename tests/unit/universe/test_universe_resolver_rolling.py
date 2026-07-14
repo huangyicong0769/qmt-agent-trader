@@ -49,7 +49,7 @@ def test_resolver_builds_rolling_universe_per_rebalance_date(tmp_path: Path) -> 
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = UniverseResolver(lake).build(
+    result = _resolver(lake).build(
         spec,
         mode="rolling",
         start_date="20240102",
@@ -109,3 +109,44 @@ def _stock_basic(symbol: str, name: str) -> dict[str, object]:
         "list_status": "L",
         "list_date": "20200101",
     }
+
+
+def _resolver(lake: DataLake) -> UniverseResolver:
+    bars = lake.read_parquet("raw", "tushare/daily")
+    suspended = bars["suspended"].fillna(False).astype(bool)
+    lake.write_parquet(
+        bars.loc[suspended, ["ts_code", "trade_date"]].assign(suspend_type="S"),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        bars[["ts_code", "trade_date"]].assign(up_limit=12.0, down_limit=8.0),
+        "raw",
+        "tushare/stk_limit",
+    )
+    st_symbols = sorted(
+        bars.loc[bars["st"].fillna(False).astype(bool), "ts_code"].astype(str).unique()
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": symbol,
+                    "name": "ST fixture",
+                    "start_date": bars.loc[
+                        (bars["ts_code"] == symbol) & bars["st"].fillna(False).astype(bool),
+                        "trade_date",
+                    ].min(),
+                    "end_date": bars.loc[
+                        (bars["ts_code"] == symbol) & bars["st"].fillna(False).astype(bool),
+                        "trade_date",
+                    ].max(),
+                }
+                for symbol in st_symbols
+            ],
+            columns=["ts_code", "name", "start_date", "end_date"],
+        ),
+        "raw",
+        "tushare/namechange",
+    )
+    return UniverseResolver(lake)
