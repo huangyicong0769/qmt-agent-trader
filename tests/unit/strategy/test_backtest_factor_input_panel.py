@@ -274,6 +274,16 @@ def _write_bars(
                 }
             )
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": item, "is_open": 1}
+                for item in sorted({str(row["trade_date"]) for row in rows})
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
 
 
 def _write_daily_basic(

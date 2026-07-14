@@ -11,6 +11,7 @@ from qmt_agent_trader.backtest.research_runner import (
 from qmt_agent_trader.backtest.sensitivity import SensitivityAnalyzer, SensitivityGrid
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.trading_calendar import load_open_sessions
 from qmt_agent_trader.services.research_report_service import save_research_report
 
 
@@ -83,6 +84,11 @@ def run_factor_rank_sensitivity(
         bars,
         FactorRankResearchConfig(
             factor_name=factor_name,
+            expected_trade_dates=load_open_sessions(
+                lake,
+                start=f"{bars['trade_date'].min():%Y%m%d}",
+                end=f"{bars['trade_date'].max():%Y%m%d}",
+            ),
             top_n=next(value for value in grid.top_n if value is not None),
             max_single_position_pct=next(
                 value for value in grid.max_single_position_pct if value is not None

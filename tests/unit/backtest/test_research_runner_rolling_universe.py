@@ -42,6 +42,7 @@ def _run(monkeypatch, *, frequency: str, symbols_by_date: dict[str, list[str]]):
     monkeypatch.setattr(research_runner, "compute_factor_frame", lambda *_a, **_kw: factors)
     config = FactorRankResearchConfig(
         factor_name="fixture",
+        expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
         top_n=1,
         max_single_position_pct=1.0,
         initial_cash=100_000,

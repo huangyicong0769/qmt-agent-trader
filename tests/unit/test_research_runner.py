@@ -47,6 +47,7 @@ def test_factor_rank_research_runner_executes_scenario() -> None:
         _bars(),
         FactorRankResearchConfig(
             factor_name="momentum_20d",
+            expected_trade_dates=tuple(sorted(_bars()["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=0.5,
             initial_cash=100000,
@@ -66,6 +67,7 @@ def test_sensitivity_analyzer_can_use_factor_rank_runner() -> None:
         _bars(),
         FactorRankResearchConfig(
             factor_name="momentum_20d",
+            expected_trade_dates=tuple(sorted(_bars()["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=0.5,
             initial_cash=100000,
@@ -117,6 +119,7 @@ def compute(bars: pd.DataFrame, params: dict[str, Any] | None = None) -> pd.Seri
         _bars(),
         FactorRankResearchConfig(
             factor_name="agent_momentum_3d",
+            expected_trade_dates=tuple(sorted(_bars()["trade_date"].unique())),
             factor_registry_root=registry_root,
             top_n=1,
             max_single_position_pct=0.5,
@@ -134,6 +137,7 @@ def test_factor_rank_runner_preindexes_bars_by_date_and_symbol() -> None:
         _bars(),
         FactorRankResearchConfig(
             factor_name="momentum_20d",
+            expected_trade_dates=tuple(sorted(_bars()["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=0.5,
             initial_cash=100000,

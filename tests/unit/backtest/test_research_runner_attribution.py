@@ -8,10 +8,12 @@ from qmt_agent_trader.backtest.sensitivity import SensitivityScenario
 
 
 def _run(cost_multiplier: float, slippage_bps: float):
+    bars = bars_for_symbols(["000001.SZ", "000002.SZ"], days=35)
     runner = FactorRankResearchRunner(
-        bars_for_symbols(["000001.SZ", "000002.SZ"], days=35),
+        bars,
         FactorRankResearchConfig(
             factor_name="momentum_20d",
+            expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=1.0,
             initial_cash=100_000,
