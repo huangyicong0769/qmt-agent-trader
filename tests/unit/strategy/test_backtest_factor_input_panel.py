@@ -275,6 +275,31 @@ def _write_bars(
             )
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
     lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": row["ts_code"],
+                    "trade_date": row["trade_date"],
+                    "up_limit": float(row["close"]) * 1.1,
+                    "down_limit": float(row["close"]) * 0.9,
+                }
+                for row in rows
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
+    lake.write_parquet(
         pd.DataFrame(
             [
                 {"exchange": "SSE", "cal_date": item, "is_open": 1}

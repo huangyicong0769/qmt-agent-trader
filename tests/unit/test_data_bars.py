@@ -104,7 +104,7 @@ def test_load_daily_bars_ignores_legacy_daily_batches(tmp_path) -> None:
         "tushare_daily_20240101_20240103",
     )
 
-    bars = load_daily_bars(lake)
+    bars = load_daily_bars(lake, include_trade_state=False)
 
     assert bars.empty
 
@@ -125,7 +125,7 @@ def test_load_daily_bars_reads_new_registry_daily_dataset_only(tmp_path) -> None
     lake.write_parquet(pd.DataFrame([legacy]), "raw", "tushare_daily")
     lake.write_parquet(pd.DataFrame([stable]), "raw", "tushare/daily")
 
-    bars = load_daily_bars(lake)
+    bars = load_daily_bars(lake, include_trade_state=False)
 
     assert len(bars) == 1
     assert bars.iloc[0]["close"] == 10.5
@@ -192,7 +192,6 @@ def test_enrich_trade_states_uses_suspend_limit_and_st_sources() -> None:
                 },
             ]
         ),
-        stock_basic=pd.DataFrame([{"ts_code": "000004.SZ", "name": "*ST Example"}]),
         namechange=pd.DataFrame(
             [
                 {
@@ -200,7 +199,13 @@ def test_enrich_trade_states_uses_suspend_limit_and_st_sources() -> None:
                     "name": "ST Historical",
                     "start_date": "20230101",
                     "end_date": "",
-                }
+                },
+                {
+                    "ts_code": "000004.SZ",
+                    "name": "*ST Example",
+                    "start_date": "20230101",
+                    "end_date": "",
+                },
             ]
         ),
     ).set_index("symbol")
@@ -249,6 +254,11 @@ def test_load_daily_bars_enriches_trade_states_from_lake(tmp_path) -> None:
         "raw",
         "tushare/stk_limit",
     )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
 
     bars = load_daily_bars(lake)
 
@@ -261,6 +271,21 @@ def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
     monkeypatch,
 ) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "up_limit", "down_limit"]),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
     calls: list[dict[str, object]] = []
 
     def fake_read_filtered(layer, name, **kwargs):
@@ -295,8 +320,6 @@ def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
             )
         if name == "tushare/namechange":
             return pd.DataFrame()
-        if name == "tushare/stock_basic":
-            return pd.DataFrame([{"ts_code": "000001.SZ", "name": "Ping An"}])
         raise AssertionError(name)
 
     monkeypatch.setattr(lake, "read_parquet_filtered", fake_read_filtered)
@@ -383,6 +406,7 @@ def test_historical_st_flags_handle_multiple_periods_without_cross_symbol_bleed(
             },
         ]
     )
+    bars["st"] = False
 
     enriched = _apply_historical_st_flags(bars, namechange).set_index(["symbol", "trade_date"])
 

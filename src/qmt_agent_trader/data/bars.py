@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 import pandas as pd
 
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
 
@@ -24,6 +25,12 @@ CANONICAL_BAR_COLUMNS = [
     "limit_down",
     "st",
 ]
+
+_REQUIRED_TRADE_STATE_DATASETS = {
+    "suspended": "tushare/suspend_d",
+    "limit_up_down": "tushare/stk_limit",
+    "st": "tushare/namechange",
+}
 
 
 def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
@@ -86,7 +93,7 @@ def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
         }
     for column in ["suspended", "limit_up", "limit_down", "st"]:
         if column not in data.columns:
-            data[column] = False
+            data[column] = pd.NA
 
     normalized = (
         data[CANONICAL_BAR_COLUMNS]
@@ -148,48 +155,93 @@ def load_daily_bars(
         result = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
         result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
         return result
-    if bars.empty:
-        return bars.reset_index(drop=True)
+
+    _require_trade_state_sources(lake)
+    suspend = lake.read_parquet_filtered(
+        "raw",
+        "tushare/suspend_d",
+        columns=["ts_code", "trade_date", "suspend_type"],
+        start=start,
+        end=end,
+        symbols=symbols,
+    )
+    stk_limit = lake.read_parquet_filtered(
+        "raw",
+        "tushare/stk_limit",
+        columns=["ts_code", "trade_date", "up_limit", "down_limit"],
+        start=start,
+        end=end,
+        symbols=symbols,
+    )
+    namechange = _filter_namechange_overlap(
+        lake.read_parquet_filtered(
+            "raw",
+            "tushare/namechange",
+            columns=["ts_code", "name", "start_date", "end_date"],
+            symbols=symbols,
+        ),
+        start=start,
+        end=end,
+    )
+    _require_stk_limit_coverage(bars, stk_limit)
 
     bars = enrich_trade_states(
         bars,
-        suspend=lake.read_parquet_filtered(
-            "raw",
-            "tushare/suspend_d",
-            columns=["ts_code", "trade_date", "suspend_type"],
-            start=start,
-            end=end,
-            symbols=symbols,
-        ),
-        stk_limit=lake.read_parquet_filtered(
-            "raw",
-            "tushare/stk_limit",
-            columns=["ts_code", "trade_date", "up_limit", "down_limit"],
-            start=start,
-            end=end,
-            symbols=symbols,
-        ),
-        namechange=_filter_namechange_overlap(
-            lake.read_parquet_filtered(
-                "raw",
-                "tushare/namechange",
-                columns=["ts_code", "name", "start_date", "end_date"],
-                symbols=symbols,
-            ),
-            start=start,
-            end=end,
-        ),
-        stock_basic=lake.read_parquet_filtered(
-            "raw",
-            "tushare/stock_basic",
-            columns=["ts_code", "name"],
-            symbols=symbols,
-        ),
+        suspend=suspend,
+        stk_limit=stk_limit,
+        namechange=namechange,
     )
 
     result = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
+    result.attrs["trade_state_quality"] = bars.attrs.get("trade_state_quality", {})
     return result
+
+
+def _require_trade_state_sources(lake: DataLake) -> None:
+    missing = [
+        dataset
+        for dataset in _REQUIRED_TRADE_STATE_DATASETS.values()
+        if not lake.dataset_path("raw", dataset).exists()
+    ]
+    if missing:
+        raise BacktestDataIntegrityError(
+            code="TRADE_STATE_SOURCE_NOT_READY",
+            message="required trade-state source datasets are unavailable",
+            field="trade_state",
+            details={"missing_datasets": missing},
+        )
+
+
+def _require_stk_limit_coverage(bars: pd.DataFrame, stk_limit: pd.DataFrame) -> None:
+    limits = _state_key_frame(stk_limit)
+    require_unique_symbol_dates(
+        limits,
+        symbol_column="symbol",
+        date_column="trade_date",
+        code="DUPLICATE_TRADE_STATE_INPUT",
+        field="raw/tushare/stk_limit",
+    )
+    bar_keys = set(zip(bars["symbol"].astype(str), bars["trade_date"], strict=False))
+    limit_keys = set(
+        zip(limits["symbol"].astype(str), limits["trade_date"], strict=False)
+    )
+    missing_limit_keys = sorted(bar_keys - limit_keys)
+    if missing_limit_keys:
+        raise BacktestDataIntegrityError(
+            code="TRADE_STATE_PARTIAL_COVERAGE",
+            message="stk_limit does not cover every executable symbol-date bar",
+            field="trade_state",
+            symbols=tuple(sorted({symbol for symbol, _ in missing_limit_keys})),
+            details={
+                "field": "limit_up_down",
+                "missing_key_count": len(missing_limit_keys),
+                "sample": [
+                    {"symbol": symbol, "trade_date": day.isoformat()}
+                    for symbol, day in missing_limit_keys[:20]
+                ],
+            },
+        )
 
 
 def column_quality(frame: pd.DataFrame, column: str) -> dict[str, object]:
@@ -219,17 +271,25 @@ def enrich_trade_states(
     stock_basic: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     enriched = bars.copy()
+    enriched["suspended"] = False
+    enriched["limit_up"] = False
+    enriched["limit_down"] = False
+    enriched["st"] = False
     if suspend is not None and not suspend.empty:
         enriched = _apply_suspend_flags(enriched, suspend)
     if stk_limit is not None and not stk_limit.empty:
         enriched = _apply_limit_flags(enriched, stk_limit)
-    if stock_basic is not None and not stock_basic.empty:
-        enriched = _apply_current_st_flags(enriched, stock_basic)
     if namechange is not None and not namechange.empty:
         enriched = _apply_historical_st_flags(enriched, namechange)
     for column in ["suspended", "limit_up", "limit_down", "st"]:
         enriched[column] = enriched[column].fillna(False).astype(bool)
     enriched.attrs["column_quality"] = bars.attrs.get("column_quality", {})
+    enriched.attrs["trade_state_quality"] = {
+        "suspended": {"source": "raw/tushare/suspend_d", "complete": True},
+        "limit_up": {"source": "raw/tushare/stk_limit", "complete": True},
+        "limit_down": {"source": "raw/tushare/stk_limit", "complete": True},
+        "st": {"source": "raw/tushare/namechange", "complete": True},
+    }
     return enriched
 
 
