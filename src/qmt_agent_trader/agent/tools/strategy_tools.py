@@ -43,6 +43,7 @@ from qmt_agent_trader.strategy.adapter_capabilities import (
 from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
+    validate_backtest_config_matches_spec,
 )
 from qmt_agent_trader.strategy.loader import static_check_strategy_file
 from qmt_agent_trader.strategy.models import (
@@ -583,6 +584,45 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     end_date = input_data.get("end_date", _today_yyyymmdd())
     initial_cash = float(input_data.get("initial_cash", 1_000_000))
     top_n = int(input_data.get("top_n", strategy_spec.portfolio.top_n if strategy_spec else 20))
+    semantic_config: StrategyBacktestConfig | None = None
+    if strategy_spec is not None:
+        single_factor = (
+            strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
+        )
+        semantic_config = StrategyBacktestConfig(
+            strategy_id=strategy_spec.strategy_id,
+            strategy_spec=strategy_spec,
+            implementation_code_path=effective_code_path,
+            factor_name=str(factor_name) if factor_name else None,
+            start_date=str(start_date),
+            end_date=str(end_date),
+            initial_cash=initial_cash,
+            top_n=top_n,
+            max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
+            slippage_bps=strategy_spec.execution.slippage_bps,
+            execution_delay_days=strategy_spec.execution.execution_delay_days,
+            rebalance_frequency=strategy_spec.rebalance.frequency,
+            min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
+            rank_buffer=strategy_spec.rebalance.rank_buffer,
+            cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
+            lower_is_better=bool(single_factor and single_factor.ascending),
+        )
+        config_issues = validate_backtest_config_matches_spec(
+            semantic_config,
+            strategy_spec,
+        )
+        if config_issues:
+            return _with_backtest_evidence_status(
+                {
+                    "status": "BLOCKED",
+                    "reason": "CONFIG_SPEC_MISMATCH",
+                    "unsupported_fields": [item.field for item in config_issues],
+                    "capability_issues": [asdict(item) for item in config_issues],
+                    "execution_backend": "factor_rank_baseline_adapter",
+                    "research_only": True,
+                    "live_trading_allowed": False,
+                }
+            )
     symbols = _requested_symbols(input_data)
     universe_state = _resolve_backtest_universe(
         lake,
@@ -653,31 +693,39 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             factors=[{"factor_id": factor_name}],
             portfolio={"top_n": top_n},
         )
-    single_factor = strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
-    config = StrategyBacktestConfig(
-        strategy_id=strategy_spec.strategy_id,
-        strategy_spec=strategy_spec,
-        implementation_code_path=effective_code_path,
-        factor_name=factor_name,
-        start_date=start_date,
-        end_date=end_date,
-        universe=str(universe_info["universe_effective"]),
-        initial_cash=initial_cash,
-        top_n=top_n,
-        max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
-        slippage_bps=strategy_spec.execution.slippage_bps,
-        execution_delay_days=strategy_spec.execution.execution_delay_days,
-        rebalance_frequency=strategy_spec.rebalance.frequency,
-        min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
-        rank_buffer=strategy_spec.rebalance.rank_buffer,
-        cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
-        lower_is_better=bool(single_factor and single_factor.ascending),
-        symbols=symbols,
-        symbols_by_date=symbols_by_date,
-        universe_mode=cast(
-            Literal["snapshot", "rolling"],
-            str(universe_info.get("universe_mode") or "snapshot"),
-        ),
+    if semantic_config is None:
+        single_factor = (
+            strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
+        )
+        semantic_config = StrategyBacktestConfig(
+            strategy_id=strategy_spec.strategy_id,
+            strategy_spec=strategy_spec,
+            implementation_code_path=effective_code_path,
+            factor_name=str(factor_name),
+            start_date=str(start_date),
+            end_date=str(end_date),
+            initial_cash=initial_cash,
+            top_n=strategy_spec.portfolio.top_n,
+            max_single_position_pct=strategy_spec.portfolio.max_single_position_pct,
+            slippage_bps=strategy_spec.execution.slippage_bps,
+            execution_delay_days=strategy_spec.execution.execution_delay_days,
+            rebalance_frequency=strategy_spec.rebalance.frequency,
+            min_turnover_threshold=strategy_spec.rebalance.min_turnover_threshold,
+            rank_buffer=strategy_spec.rebalance.rank_buffer,
+            cash_buffer_pct=strategy_spec.portfolio.cash_buffer_pct,
+            lower_is_better=bool(single_factor and single_factor.ascending),
+        )
+    config = semantic_config.model_copy(
+        update={
+            "factor_name": factor_name,
+            "universe": str(universe_info["universe_effective"]),
+            "symbols": symbols,
+            "symbols_by_date": symbols_by_date,
+            "universe_mode": cast(
+                Literal["snapshot", "rolling"],
+                str(universe_info.get("universe_mode") or "snapshot"),
+            ),
+        }
     )
     cost_estimate = _backtest_cost_estimate(config)
     timeout_seconds_used = _backtest_timeout_seconds_for_call(input_data, context)

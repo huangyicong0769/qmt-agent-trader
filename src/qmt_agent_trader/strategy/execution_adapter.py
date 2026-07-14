@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
@@ -29,7 +30,10 @@ from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
-from qmt_agent_trader.strategy.adapter_capabilities import validate_factor_rank_adapter_spec
+from qmt_agent_trader.strategy.adapter_capabilities import (
+    AdapterCapabilityIssue,
+    validate_factor_rank_adapter_spec,
+)
 from qmt_agent_trader.strategy.diagnostics import StrategyDiagnosticsEvaluator
 from qmt_agent_trader.strategy.models import FactorLeg, SavedStrategy, StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
@@ -121,6 +125,70 @@ class StrategyBacktestResult(BaseModel):
     cost_attribution: dict[str, object] = Field(default_factory=dict)
 
 
+def _same_semantic_value(observed: object, expected: object) -> bool:
+    if isinstance(observed, float) or isinstance(expected, float):
+        try:
+            return math.isclose(
+                float(cast(Any, observed)),
+                float(cast(Any, expected)),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+        except (TypeError, ValueError):
+            return False
+    return observed == expected
+
+
+def validate_backtest_config_matches_spec(
+    config: StrategyBacktestConfig,
+    spec: StrategySpec,
+) -> tuple[AdapterCapabilityIssue, ...]:
+    first = spec.factors[0] if spec.factors else None
+    expected_factor = first.factor_id if first is not None else None
+    expected_direction = bool(len(spec.factors) == 1 and first and first.ascending)
+    checks = (
+        ("config.factor_name", config.factor_name, expected_factor),
+        ("config.top_n", config.top_n, spec.portfolio.top_n),
+        (
+            "config.max_single_position_pct",
+            config.max_single_position_pct,
+            spec.portfolio.max_single_position_pct,
+        ),
+        ("config.cash_buffer_pct", config.cash_buffer_pct, spec.portfolio.cash_buffer_pct),
+        (
+            "config.rebalance_frequency",
+            config.rebalance_frequency,
+            spec.rebalance.frequency,
+        ),
+        (
+            "config.min_turnover_threshold",
+            config.min_turnover_threshold,
+            spec.rebalance.min_turnover_threshold,
+        ),
+        ("config.rank_buffer", config.rank_buffer, spec.rebalance.rank_buffer),
+        (
+            "config.execution_delay_days",
+            config.execution_delay_days,
+            spec.execution.execution_delay_days,
+        ),
+        ("config.slippage_bps", config.slippage_bps, spec.execution.slippage_bps),
+        ("config.lower_is_better", config.lower_is_better, expected_direction),
+    )
+    return tuple(
+        AdapterCapabilityIssue(
+            field=field,
+            observed=observed,
+            supported=expected,
+            message=(
+                "backtest config conflicts with authoritative StrategySpec: "
+                f"{field}={observed!r}, expected {expected!r}"
+            ),
+        )
+        for field, observed, expected in checks
+        if not _same_semantic_value(observed, expected)
+    )
+
+
 def run_strategy_backtest(
     lake: DataLake,
     registry: StrategyRegistry,
@@ -154,7 +222,20 @@ def run_strategy_backtest(
                 unsupported_fields=[issue.field for issue in capability_issues],
                 capability_issues=[asdict(issue) for issue in capability_issues],
             )
-    factor_name = config.factor_name or _first_factor_id(spec)
+        config_issues = validate_backtest_config_matches_spec(config, spec)
+        if config_issues:
+            return StrategyBacktestResult(
+                run_id=run_id,
+                strategy_id=config.strategy_id,
+                strategy_version=spec.version,
+                status="BLOCKED",
+                reason="CONFIG_SPEC_MISMATCH",
+                unsupported_fields=[item.field for item in config_issues],
+                capability_issues=[asdict(item) for item in config_issues],
+                research_only=True,
+                live_trading_allowed=False,
+            )
+    factor_name = _first_factor_id(spec) if spec is not None else config.factor_name
     requested_factor_ids = _factor_ids(spec) or ([factor_name] if factor_name else [])
     composite_method = _composite_method(spec)
     factor_weights = _factor_weights(spec)
@@ -229,12 +310,42 @@ def run_strategy_backtest(
             else "covers_requested_end"
         ),
     }
+    top_n = spec.portfolio.top_n if spec is not None else config.top_n
+    max_single_position_pct = (
+        spec.portfolio.max_single_position_pct
+        if spec is not None
+        else config.max_single_position_pct
+    )
+    cash_buffer_pct = (
+        spec.portfolio.cash_buffer_pct if spec is not None else config.cash_buffer_pct
+    )
+    rebalance_frequency = (
+        spec.rebalance.frequency if spec is not None else config.rebalance_frequency
+    )
+    min_turnover_threshold = (
+        spec.rebalance.min_turnover_threshold
+        if spec is not None
+        else config.min_turnover_threshold
+    )
+    rank_buffer = spec.rebalance.rank_buffer if spec is not None else config.rank_buffer
+    execution_delay_days = (
+        spec.execution.execution_delay_days
+        if spec is not None
+        else config.execution_delay_days
+    )
+    slippage_bps = spec.execution.slippage_bps if spec is not None else config.slippage_bps
+    first_factor = spec.factors[0] if spec is not None and spec.factors else None
+    lower_is_better = (
+        bool(len(spec.factors) == 1 and first_factor and first_factor.ascending)
+        if spec is not None
+        else config.lower_is_better
+    )
     scenario = SensitivityScenario(
         cost_multiplier=1.0,
-        slippage_bps=config.slippage_bps,
-        execution_delay_days=config.execution_delay_days,
-        top_n=config.top_n,
-        max_single_position_pct=config.max_single_position_pct,
+        slippage_bps=slippage_bps,
+        execution_delay_days=execution_delay_days,
+        top_n=top_n,
+        max_single_position_pct=max_single_position_pct,
     )
     expected_trade_dates = load_open_sessions(
         lake,
@@ -249,14 +360,14 @@ def run_strategy_backtest(
             expected_trade_dates=expected_trade_dates,
             factor_registry_root=lake.root.parent / "factors",
             factor_registry=factor_registry,
-            top_n=config.top_n,
-            max_single_position_pct=config.max_single_position_pct,
+            top_n=top_n,
+            max_single_position_pct=max_single_position_pct,
             initial_cash=config.initial_cash,
-            rebalance_frequency=config.rebalance_frequency,
-            min_turnover_threshold=config.min_turnover_threshold,
-            rank_buffer=config.rank_buffer,
-            cash_buffer_pct=config.cash_buffer_pct,
-            lower_is_better=config.lower_is_better,
+            rebalance_frequency=rebalance_frequency,
+            min_turnover_threshold=min_turnover_threshold,
+            rank_buffer=rank_buffer,
+            cash_buffer_pct=cash_buffer_pct,
+            lower_is_better=lower_is_better,
             symbols_by_date=config.symbols_by_date,
         ),
     )
