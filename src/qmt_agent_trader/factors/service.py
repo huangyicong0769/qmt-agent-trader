@@ -229,6 +229,7 @@ def _load_factor_input(
         target_start=load_start,
         target_end=target_date,
         required_fields=list(saved.required_columns),
+        require_trade_state=False,
     )
     _raise_for_unresolved_factor_inputs(name, metadata)
     return panel
@@ -374,6 +375,7 @@ def _factor_validation_frame(
         target_end=f"{load_end:%Y%m%d}",
         required_fields=list(saved.required_columns) if saved is not None else [],
         symbols=symbols,
+        require_trade_state=False,
     )
     if panel.empty:
         raise ValueError(
@@ -433,6 +435,7 @@ def check_factor_input_readiness(
         target_end=end,
         required_fields=list(saved.required_columns),
         symbols=symbols,
+        require_trade_state=False,
     )
     contract_bundle = _factor_input_contract_bundle(
         panel,

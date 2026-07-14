@@ -476,9 +476,10 @@ def test_validate_factor_loads_only_requested_window_with_lookback(
             "target_frequency": Frequency.DAILY,
             "target_start": "20240101",
             "target_end": "20240123",
-            "required_fields": ["symbol", "trade_date", "close"],
-            "symbols": ["000001.SZ"],
-        }
+                "required_fields": ["symbol", "trade_date", "close"],
+                "symbols": ["000001.SZ"],
+                "require_trade_state": False,
+            }
     ]
 
 

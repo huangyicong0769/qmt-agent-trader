@@ -35,7 +35,12 @@ def load_factor_context(
     as_of = parse_date(as_of_date)
     frames: list[pd.DataFrame] = []
     if include_bars:
-        bars = load_daily_bars(lake, end=as_of, symbols=symbols)
+        bars = load_daily_bars(
+            lake,
+            end=as_of,
+            symbols=symbols,
+            include_trade_state=False,
+        )
         if not bars.empty:
             latest_bars = (
                 bars.sort_values(["symbol", "trade_date"])

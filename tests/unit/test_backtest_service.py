@@ -23,30 +23,26 @@ def compare_backtest_reports(reports_dir, **kwargs):
 def test_run_single_symbol_backtest_uses_next_day_fill(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     initialize_persistence(lake, migrate_legacy_ledger=False)
-    lake.write_parquet(
-        pd.DataFrame(
-            [
-                {
-                    "ts_code": "000001.SZ",
-                    "trade_date": "20240102",
-                    "open": 10.0,
-                    "high": 10.0,
-                    "low": 10.0,
-                    "close": 10.0,
-                },
-                {
-                    "ts_code": "000001.SZ",
-                    "trade_date": "20240103",
-                    "open": 11.0,
-                    "high": 11.0,
-                    "low": 11.0,
-                    "close": 11.0,
-                },
-            ]
-        ),
-        "raw",
-        "tushare/daily",
-    )
+    rows = [
+        {
+            "ts_code": "000001.SZ",
+            "trade_date": "20240102",
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+        },
+        {
+            "ts_code": "000001.SZ",
+            "trade_date": "20240103",
+            "open": 11.0,
+            "high": 11.0,
+            "low": 11.0,
+            "close": 11.0,
+        },
+    ]
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    _write_trade_state_sources(lake, rows)
 
     summary = run_single_symbol_backtest(
         lake,
@@ -62,30 +58,26 @@ def test_run_single_symbol_backtest_uses_next_day_fill(tmp_path) -> None:
 def test_run_backtest_report_persists_report(tmp_path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     initialize_persistence(lake, migrate_legacy_ledger=False)
-    lake.write_parquet(
-        pd.DataFrame(
-            [
-                {
-                    "ts_code": "000001.SZ",
-                    "trade_date": "20240102",
-                    "open": 10.0,
-                    "high": 10.0,
-                    "low": 10.0,
-                    "close": 10.0,
-                },
-                {
-                    "ts_code": "000001.SZ",
-                    "trade_date": "20240103",
-                    "open": 11.0,
-                    "high": 11.0,
-                    "low": 11.0,
-                    "close": 11.0,
-                },
-            ]
-        ),
-        "raw",
-        "tushare/daily",
-    )
+    rows = [
+        {
+            "ts_code": "000001.SZ",
+            "trade_date": "20240102",
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+        },
+        {
+            "ts_code": "000001.SZ",
+            "trade_date": "20240103",
+            "open": 11.0,
+            "high": 11.0,
+            "low": 11.0,
+            "close": 11.0,
+        },
+    ]
+    lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    _write_trade_state_sources(lake, rows)
     reports_dir = tmp_path / "reports"
 
     summary = run_backtest_report(
@@ -116,3 +108,34 @@ def test_compare_backtests_rejects_unmanifested_report(tmp_path) -> None:
     with pytest.raises(StorageValidationError, match="manifest is missing"):
         compare_backtest_reports(reports_dir)
     assert path.read_bytes() == original
+
+
+def _write_trade_state_sources(
+    lake: DataLake,
+    rows: list[dict[str, object]],
+) -> None:
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "raw",
+        "tushare/suspend_d",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": row["ts_code"],
+                    "trade_date": row["trade_date"],
+                    "up_limit": float(row["close"]) * 1.1,
+                    "down_limit": float(row["close"]) * 0.9,
+                }
+                for row in rows
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "raw",
+        "tushare/namechange",
+    )
