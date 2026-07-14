@@ -5,6 +5,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.backtest.leakage_checks import assert_fundamentals_visible
 from qmt_agent_trader.core.errors import LeakageError
 from qmt_agent_trader.data.fundamentals import (
@@ -71,6 +72,25 @@ def test_load_daily_basic_snapshot_uses_latest_trade_date_asof(tmp_path) -> None
     assert result[["symbol", "trade_date", "pe_ttm"]].to_dict("records") == [
         {"symbol": "000001.SZ", "trade_date": date(2024, 1, 2), "pe_ttm": 5.0}
     ]
+
+
+def test_load_daily_basic_snapshot_rejects_duplicate_symbol_date(tmp_path) -> None:
+    lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20240102", "pe_ttm": 5.0},
+                {"ts_code": "000001.SZ", "trade_date": "20240102", "pe_ttm": 6.0},
+            ]
+        ),
+        "raw",
+        "tushare/daily_basic",
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        load_daily_basic_snapshot(lake, as_of_date="20240131")
+
+    assert exc_info.value.code == "DUPLICATE_EXACT_FACTOR_INPUT"
 
 
 def test_load_financials_asof_filters_future_announcements(tmp_path) -> None:

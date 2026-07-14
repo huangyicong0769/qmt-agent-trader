@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
 
 DAILY_BASIC_DATASET = "tushare/daily_basic"
@@ -86,9 +87,15 @@ def load_daily_basic_snapshot(
 
     keep_fields = fields or DAILY_BASIC_FIELDS
     columns = ["symbol", "trade_date", *[field for field in keep_fields if field in data.columns]]
+    require_unique_symbol_dates(
+        data,
+        symbol_column="symbol",
+        date_column="trade_date",
+        code="DUPLICATE_EXACT_FACTOR_INPUT",
+        field=f"raw/{DAILY_BASIC_DATASET}",
+    )
     latest = (
         data[columns]
-        .drop_duplicates(["symbol", "trade_date"], keep="last")
         .sort_values(["symbol", "trade_date"])
         .groupby("symbol", as_index=False)
         .tail(1)
