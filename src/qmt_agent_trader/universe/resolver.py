@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from qmt_agent_trader.data.bars import load_daily_bars, normalize_tushare_daily
+from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
 from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
@@ -459,6 +460,13 @@ class UniverseResolver:
             return pd.DataFrame(columns=["symbol", "market_cap"])
         raw = raw.rename(columns={"ts_code": "symbol", "total_mv": "market_cap"})
         raw["trade_date"] = pd.to_datetime(raw["trade_date"].astype(str), format="%Y%m%d").dt.date
+        require_unique_symbol_dates(
+            raw,
+            symbol_column="symbol",
+            date_column="trade_date",
+            code="DUPLICATE_UNIVERSE_SOURCE_KEY",
+            field="raw/tushare/daily_basic",
+        )
         return (
             raw.sort_values(["symbol", "trade_date"])
             .groupby("symbol", as_index=False)

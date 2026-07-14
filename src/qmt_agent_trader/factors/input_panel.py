@@ -11,7 +11,7 @@ from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.bars import load_daily_bars
 from qmt_agent_trader.data.field_sources import FieldSourceIndex, FieldSourceSpec, FillPolicy
 from qmt_agent_trader.data.frequency import Frequency
-from qmt_agent_trader.data.integrity import require_unique_symbol_dates
+from qmt_agent_trader.data.integrity import require_unique_keys, require_unique_symbol_dates
 from qmt_agent_trader.data.macro import get_macro_dataset, macro_visible_date
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
@@ -271,12 +271,16 @@ def _join_symbol_asof(panel: pd.DataFrame, data: pd.DataFrame, field: str) -> pd
     left = panel[["symbol", "trade_date"]].copy()
     left["_panel_row_id"] = range(len(left))
     left["_trade_ts"] = pd.to_datetime(left["trade_date"], errors="coerce")
-    right = (
-        data[["symbol", "visible_date", field]]
-        .dropna(subset=["symbol", "visible_date"])
-        .sort_values(["symbol", "visible_date"])
-        .drop_duplicates(["symbol", "visible_date"], keep="last")
+    right = data[["symbol", "visible_date", field]].dropna(
+        subset=["symbol", "visible_date"]
     )
+    require_unique_keys(
+        right,
+        keys=("symbol", "visible_date"),
+        code="DUPLICATE_ASOF_VISIBLE_KEY",
+        field=field,
+    )
+    right = right.sort_values(["symbol", "visible_date"])
     right = right.copy()
     right["_visible_ts"] = pd.to_datetime(right["visible_date"], errors="coerce")
     pieces: list[pd.DataFrame] = []
@@ -305,12 +309,14 @@ def _join_marketwide_asof(panel: pd.DataFrame, data: pd.DataFrame, field: str) -
     left = panel[["trade_date"]].drop_duplicates().sort_values("trade_date")
     left = left.copy()
     left["_trade_ts"] = pd.to_datetime(left["trade_date"], errors="coerce")
-    right = (
-        data[["visible_date", field]]
-        .dropna(subset=["visible_date"])
-        .sort_values("visible_date")
-        .drop_duplicates(["visible_date"], keep="last")
+    right = data[["visible_date", field]].dropna(subset=["visible_date"])
+    require_unique_keys(
+        right,
+        keys=("visible_date",),
+        code="DUPLICATE_ASOF_VISIBLE_KEY",
+        field=field,
     )
+    right = right.sort_values("visible_date")
     right = right.copy()
     right["_visible_ts"] = pd.to_datetime(right["visible_date"], errors="coerce")
     merged = pd.merge_asof(
