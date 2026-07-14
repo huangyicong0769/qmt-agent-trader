@@ -19,7 +19,16 @@ def _bars(days: int, symbols: tuple[str, ...] = ("A", "B")) -> pd.DataFrame:
                 "symbol": symbol,
                 "trade_date": date(2024, 1, 2) + timedelta(days=offset),
                 "open": 10.0 + index,
+                "high": 10.0 + index,
+                "low": 10.0 + index,
                 "close": 10.0 + index,
+                "volume": 1_000.0,
+                "amount": (10.0 + index) * 1_000.0,
+                "turnover": 0.01,
+                "suspended": False,
+                "st": False,
+                "limit_up_at_open": False,
+                "limit_down_at_open": False,
             }
             for offset in range(days)
             for index, symbol in enumerate(symbols)

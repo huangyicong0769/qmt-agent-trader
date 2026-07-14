@@ -36,6 +36,27 @@ from qmt_agent_trader.factors.service import compute_factor_frame
 from qmt_agent_trader.universe.timeline import RollingUniverseTimeline
 
 _CASH_EPSILON = 1e-8
+_REQUIRED_CANONICAL_BAR_COLUMNS = {
+    "symbol",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "turnover",
+    "suspended",
+    "st",
+    "limit_up_at_open",
+    "limit_down_at_open",
+}
+_EXECUTION_STATE_COLUMNS = {
+    "suspended",
+    "st",
+    "limit_up_at_open",
+    "limit_down_at_open",
+}
 
 
 @dataclass(frozen=True)
@@ -719,10 +740,22 @@ class FactorRankResearchRunner:
 
 
 def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
-    required = {"symbol", "trade_date", "open", "close"}
-    missing = required.difference(bars.columns)
+    missing_state = sorted(_EXECUTION_STATE_COLUMNS.difference(bars.columns))
+    if missing_state:
+        raise BacktestDataIntegrityError(
+            code="MISSING_EXECUTION_STATE_COLUMNS",
+            message="canonical bars are missing opening execution-state columns",
+            field="bars",
+            details={"missing_columns": missing_state},
+        )
+    missing = sorted(_REQUIRED_CANONICAL_BAR_COLUMNS.difference(bars.columns))
     if missing:
-        raise ValueError(f"bars missing required columns: {sorted(missing)}")
+        raise BacktestDataIntegrityError(
+            code="MISSING_CANONICAL_BAR_COLUMNS",
+            message="canonical bars are missing required columns",
+            field="bars",
+            details={"missing_columns": missing},
+        )
     data = bars.copy()
     data["symbol"] = data["symbol"].astype(str)
     data["trade_date"] = pd.to_datetime(data["trade_date"]).dt.date
@@ -733,13 +766,16 @@ def _prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
         code="DUPLICATE_SYMBOL_DATE_BAR",
         field="bars",
     )
-    for column in ["high", "low", "volume", "amount", "turnover"]:
-        if column not in data.columns:
-            data[column] = 0.0
-    for column in ["suspended", "st", "limit_up_at_open", "limit_down_at_open"]:
-        if column not in data.columns:
-            data[column] = False
-        data[column] = data[column].fillna(False).astype(bool)
+    for column in ["open", "high", "low", "close", "volume", "amount", "turnover"]:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    for column in sorted(_EXECUTION_STATE_COLUMNS):
+        if data[column].isna().any():
+            raise BacktestDataIntegrityError(
+                code="UNKNOWN_EXECUTION_STATE",
+                message="canonical execution state contains unknown values",
+                field=column,
+            )
+        data[column] = data[column].astype(bool)
     return data.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
 
