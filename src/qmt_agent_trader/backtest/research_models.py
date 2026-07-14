@@ -63,6 +63,9 @@ class ResearchDataQuality:
     low_cross_section_dates: tuple[str, ...] = ()
     rejected_order_count: int = 0
     warnings: tuple[str, ...] = ()
+    scheduled_rebalance_count: int = 0
+    available_signal_count: int = 0
+    signal_unavailable_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -77,9 +80,18 @@ class FactorRankResearchResult:
     total_slippage_cost: float = 0.0
     same_trade_gross_return: float = 0.0
     average_top_n_overlap: float | None = None
-    scheduled_rebalance_count: int = 0
-    available_signal_count: int = 0
-    signal_unavailable_count: int = 0
+
+    @property
+    def scheduled_rebalance_count(self) -> int:
+        return self.data_quality.scheduled_rebalance_count
+
+    @property
+    def available_signal_count(self) -> int:
+        return self.data_quality.available_signal_count
+
+    @property
+    def signal_unavailable_count(self) -> int:
+        return self.data_quality.signal_unavailable_count
 
     @property
     def equity_curve(self) -> tuple[float, ...]:

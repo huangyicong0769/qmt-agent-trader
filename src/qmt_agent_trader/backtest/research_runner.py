@@ -440,15 +440,15 @@ class FactorRankResearchRunner:
             data_quality=ResearchDataQuality(
                 validated_valuation_dates=len(equity_points),
                 rejected_order_count=rejected_orders,
+                scheduled_rebalance_count=len(execution_schedule),
+                available_signal_count=len(available_signals),
+                signal_unavailable_count=len(unavailable_signals),
             ),
             rejected_orders=rejected_orders,
             total_explicit_cost=total_explicit_cost,
             total_slippage_cost=total_slippage_cost,
             same_trade_gross_return=same_trade_gross_return,
             average_top_n_overlap=(sum(overlaps) / len(overlaps) if overlaps else None),
-            scheduled_rebalance_count=len(execution_schedule),
-            available_signal_count=len(available_signals),
-            signal_unavailable_count=len(unavailable_signals),
         )
 
     def _bars_on(self, trade_date: object) -> pd.DataFrame:
