@@ -84,6 +84,35 @@ def test_ranked_universe_limit_preserves_ranking_order() -> None:
     assert selected == ["000003.SZ", "000001.SZ"]
 
 
+def test_ranked_universe_ties_use_symbol_ascending_tiebreak(tmp_path) -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "ranked",
+            "name": "Ranked",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+            "ranking": {"field": "avg_amount_20d", "ascending": False},
+            "max_symbols": 2,
+        }
+    )
+    frame = pd.DataFrame(
+        {
+            "symbol": ["000003.SZ", "000001.SZ", "000002.SZ"],
+            "avg_amount_20d": [100.0, 100.0, 100.0],
+        }
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    ranked = resolver._apply_ranking(frame, spec)
+    symbols = _ordered_unique_symbols(ranked, spec)
+    selected, _ = _apply_limit(symbols, spec=spec, limit=None)
+
+    assert selected == ["000001.SZ", "000002.SZ"]
+
+
 def test_explicit_symbol_order_is_preserved() -> None:
     spec = UniverseSpec.model_validate(
         {
