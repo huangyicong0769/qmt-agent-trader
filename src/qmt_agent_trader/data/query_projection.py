@@ -31,7 +31,13 @@ def load_daily_market(
         )
         frame = frame.rename(columns={"ts_code": "symbol", "vol": "volume"})
     else:
-        frame = load_daily_bars(lake, start=start, end=end, symbols=symbols)
+        frame = load_daily_bars(
+            lake,
+            start=start,
+            end=end,
+            symbols=symbols,
+            include_trade_state=False,
+        )
     return _project_columns(frame, fields, required=["symbol", "trade_date"])
 
 
