@@ -26,7 +26,7 @@ from qmt_agent_trader.data.providers.base import FetchItem
 from qmt_agent_trader.data.providers.tushare.planner import TushareFetchPlanner
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.data.trading_calendar import load_open_sessions
+from qmt_agent_trader.data.trading_calendar import load_session_window
 from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
@@ -310,6 +310,14 @@ def run_strategy_backtest(
         )
 
     load_symbols = config.symbols or _symbols_from_date_map(config.symbols_by_date)
+    warmup_sessions = _maximum_factor_lookback(factor_registry, requested_factor_ids)
+    session_window = load_session_window(
+        lake,
+        start=config.start_date,
+        end=config.end_date,
+        warmup_sessions=warmup_sessions,
+    )
+    panel_start = f"{session_window.panel_start:%Y%m%d}"
     factor_input_fields = _required_fields_for_backtest_factors(
         factor_registry=factor_registry,
         requested_factor_ids=requested_factor_ids,
@@ -317,7 +325,7 @@ def run_strategy_backtest(
     panel, panel_metadata = build_target_frequency_panel(
         lake,
         target_frequency=Frequency.DAILY,
-        target_start=config.start_date,
+        target_start=panel_start,
         target_end=config.end_date,
         required_fields=factor_input_fields,
         symbols=load_symbols or None,
@@ -353,6 +361,10 @@ def run_strategy_backtest(
     data_window = {
         "requested_start": config.start_date,
         "requested_end": config.end_date,
+        "factor_warmup_sessions": warmup_sessions,
+        "factor_warmup_start": panel_start,
+        "performance_start": f"{session_window.expected_dates[0]:%Y%m%d}",
+        "performance_end": f"{session_window.expected_dates[-1]:%Y%m%d}",
         "actual_start": f"{actual_start:%Y%m%d}",
         "actual_end": f"{actual_end:%Y%m%d}",
         "data_freshness": (
@@ -398,17 +410,11 @@ def run_strategy_backtest(
         top_n=top_n,
         max_single_position_pct=max_single_position_pct,
     )
-    expected_trade_dates = load_open_sessions(
-        lake,
-        start=config.start_date,
-        end=config.end_date,
-    )
-    # TODO: preload factor lookback window before config.start_date, then trim signals.
     runner = FactorRankResearchRunner(
         panel,
         FactorRankResearchConfig(
             factor_name=used_factor_name,
-            expected_trade_dates=expected_trade_dates,
+            expected_trade_dates=session_window.expected_dates,
             factor_registry_root=lake.root.parent / "factors",
             factor_registry=factor_registry,
             top_n=top_n,
@@ -670,6 +676,21 @@ def _required_fields_for_backtest_factors(
             if column not in fields:
                 fields.append(column)
     return fields
+
+
+def _maximum_factor_lookback(
+    registry: FactorRegistry | None,
+    factor_ids: list[str],
+) -> int:
+    if registry is None:
+        return 0
+    lookbacks = []
+    for factor_id in factor_ids:
+        saved = registry.get_factor(factor_id)
+        if saved is None:
+            continue
+        lookbacks.append(max(0, int(saved.lookback)))
+    return max(lookbacks, default=0)
 
 
 def _blocked_backtest_from_panel_metadata(

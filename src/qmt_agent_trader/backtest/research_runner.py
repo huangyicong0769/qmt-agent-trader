@@ -88,7 +88,6 @@ class FactorRankResearchRunner:
         observed_dates = set(self.bars["trade_date"])
         expected_dates = set(config.expected_trade_dates)
         missing_dates = sorted(expected_dates - observed_dates)
-        unexpected_dates = sorted(observed_dates - expected_dates)
         if missing_dates:
             raise BacktestDataIntegrityError(
                 code="MISSING_EXPECTED_TRADING_SESSION",
@@ -98,13 +97,26 @@ class FactorRankResearchRunner:
                     "missing_dates": [f"{item:%Y-%m-%d}" for item in missing_dates]
                 },
             )
-        if unexpected_dates:
+        first_expected = config.expected_trade_dates[0]
+        last_expected = config.expected_trade_dates[-1]
+        unexpected_dates = sorted(day for day in observed_dates if day > last_expected)
+        interior_non_session_dates = sorted(
+            day
+            for day in observed_dates
+            if first_expected <= day <= last_expected and day not in expected_dates
+        )
+        if unexpected_dates or interior_non_session_dates:
             raise BacktestDataIntegrityError(
                 code="UNEXPECTED_MARKET_SESSION",
-                message="market bars contain dates not marked open by the trading calendar",
+                message=(
+                    "market bars contain non-calendar dates inside or after the backtest window"
+                ),
                 field="trade_date",
                 details={
-                    "unexpected_dates": [f"{item:%Y-%m-%d}" for item in unexpected_dates]
+                    "unexpected_dates": [
+                        f"{item:%Y-%m-%d}"
+                        for item in [*interior_non_session_dates, *unexpected_dates]
+                    ]
                 },
             )
         registry = config.factor_registry or (
@@ -126,9 +138,12 @@ class FactorRankResearchRunner:
                 self.factor_frame["factor_value"],
                 errors="coerce",
             )
+        execution_bars = self.bars[
+            self.bars["trade_date"].isin(config.expected_trade_dates)
+        ].copy()
         self._bars_by_date_symbol = {
             trade_date: frame.set_index("symbol", drop=False)
-            for trade_date, frame in self.bars.groupby("trade_date", sort=True)
+            for trade_date, frame in execution_bars.groupby("trade_date", sort=True)
         }
         self._universe_timeline = (
             RollingUniverseTimeline.from_mapping(config.symbols_by_date)
