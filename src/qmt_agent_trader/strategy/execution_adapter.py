@@ -50,9 +50,9 @@ BACKTEST_BASE_FIELDS = [
     "amount",
     "turnover",
     "suspended",
-    "limit_up",
-    "limit_down",
     "st",
+    "limit_up_at_open",
+    "limit_down_at_open",
 ]
 MIN_REQUIRED_FIELD_COVERAGE = 0.80
 MIN_CROSS_SECTIONAL_COVERAGE = 0.50

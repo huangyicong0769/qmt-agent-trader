@@ -103,8 +103,14 @@ def test_complete_trade_state_sources_produce_boolean_evidence(tmp_path) -> None
         symbols=["000001.SZ"],
     )
 
-    assert bars[["suspended", "limit_up", "limit_down", "st"]].isna().sum().sum() == 0
-    assert bars.attrs["trade_state_quality"]["limit_up"]["complete"] is True
+    assert (
+        bars[["suspended", "st", "limit_up_at_open", "limit_down_at_open"]]
+        .isna()
+        .sum()
+        .sum()
+        == 0
+    )
+    assert bars.attrs["trade_state_quality"]["limit_up_at_open"]["complete"] is True
 
 
 def _write_sparse_state_sources(lake: DataLake) -> None:

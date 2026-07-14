@@ -9,6 +9,7 @@ import pandas as pd
 from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.trade_state import normalize_stock_opening_trade_state
 
 CANONICAL_BAR_COLUMNS = [
     "symbol",
@@ -21,9 +22,9 @@ CANONICAL_BAR_COLUMNS = [
     "amount",
     "turnover",
     "suspended",
-    "limit_up",
-    "limit_down",
     "st",
+    "limit_up_at_open",
+    "limit_down_at_open",
 ]
 
 _REQUIRED_TRADE_STATE_DATASETS = {
@@ -91,7 +92,7 @@ def normalize_tushare_daily(frame: pd.DataFrame) -> pd.DataFrame:
             "imputed": False,
             "usable_for_factor": True,
         }
-    for column in ["suspended", "limit_up", "limit_down", "st"]:
+    for column in ["suspended", "st", "limit_up_at_open", "limit_down_at_open"]:
         if column not in data.columns:
             data[column] = pd.NA
 
@@ -183,8 +184,6 @@ def load_daily_bars(
         start=start,
         end=end,
     )
-    _require_stk_limit_coverage(bars, stk_limit)
-
     bars = enrich_trade_states(
         bars,
         suspend=suspend,
@@ -210,37 +209,6 @@ def _require_trade_state_sources(lake: DataLake) -> None:
             message="required trade-state source datasets are unavailable",
             field="trade_state",
             details={"missing_datasets": missing},
-        )
-
-
-def _require_stk_limit_coverage(bars: pd.DataFrame, stk_limit: pd.DataFrame) -> None:
-    limits = _state_key_frame(stk_limit)
-    require_unique_symbol_dates(
-        limits,
-        symbol_column="symbol",
-        date_column="trade_date",
-        code="DUPLICATE_TRADE_STATE_INPUT",
-        field="raw/tushare/stk_limit",
-    )
-    bar_keys = set(zip(bars["symbol"].astype(str), bars["trade_date"], strict=False))
-    limit_keys = set(
-        zip(limits["symbol"].astype(str), limits["trade_date"], strict=False)
-    )
-    missing_limit_keys = sorted(bar_keys - limit_keys)
-    if missing_limit_keys:
-        raise BacktestDataIntegrityError(
-            code="TRADE_STATE_PARTIAL_COVERAGE",
-            message="stk_limit does not cover every executable symbol-date bar",
-            field="trade_state",
-            symbols=tuple(sorted({symbol for symbol, _ in missing_limit_keys})),
-            details={
-                "field": "limit_up_down",
-                "missing_key_count": len(missing_limit_keys),
-                "sample": [
-                    {"symbol": symbol, "trade_date": day.isoformat()}
-                    for symbol, day in missing_limit_keys[:20]
-                ],
-            },
         )
 
 
@@ -270,27 +238,18 @@ def enrich_trade_states(
     namechange: pd.DataFrame | None = None,
     stock_basic: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    enriched = bars.copy()
-    enriched["suspended"] = False
-    enriched["limit_up"] = False
-    enriched["limit_down"] = False
-    enriched["st"] = False
-    if suspend is not None and not suspend.empty:
-        enriched = _apply_suspend_flags(enriched, suspend)
-    if stk_limit is not None and not stk_limit.empty:
-        enriched = _apply_limit_flags(enriched, stk_limit)
-    if namechange is not None and not namechange.empty:
-        enriched = _apply_historical_st_flags(enriched, namechange)
-    for column in ["suspended", "limit_up", "limit_down", "st"]:
-        enriched[column] = enriched[column].fillna(False).astype(bool)
-    enriched.attrs["column_quality"] = bars.attrs.get("column_quality", {})
-    enriched.attrs["trade_state_quality"] = {
-        "suspended": {"source": "raw/tushare/suspend_d", "complete": True},
-        "limit_up": {"source": "raw/tushare/stk_limit", "complete": True},
-        "limit_down": {"source": "raw/tushare/stk_limit", "complete": True},
-        "st": {"source": "raw/tushare/namechange", "complete": True},
-    }
-    return enriched
+    if suspend is None or stk_limit is None or namechange is None:
+        raise BacktestDataIntegrityError(
+            code="TRADE_STATE_SOURCE_NOT_READY",
+            message="opening trade-state normalization requires every stock source",
+            field="trade_state",
+        )
+    return normalize_stock_opening_trade_state(
+        bars,
+        suspend=suspend,
+        stk_limit=stk_limit,
+        namechange=namechange,
+    )
 
 
 def _merge_column_quality(frames: list[pd.DataFrame]) -> dict[str, dict[str, object]]:
@@ -354,89 +313,6 @@ def _filter_namechange_overlap(
     else:
         period_end = pd.Series([date(2099, 12, 31)] * len(data), index=data.index)
     return data[(period_start <= requested_end) & (period_end >= requested_start)]
-
-
-def _state_key_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    data = frame.copy()
-    data = data.rename(columns={"ts_code": "symbol"})
-    if "trade_date" in data.columns:
-        data["trade_date"] = _coerce_date_series(data["trade_date"])
-    return data
-
-
-def _apply_suspend_flags(bars: pd.DataFrame, suspend: pd.DataFrame) -> pd.DataFrame:
-    data = _state_key_frame(suspend)
-    if not {"symbol", "trade_date"}.issubset(data.columns):
-        return bars
-    keys = data[["symbol", "trade_date"]].drop_duplicates()
-    keys["suspended_state"] = True
-    merged = bars.merge(keys, on=["symbol", "trade_date"], how="left")
-    merged["suspended"] = merged["suspended"] | merged["suspended_state"].fillna(False)
-    return merged.drop(columns=["suspended_state"])
-
-
-def _apply_limit_flags(bars: pd.DataFrame, stk_limit: pd.DataFrame) -> pd.DataFrame:
-    data = _state_key_frame(stk_limit)
-    required = {"symbol", "trade_date", "up_limit", "down_limit"}
-    if not required.issubset(data.columns):
-        return bars
-    merged = bars.merge(
-        data[["symbol", "trade_date", "up_limit", "down_limit"]],
-        on=["symbol", "trade_date"],
-        how="left",
-    )
-    tolerance = 1e-6
-    at_up_open = merged["up_limit"].notna() & (merged["open"] >= merged["up_limit"] - tolerance)
-    at_up_close = merged["up_limit"].notna() & (merged["close"] >= merged["up_limit"] - tolerance)
-    at_down_open = merged["down_limit"].notna() & (
-        merged["open"] <= merged["down_limit"] + tolerance
-    )
-    at_down_close = merged["down_limit"].notna() & (
-        merged["close"] <= merged["down_limit"] + tolerance
-    )
-    merged["limit_up"] = merged["limit_up"] | at_up_open | at_up_close
-    merged["limit_down"] = merged["limit_down"] | at_down_open | at_down_close
-    return merged.drop(columns=["up_limit", "down_limit"])
-
-
-def _apply_current_st_flags(bars: pd.DataFrame, stock_basic: pd.DataFrame) -> pd.DataFrame:
-    data = stock_basic.rename(columns={"ts_code": "symbol"}).copy()
-    if not {"symbol", "name"}.issubset(data.columns):
-        return bars
-    st_mask = data["name"].astype(str).str.contains("ST", case=False, na=False)
-    st_symbols = set(data.loc[st_mask, "symbol"])
-    if not st_symbols:
-        return bars
-    enriched = bars.copy()
-    enriched["st"] = enriched["st"] | enriched["symbol"].isin(st_symbols)
-    return enriched
-
-
-def _apply_historical_st_flags(bars: pd.DataFrame, namechange: pd.DataFrame) -> pd.DataFrame:
-    data = namechange.rename(columns={"ts_code": "symbol"}).copy()
-    if not {"symbol", "name", "start_date"}.issubset(data.columns):
-        return bars
-    data["start_date"] = _coerce_date_series(data["start_date"])
-    if "end_date" in data.columns:
-        data["end_date"] = _coerce_date_series(data["end_date"], default="20991231")
-    else:
-        data["end_date"] = date(2099, 12, 31)
-    st_periods = data[data["name"].astype(str).str.contains("ST", case=False, na=False)]
-    if st_periods.empty:
-        return bars
-    enriched = bars.copy()
-    symbol_indices = enriched.groupby("symbol", sort=False).indices
-    for symbol, periods in st_periods.groupby("symbol", sort=False):
-        index = symbol_indices.get(symbol)
-        if index is None or len(index) == 0:
-            continue
-        dates = enriched.iloc[index]["trade_date"]
-        mask = pd.Series(False, index=dates.index)
-        for row in periods.itertuples(index=False):
-            mask |= (dates >= row.start_date) & (dates <= row.end_date)
-        if mask.any():
-            enriched.loc[mask[mask].index, "st"] = True
-    return enriched
 
 
 def _coerce_date_series(values: pd.Series, *, default: str | None = None) -> pd.Series:

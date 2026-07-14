@@ -2,13 +2,13 @@ import pandas as pd
 
 from qmt_agent_trader.data.bars import (
     CANONICAL_BAR_COLUMNS,
-    _apply_historical_st_flags,
     column_quality,
     enrich_trade_states,
     load_daily_bars,
     normalize_tushare_daily,
 )
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.trade_state import normalize_stock_opening_trade_state
 from qmt_agent_trader.factors.library.price_volume import turnover_20d
 
 
@@ -190,6 +190,18 @@ def test_enrich_trade_states_uses_suspend_limit_and_st_sources() -> None:
                     "up_limit": 5.5,
                     "down_limit": 4.5,
                 },
+                {
+                    "ts_code": "000003.SZ",
+                    "trade_date": "20240102",
+                    "up_limit": 8.8,
+                    "down_limit": 7.2,
+                },
+                {
+                    "ts_code": "000004.SZ",
+                    "trade_date": "20240102",
+                    "up_limit": 13.2,
+                    "down_limit": 10.8,
+                },
             ]
         ),
         namechange=pd.DataFrame(
@@ -210,8 +222,8 @@ def test_enrich_trade_states_uses_suspend_limit_and_st_sources() -> None:
         ),
     ).set_index("symbol")
 
-    assert enriched.loc["000001.SZ", "limit_up"]
-    assert enriched.loc["000002.SZ", "limit_down"]
+    assert enriched.loc["000001.SZ", "limit_up_at_open"]
+    assert enriched.loc["000002.SZ", "limit_down_at_open"]
     assert enriched.loc["000003.SZ", "suspended"]
     assert enriched.loc["000003.SZ", "st"]
     assert enriched.loc["000004.SZ", "st"]
@@ -263,7 +275,7 @@ def test_load_daily_bars_enriches_trade_states_from_lake(tmp_path) -> None:
     bars = load_daily_bars(lake)
 
     assert bars.iloc[0]["suspended"]
-    assert bars.iloc[0]["limit_up"]
+    assert bars.iloc[0]["limit_up_at_open"]
 
 
 def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
@@ -319,7 +331,9 @@ def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
                 ]
             )
         if name == "tushare/namechange":
-            return pd.DataFrame()
+            return pd.DataFrame(
+                columns=["ts_code", "name", "start_date", "end_date"]
+            )
         raise AssertionError(name)
 
     monkeypatch.setattr(lake, "read_parquet_filtered", fake_read_filtered)
@@ -332,7 +346,7 @@ def test_load_daily_bars_uses_filtered_reads_for_bars_and_trade_state(
     )
 
     assert bars.iloc[0]["suspended"]
-    assert bars.iloc[0]["limit_up"]
+    assert not bars.iloc[0]["limit_up_at_open"]
     assert all(call["start"] == "20240101" for call in calls[:4])
     assert all(call["end"] == "20240131" for call in calls[:4])
     assert all(call["symbols"] == ["000001.SZ"] for call in calls)
@@ -406,9 +420,16 @@ def test_historical_st_flags_handle_multiple_periods_without_cross_symbol_bleed(
             },
         ]
     )
-    bars["st"] = False
+    limits = bars[["symbol", "trade_date"]].rename(columns={"symbol": "ts_code"})
+    limits["up_limit"] = 11.0
+    limits["down_limit"] = 9.0
 
-    enriched = _apply_historical_st_flags(bars, namechange).set_index(["symbol", "trade_date"])
+    enriched = normalize_stock_opening_trade_state(
+        bars,
+        suspend=pd.DataFrame(columns=["ts_code", "trade_date"]),
+        stk_limit=limits,
+        namechange=namechange,
+    ).set_index(["symbol", "trade_date"])
 
     assert enriched.loc[("000001.SZ", pd.Timestamp("2024-01-02").date()), "st"]
     assert enriched.loc[("000001.SZ", pd.Timestamp("2024-02-01").date()), "st"]

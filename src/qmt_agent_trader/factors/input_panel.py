@@ -61,7 +61,12 @@ def build_target_frequency_panel(
         )
         incomplete_trade_states = [
             field
-            for field in ("suspended", "limit_up", "limit_down", "st")
+            for field in (
+                "suspended",
+                "st",
+                "limit_up_at_open",
+                "limit_down_at_open",
+            )
             if metadata["trade_state_quality"].get(field, {}).get("complete") is not True
         ]
         if incomplete_trade_states:
