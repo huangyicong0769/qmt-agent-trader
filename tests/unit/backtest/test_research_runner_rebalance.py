@@ -39,6 +39,7 @@ def _run(monkeypatch, **updates):
     monkeypatch.setattr(research_runner, "compute_factor_frame", lambda *_args, **_kw: factors)
     config = FactorRankResearchConfig(
         factor_name="test",
+        expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
         top_n=updates.pop("top_n", 1),
         max_single_position_pct=updates.pop("max_single_position_pct", 1.0),
         initial_cash=100_000,
@@ -99,6 +100,7 @@ def test_rank_buffer_retains_holding_inside_exit_band(monkeypatch) -> None:
     def run(rank_buffer: int):
         config = FactorRankResearchConfig(
             factor_name="test",
+            expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=1.0,
             initial_cash=100_000,

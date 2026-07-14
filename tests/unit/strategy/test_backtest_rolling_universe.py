@@ -87,6 +87,16 @@ def test_backtest_blocks_on_empty_rolling_universe(registry, lake: DataLake) -> 
         _bar("000001.SZ", "20240102", 10.1, st=True),
     ]
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": item, "is_open": 1}
+                for item in sorted({str(row["trade_date"]) for row in rows})
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
     _write_stock_basic(lake, listed_c_date="20200101")
 
     result = registry.run_tool(
@@ -134,6 +144,16 @@ def _write_backtest_bars(lake: DataLake) -> None:
             ]
         )
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": item, "is_open": 1}
+                for item in sorted({str(row["trade_date"]) for row in rows})
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
 
 
 def _write_stock_basic(lake: DataLake, *, listed_c_date: str) -> None:

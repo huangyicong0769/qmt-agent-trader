@@ -117,6 +117,16 @@ def _write_backtest_bars(lake: DataLake) -> None:
             ]
         )
     lake.write_parquet(pd.DataFrame(rows), "raw", "tushare/daily")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": item, "is_open": 1}
+                for item in sorted({str(row["trade_date"]) for row in rows})
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
 
 
 def _write_stock_basic(lake: DataLake, *, listed_c_date: str) -> None:

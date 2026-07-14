@@ -51,6 +51,7 @@ def test_weekly_correctness_replay_emits_complete_daily_evidence(monkeypatch) ->
         bars,
         FactorRankResearchConfig(
             factor_name="fixture",
+            expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
             top_n=10,
             max_single_position_pct=0.10,
             initial_cash=1_000_000,
@@ -82,6 +83,7 @@ def test_missing_held_bar_fails_without_completed_evidence(monkeypatch) -> None:
         bars,
         FactorRankResearchConfig(
             factor_name="fixture",
+            expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=1.0,
             initial_cash=100_000,

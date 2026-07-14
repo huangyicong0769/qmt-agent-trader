@@ -37,6 +37,7 @@ from qmt_agent_trader.universe.timeline import RollingUniverseTimeline
 @dataclass(frozen=True)
 class FactorRankResearchConfig:
     factor_name: str
+    expected_trade_dates: tuple[date, ...]
     factor_registry_root: Path | None = None
     factor_registry: FactorRegistry | None = None
     top_n: int = 20
@@ -58,6 +59,28 @@ class FactorRankResearchRunner:
     def __init__(self, bars: pd.DataFrame, config: FactorRankResearchConfig) -> None:
         self.bars = _prepare_bars(bars)
         self.config = config
+        observed_dates = set(self.bars["trade_date"])
+        expected_dates = set(config.expected_trade_dates)
+        missing_dates = sorted(expected_dates - observed_dates)
+        unexpected_dates = sorted(observed_dates - expected_dates)
+        if missing_dates:
+            raise BacktestDataIntegrityError(
+                code="MISSING_EXPECTED_TRADING_SESSION",
+                message="one or more expected open sessions have no market bars",
+                field="trade_date",
+                details={
+                    "missing_dates": [f"{item:%Y-%m-%d}" for item in missing_dates]
+                },
+            )
+        if unexpected_dates:
+            raise BacktestDataIntegrityError(
+                code="UNEXPECTED_MARKET_SESSION",
+                message="market bars contain dates not marked open by the trading calendar",
+                field="trade_date",
+                details={
+                    "unexpected_dates": [f"{item:%Y-%m-%d}" for item in unexpected_dates]
+                },
+            )
         registry = config.factor_registry or (
             FactorRegistry(config.factor_registry_root)
             if config.factor_registry_root is not None
@@ -88,7 +111,7 @@ class FactorRankResearchRunner:
         if not 0 < max_position <= 1:
             raise ValueError("max_single_position_pct must be in (0, 1]")
 
-        dates: tuple[date, ...] = tuple(sorted(self.bars["trade_date"].unique()))
+        dates = self.config.expected_trade_dates
         signal_dates = select_signal_dates(dates, self.config.rebalance_frequency)
         if self.config.rebalance_every_n_days > 1:
             signal_dates = signal_dates[:: self.config.rebalance_every_n_days]

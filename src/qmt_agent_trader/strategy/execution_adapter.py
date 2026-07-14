@@ -24,6 +24,7 @@ from qmt_agent_trader.data.providers.base import FetchItem
 from qmt_agent_trader.data.providers.tushare.planner import TushareFetchPlanner
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.trading_calendar import load_open_sessions
 from qmt_agent_trader.factors.input_panel import build_target_frequency_panel
 from qmt_agent_trader.factors.registry import FactorRegistry, SavedFactor
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
@@ -235,11 +236,17 @@ def run_strategy_backtest(
         top_n=config.top_n,
         max_single_position_pct=config.max_single_position_pct,
     )
+    expected_trade_dates = load_open_sessions(
+        lake,
+        start=config.start_date,
+        end=config.end_date,
+    )
     # TODO: preload factor lookback window before config.start_date, then trim signals.
     runner = FactorRankResearchRunner(
         panel,
         FactorRankResearchConfig(
             factor_name=used_factor_name,
+            expected_trade_dates=expected_trade_dates,
             factor_registry_root=lake.root.parent / "factors",
             factor_registry=factor_registry,
             top_n=config.top_n,

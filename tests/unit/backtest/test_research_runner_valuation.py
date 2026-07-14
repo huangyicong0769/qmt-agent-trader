@@ -62,6 +62,7 @@ def run_zero_cost_top_one(
         bars,
         FactorRankResearchConfig(
             factor_name="momentum_20d",
+            expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=1.0,
             initial_cash=100_000,
@@ -89,6 +90,7 @@ def test_missing_held_bar_aborts_backtest() -> None:
         bars,
         FactorRankResearchConfig(
             factor_name="momentum_20d",
+            expected_trade_dates=tuple(sorted(bars["trade_date"].unique())),
             top_n=1,
             max_single_position_pct=1.0,
             initial_cash=100_000,
