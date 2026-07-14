@@ -558,11 +558,11 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         strategy_id = strategy_id or strategy_spec.strategy_id
         if not factor_name and strategy_spec.factors:
             factor_name = strategy_spec.factors[0].factor_id
-    code_path = str(input_data.get("code_path") or "")
+    effective_code_path = _effective_implementation_code_path(input_data, saved_strategy)
     if strategy_spec is not None:
         capability_issues = validate_factor_rank_adapter_spec(
             strategy_spec,
-            code_path=code_path or None,
+            code_path=effective_code_path,
         )
         if capability_issues:
             generated_code = any(issue.field == "code_path" for issue in capability_issues)
@@ -599,15 +599,6 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             payload.setdefault("strategy_id", strategy_spec.strategy_id)
         elif strategy_id:
             payload.setdefault("strategy_id", str(strategy_id))
-        if saved_strategy is not None and not saved_strategy.code_path:
-            warnings = list(payload.get("warnings") or [])
-            warning = "strategy has no generated code; backtest used canonical adapter"
-            if warning not in warnings:
-                warnings.append(warning)
-            payload["warnings"] = warnings
-            payload["saved_in_registry"] = True
-            payload["generated_code"] = False
-            payload["static_checks"] = "NOT_RUN"
         return payload
     symbols = universe_state["symbols"]
     symbols_by_date = universe_state["symbols_by_date"]
@@ -666,6 +657,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     config = StrategyBacktestConfig(
         strategy_id=strategy_spec.strategy_id,
         strategy_spec=strategy_spec,
+        implementation_code_path=effective_code_path,
         factor_name=factor_name,
         start_date=start_date,
         end_date=end_date,
@@ -742,15 +734,6 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
             [*list(payload.get("warnings") or []), *universe_evidence["universe_warnings"]]
         )
     )
-    if saved_strategy is not None and not saved_strategy.code_path:
-        warnings = list(payload.get("warnings") or [])
-        warning = "strategy has no generated code; backtest used canonical adapter"
-        if warning not in warnings:
-            warnings.append(warning)
-        payload["warnings"] = warnings
-        payload["saved_in_registry"] = True
-        payload["generated_code"] = False
-        payload["static_checks"] = "NOT_RUN"
     if result.status == "completed":
         payload.update(
             {
@@ -769,6 +752,19 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
         )
         _put_cached_backtest(cache_key, payload)
     return _with_backtest_evidence_status(payload)
+
+
+def _effective_implementation_code_path(
+    input_data: dict[str, Any],
+    saved_strategy: SavedStrategy | None,
+) -> str | None:
+    explicit = str(input_data.get("code_path") or "").strip()
+    if explicit:
+        return explicit
+    if saved_strategy is None or not saved_strategy.code_path:
+        return None
+    saved = str(saved_strategy.code_path).strip()
+    return saved or None
 
 
 def _with_backtest_evidence_status(payload: dict[str, Any]) -> dict[str, Any]:
