@@ -376,12 +376,13 @@ class UniverseResolver:
         ranking = spec.ranking
         if frame.empty or ranking is None:
             return frame
-        if ranking.field not in frame.columns:
+        if ranking.field not in frame.columns or "symbol" not in frame.columns:
             return frame.iloc[0:0].copy()
         ranked = frame.sort_values(
-            ranking.field,
-            ascending=ranking.ascending,
+            [ranking.field, "symbol"],
+            ascending=[ranking.ascending, True],
             na_position="last",
+            kind="stable",
         )
         if ranking.top_n is not None:
             ranked = ranked.head(ranking.top_n)
