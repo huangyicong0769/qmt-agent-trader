@@ -10,7 +10,10 @@ from pathlib import Path
 import pandas as pd
 
 from qmt_agent_trader.backtest.commission import CostConfig, calculate_cost_breakdown
-from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
+from qmt_agent_trader.backtest.errors import (
+    BacktestDataIntegrityError,
+    BacktestUniverseIntegrityError,
+)
 from qmt_agent_trader.backtest.rebalance import (
     RebalanceFrequency,
     build_execution_schedule,
@@ -28,6 +31,7 @@ from qmt_agent_trader.backtest.slippage import fixed_bps_slippage
 from qmt_agent_trader.core.types import Side
 from qmt_agent_trader.factors.registry import FactorRegistry
 from qmt_agent_trader.factors.service import compute_factor_frame
+from qmt_agent_trader.universe.timeline import RollingUniverseTimeline
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,11 @@ class FactorRankResearchRunner:
             trade_date: frame.set_index("symbol", drop=False)
             for trade_date, frame in self.bars.groupby("trade_date", sort=True)
         }
+        self._universe_timeline = (
+            RollingUniverseTimeline.from_mapping(config.symbols_by_date)
+            if config.symbols_by_date
+            else None
+        )
 
     def run(self, scenario: SensitivityScenario) -> FactorRankResearchResult:
         top_n = scenario.top_n or self.config.top_n
@@ -332,7 +341,7 @@ class FactorRankResearchRunner:
     def _filter_factors_for_universe(
         self,
         factors: pd.DataFrame | None,
-        signal_date: object,
+        signal_date: date,
     ) -> pd.DataFrame | None:
         if factors is None or factors.empty:
             return factors
@@ -346,12 +355,16 @@ class FactorRankResearchRunner:
             and not bool(bar.get("st", False))
         ]
         filtered = filtered[filtered["symbol"].astype(str).isin(eligible)]
-        if not self.config.symbols_by_date:
+        if self._universe_timeline is None:
             return filtered
-        key = f"{signal_date:%Y%m%d}" if hasattr(signal_date, "strftime") else str(signal_date)
-        symbols = self.config.symbols_by_date.get(key)
-        if symbols is None:
-            return filtered.iloc[0:0].copy()
+        symbols = self._universe_timeline.membership_as_of(signal_date)
+        if not symbols:
+            raise BacktestUniverseIntegrityError(
+                code="ROLLING_UNIVERSE_EMPTY_AS_OF_SIGNAL",
+                message="resolved rolling-universe membership is empty",
+                trade_date=f"{signal_date:%Y-%m-%d}",
+                field="symbols_by_date",
+            )
         return filtered[filtered["symbol"].astype(str).isin(symbols)].copy()
 
     @staticmethod
