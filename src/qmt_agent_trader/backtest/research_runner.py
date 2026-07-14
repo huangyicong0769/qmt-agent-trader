@@ -548,8 +548,8 @@ class FactorRankResearchRunner:
             symbol
             for symbol in filtered["symbol"].astype(str)
             if (bar := self._bar_for_symbol(signal_bars, symbol)) is not None
-            and not bool(bar.get("suspended", False))
-            and not bool(bar.get("st", False))
+            and not bool(bar["suspended"])
+            and not bool(bar["st"])
         ]
         filtered = filtered[filtered["symbol"].astype(str).isin(eligible)]
         if self._universe_timeline is None:
