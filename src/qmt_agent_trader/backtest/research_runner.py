@@ -54,6 +54,9 @@ class FactorRankResearchConfig:
     cash_buffer_pct: float = 0.02
     lower_is_better: bool = False
     symbols_by_date: dict[str, list[str]] | None = None
+    insufficient_history_by_symbol: dict[str, dict[str, int]] = field(
+        default_factory=dict
+    )
     base_cost_config: CostConfig = field(default_factory=CostConfig)
 
     def __post_init__(self) -> None:
@@ -443,6 +446,9 @@ class FactorRankResearchRunner:
                 scheduled_rebalance_count=len(execution_schedule),
                 available_signal_count=len(available_signals),
                 signal_unavailable_count=len(unavailable_signals),
+                insufficient_history_by_symbol=dict(
+                    self.config.insufficient_history_by_symbol
+                ),
             ),
             rejected_orders=rejected_orders,
             total_explicit_cost=total_explicit_cost,
@@ -476,12 +482,37 @@ class FactorRankResearchRunner:
             if clean.empty:
                 unavailable[signal_date] = "factor_signal_all_null"
                 continue
+            clean = self._filter_factors_for_history(clean, signal_date)
+            if clean.empty:
+                unavailable[signal_date] = (
+                    "factor_signal_empty_after_history_filter"
+                )
+                continue
             filtered = self._filter_factors_for_universe(clean, signal_date)
             if filtered is None or filtered.empty:
                 unavailable[signal_date] = "factor_signal_empty_after_universe_filter"
                 continue
             available[signal_date] = filtered
         return available, unavailable
+
+    def _filter_factors_for_history(
+        self,
+        factors: pd.DataFrame,
+        signal_date: date,
+    ) -> pd.DataFrame:
+        insufficient = self.config.insufficient_history_by_symbol
+        if not insufficient:
+            return factors
+        history = self.bars[self.bars["trade_date"] <= signal_date]
+        counts = history.groupby("symbol")["trade_date"].nunique().to_dict()
+        ready = [
+            symbol
+            for symbol in factors["symbol"].astype(str)
+            if symbol not in insufficient
+            or int(counts.get(symbol, 0))
+            >= int(insufficient[symbol]["required_sessions"])
+        ]
+        return factors[factors["symbol"].astype(str).isin(ready)].copy()
 
     def _filter_factors_for_universe(
         self,

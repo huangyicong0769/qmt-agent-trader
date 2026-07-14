@@ -7,12 +7,14 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.backtest.research_models import FactorRankResearchResult
 from qmt_agent_trader.backtest.research_runner import (
     FactorRankResearchConfig,
@@ -357,6 +359,18 @@ def run_strategy_backtest(
             "DATA_NOT_READY",
             "no factor input panel rows available for requested range",
         )
+    required_symbols = tuple(
+        load_symbols
+        or sorted(panel["symbol"].dropna().astype(str).unique().tolist())
+    )
+    warmup_quality = _validate_warmup_panel(
+        panel,
+        warmup_dates=session_window.warmup_dates,
+        expected_trade_dates=session_window.expected_dates,
+        required_symbols=required_symbols,
+        lookback_sessions=warmup_sessions,
+    )
+    panel_metadata.update(warmup_quality)
     actual_start = panel["trade_date"].min()
     actual_end = panel["trade_date"].max()
     data_window = {
@@ -427,6 +441,10 @@ def run_strategy_backtest(
             cash_buffer_pct=cash_buffer_pct,
             lower_is_better=lower_is_better,
             symbols_by_date=config.symbols_by_date,
+            insufficient_history_by_symbol=cast(
+                dict[str, dict[str, int]],
+                warmup_quality["insufficient_history_by_symbol"],
+            ),
         ),
     )
     result = runner.run(scenario)
@@ -677,6 +695,53 @@ def _required_fields_for_backtest_factors(
             if column not in fields:
                 fields.append(column)
     return fields
+
+
+def _validate_warmup_panel(
+    panel: pd.DataFrame,
+    *,
+    warmup_dates: tuple[date, ...],
+    expected_trade_dates: tuple[date, ...],
+    required_symbols: tuple[str, ...],
+    lookback_sessions: int,
+) -> dict[str, object]:
+    normalized = panel[["symbol", "trade_date"]].copy()
+    normalized["symbol"] = normalized["symbol"].astype(str)
+    normalized["trade_date"] = pd.to_datetime(
+        normalized["trade_date"], errors="coerce"
+    ).dt.date
+    observed_dates = set(normalized["trade_date"].dropna())
+    missing_dates = sorted(set(warmup_dates) - observed_dates)
+    if missing_dates:
+        raise BacktestDataIntegrityError(
+            code="MISSING_FACTOR_WARMUP_SESSION",
+            message="factor input panel lacks a required warm-up session",
+            field="trade_date",
+            details={"missing_dates": [item.isoformat() for item in missing_dates]},
+        )
+    warmup_set = set(warmup_dates)
+    counts = (
+        normalized[
+            normalized["trade_date"].isin(warmup_set)
+            & normalized["symbol"].isin(required_symbols)
+        ]
+        .groupby("symbol")["trade_date"]
+        .nunique()
+        .to_dict()
+    )
+    insufficient = {
+        symbol: {
+            "observed_sessions": int(counts.get(symbol, 0)),
+            "required_sessions": lookback_sessions,
+        }
+        for symbol in required_symbols
+        if int(counts.get(symbol, 0)) < lookback_sessions
+    }
+    return {
+        "warmup_session_count": len(warmup_dates),
+        "performance_session_count": len(expected_trade_dates),
+        "insufficient_history_by_symbol": insufficient,
+    }
 
 
 def _maximum_factor_lookback(

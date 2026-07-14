@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from qmt_agent_trader.backtest.sensitivity import SensitivityMetrics
 from qmt_agent_trader.core.types import Side
@@ -66,6 +66,9 @@ class ResearchDataQuality:
     scheduled_rebalance_count: int = 0
     available_signal_count: int = 0
     signal_unavailable_count: int = 0
+    insufficient_history_by_symbol: dict[str, dict[str, int]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
