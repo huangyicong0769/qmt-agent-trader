@@ -23,11 +23,21 @@ is converted into an empty selection.
 
 ## Portfolio semantics
 
+When a `StrategySpec` exists, it is the sole authority for factor identity and
+direction, portfolio construction, rebalance behavior, execution delay, and
+slippage. `StrategyBacktestConfig` only transports those values to the runtime.
+Any conflicting transport value blocks with `CONFIG_SPEC_MISMATCH` before universe
+resolution, cache lookup, factor computation, or market-data loading.
+
 The adapter ranks normalized factor values descending. `lower_is_better` negates the
 declared single factor before ranking and IC diagnostics. Existing holdings inside
 `top_n + rank_buffer` are retained before new entries fill vacancies. The cash buffer is
 excluded from target investment. If planned one-way turnover is below
 `min_turnover_threshold`, the entire rebalance is skipped.
+
+Universe resolution preserves ranking order through stable deduplication and
+`max_symbols` truncation. Explicit-symbol universes preserve the user-declared order;
+only unranked, non-explicit universes are deterministically sorted by symbol.
 
 One-way turnover is half gross traded notional divided by pre-trade equity. Every
 rebalance also preserves gross notional and selection Jaccard overlap. Explicit fees and
@@ -43,8 +53,16 @@ negative equity raise `BacktestAccountingError`; they never produce partial metr
 
 Expected open sessions come from `raw/tushare/trade_cal`, independently of observed bar
 rows. A completely absent open session raises `MISSING_EXPECTED_TRADING_SESSION`.
+Calendar evidence must cover every natural date in the requested interval; absent dates
+raise `TRADING_CALENDAR_PARTIAL_COVERAGE` and are never inferred to be closed. Invalid
+date/state values and conflicting exchange states raise `TRADING_CALENDAR_INVALID` and
+`TRADING_CALENDAR_CONFLICTING_STATE`, respectively.
 Missing required symbol-day bars and invalid open/close values raise typed data-integrity
 errors; there is no previous-close, zero-price, or synthetic-bar fallback.
+
+Both market bars and computed factors require one row per symbol and trade date.
+Identical and conflicting duplicates are rejected as `DUPLICATE_SYMBOL_DATE_BAR` or
+`DUPLICATE_FACTOR_SYMBOL_DATE`; symbol lookup never selects an arbitrary first row.
 
 Abrupt daily cross-sectional coverage collapse blocks broad-universe runs. Universe
 limits are optional and any truncation records candidate, pre-limit, selected, effective
@@ -66,6 +84,22 @@ Known market-data, universe-timeline, and accounting failures are converted to s
 report or enter the successful-result cache. Unexpected software exceptions propagate to
 the normal runtime error handler.
 
+Each execution schedule entry is classified before simulation. Missing factor dates,
+all-null cross sections, and signals emptied by point-in-time universe filtering create
+skipped rebalance records with `factor_signal_date_missing`,
+`factor_signal_all_null`, or `factor_signal_empty_after_universe_filter`. A run with no
+executable scheduled signal raises `NO_EXECUTABLE_FACTOR_SIGNALS`; a signal window with
+no delayed execution session raises `NO_EXECUTION_SESSION_AFTER_SIGNAL`. Completed
+results expose scheduled, available, and unavailable signal counts, and still contain
+exactly one equity point per expected trading date.
+
+Numeric inputs fail validation before simulation. Initial cash must be finite and
+positive; top-N must be positive; the position cap must be in `(0, 1]`; the cash buffer
+must be in `[0, 1)`; turnover threshold must be in `[0, 1]`; rank buffer and slippage
+must be non-negative; execution delay must be at least one trading session; sensitivity
+cost multipliers must be positive; and expected trading dates must be non-empty, sorted,
+and unique.
+
 ## Diagnostics
 
 ```powershell
@@ -78,3 +112,5 @@ Direct JSON without a governed manifest is rejected unless the operator explicit
 Diagnostics consume the same canonical metric map returned in the schema `2.0` result.
 If cost drag or average top-N overlap evidence is absent, the corresponding diagnostic is
 `NOT_COMPUTED`, never `PASS`.
+No comparable pair of completed selections produces `average_top_n_overlap: null`; it is
+never converted to a fabricated `0.0`.

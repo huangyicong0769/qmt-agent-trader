@@ -51,7 +51,7 @@ def _run(monkeypatch, *, frequency: str, symbols_by_date: dict[str, list[str]]):
     )
     return FactorRankResearchRunner(bars, config).run(
         SensitivityScenario(
-            cost_multiplier=0.0,
+            cost_multiplier=1.0,
             slippage_bps=0.0,
             execution_delay_days=1,
             top_n=1,

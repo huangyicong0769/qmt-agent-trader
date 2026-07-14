@@ -17,6 +17,21 @@ class SensitivityScenario:
     top_n: int | None = None
     max_single_position_pct: float | None = None
 
+    def validate_for_factor_rank(self) -> None:
+        if self.cost_multiplier <= 0:
+            raise ValueError("cost_multiplier must be positive")
+        if self.slippage_bps < 0:
+            raise ValueError("slippage_bps must be non-negative")
+        if self.execution_delay_days < 1:
+            raise ValueError("execution_delay_days must be at least one")
+        if self.top_n is not None and self.top_n <= 0:
+            raise ValueError("top_n must be positive when provided")
+        if (
+            self.max_single_position_pct is not None
+            and not 0 < self.max_single_position_pct <= 1
+        ):
+            raise ValueError("max_single_position_pct must be in (0, 1]")
+
     def label(self) -> str:
         fields = [
             f"cost_x{self.cost_multiplier:g}",
@@ -68,8 +83,8 @@ class SensitivityGrid:
             raise ValueError("cost multipliers must be positive")
         if any(value < 0 for value in self.slippage_bps):
             raise ValueError("slippage bps values cannot be negative")
-        if any(value < 0 for value in self.execution_delay_days):
-            raise ValueError("execution delay days cannot be negative")
+        if any(value < 1 for value in self.execution_delay_days):
+            raise ValueError("execution delay days must be positive")
         if any(value is not None and value <= 0 for value in self.top_n):
             raise ValueError("top_n values must be positive when provided")
         if any(
@@ -212,4 +227,3 @@ class SensitivityAnalyzer:
             ):
                 return run
         return runs[0]
-

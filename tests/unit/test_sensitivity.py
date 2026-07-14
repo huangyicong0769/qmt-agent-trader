@@ -58,3 +58,31 @@ def test_sensitivity_grid_rejects_invalid_values() -> None:
         assert "cost multipliers" in str(exc)
     else:
         raise AssertionError("expected invalid cost multiplier to fail")
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    [
+        (SensitivityScenario(cost_multiplier=0), "cost_multiplier must be positive"),
+        (SensitivityScenario(slippage_bps=-1), "slippage_bps must be non-negative"),
+        (
+            SensitivityScenario(execution_delay_days=0),
+            "execution_delay_days must be at least one",
+        ),
+        (SensitivityScenario(top_n=0), "top_n must be positive when provided"),
+        (
+            SensitivityScenario(max_single_position_pct=2),
+            "max_single_position_pct must be in (0, 1]",
+        ),
+    ],
+)
+def test_factor_rank_scenario_rejects_invalid_values(scenario, message) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        scenario.validate_for_factor_rank()
+
+    assert str(exc_info.value) == message
+
+
+def test_sensitivity_grid_rejects_zero_execution_delay() -> None:
+    with pytest.raises(ValueError, match="execution delay days must be positive"):
+        SensitivityGrid(execution_delay_days=(0,)).scenarios()

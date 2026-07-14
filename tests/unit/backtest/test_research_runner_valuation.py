@@ -71,7 +71,7 @@ def run_zero_cost_top_one(
     )
     return runner.run(
         SensitivityScenario(
-            cost_multiplier=0.0,
+            cost_multiplier=1.0,
             slippage_bps=0.0,
             execution_delay_days=1,
             top_n=1,
@@ -100,7 +100,7 @@ def test_missing_held_bar_aborts_backtest() -> None:
     with pytest.raises(BacktestDataIntegrityError) as exc_info:
         runner.run(
             SensitivityScenario(
-                cost_multiplier=0.0,
+                cost_multiplier=1.0,
                 slippage_bps=0.0,
                 execution_delay_days=1,
                 top_n=1,
