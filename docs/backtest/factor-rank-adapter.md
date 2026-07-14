@@ -21,6 +21,13 @@ the latest membership snapshot on or before its signal date. A missing initial s
 or an empty as-of membership raises a typed universe-integrity error; neither condition
 is converted into an empty selection.
 
+The adapter resolves the maximum declared lookback across all requested factors and
+loads that many prior open sessions before the requested start. Insufficient calendar
+history raises `INSUFFICIENT_FACTOR_WARMUP_HISTORY`. Warm-up bars feed factor
+calculation only: execution schedules, trades, equity points, and performance metrics
+remain confined to the requested session window. Report metadata separately identifies
+the loaded panel start and the performance start/end.
+
 ## Portfolio semantics
 
 When a `StrategySpec` exists, it is the sole authority for factor identity and
@@ -28,6 +35,14 @@ direction, portfolio construction, rebalance behavior, execution delay, and
 slippage. `StrategyBacktestConfig` only transports those values to the runtime.
 Any conflicting transport value blocks with `CONFIG_SPEC_MISMATCH` before universe
 resolution, cache lookup, factor computation, or market-data loading.
+`rebalance_frequency` is therefore a strategy-semantic value and must match the spec.
+`universe_rebalance_frequency` is the independent rolling-universe cadence; when it is
+omitted, the authoritative strategy frequency is used.
+
+When a strategy ID exists in the Registry, its canonical spec fingerprint and Registry
+copy are authoritative. An inline spec cannot replace a saved spec with the same ID;
+such a conflict returns `SAVED_STRATEGY_SPEC_MISMATCH`. The config ID must also equal
+the inline `StrategySpec.strategy_id`.
 
 The adapter ranks normalized factor values descending. `lower_is_better` negates the
 declared single factor before ranking and IC diagnostics. Existing holdings inside
@@ -38,6 +53,8 @@ excluded from target investment. If planned one-way turnover is below
 Universe resolution preserves ranking order through stable deduplication and
 `max_symbols` truncation. Explicit-symbol universes preserve the user-declared order;
 only unranked, non-explicit universes are deterministically sorted by symbol.
+Ranked candidates use an explicit stable sort, with ascending symbol order breaking
+equal primary ranking values.
 
 One-way turnover is half gross traded notional divided by pre-trade equity. Every
 rebalance also preserves gross notional and selection Jaccard overlap. Explicit fees and
@@ -63,6 +80,17 @@ errors; there is no previous-close, zero-price, or synthetic-bar fallback.
 Both market bars and computed factors require one row per symbol and trade date.
 Identical and conflicting duplicates are rejected as `DUPLICATE_SYMBOL_DATE_BAR` or
 `DUPLICATE_FACTOR_SYMBOL_DATE`; symbol lookup never selects an arbitrary first row.
+Raw daily-bar duplicates are rejected before normalization, and exact factor-source
+duplicates are rejected before joins as `DUPLICATE_EXACT_FACTOR_INPUT`; neither path
+uses last-row-wins deduplication.
+
+Trade-state columns are usable only with source evidence. Missing
+`raw/tushare/suspend_d`, `raw/tushare/stk_limit`, or historical
+`raw/tushare/namechange` blocks execution with `TRADE_STATE_SOURCE_NOT_READY`.
+`stk_limit` must exactly cover every executable stock symbol-date or the run raises
+`TRADE_STATE_PARTIAL_COVERAGE`. Sparse suspension rows and non-overlapping historical
+name intervals become `False` only after their datasets are proven present, and the
+completed panel records source and completeness metadata for every state field.
 
 Abrupt daily cross-sectional coverage collapse blocks broad-universe runs. Universe
 limits are optional and any truncation records candidate, pre-limit, selected, effective
@@ -92,6 +120,8 @@ executable scheduled signal raises `NO_EXECUTABLE_FACTOR_SIGNALS`; a signal wind
 no delayed execution session raises `NO_EXECUTION_SESSION_AFTER_SIGNAL`. Completed
 results expose scheduled, available, and unavailable signal counts, and still contain
 exactly one equity point per expected trading date.
+These signal-availability counts are canonical members of `data_quality`; legacy
+top-level keys remain temporarily and are sourced from the same canonical values.
 
 Numeric inputs fail validation before simulation. Initial cash must be finite and
 positive; top-N must be positive; the position cap must be in `(0, 1]`; the cash buffer
