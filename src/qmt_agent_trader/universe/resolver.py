@@ -216,8 +216,7 @@ class UniverseResolver:
         )
         if selected_frame.empty:
             return [], excluded, diagnostics
-        symbols = [str(item) for item in selected_frame["symbol"].astype(str).tolist()]
-        return sorted(dict.fromkeys(symbols)), excluded, diagnostics
+        return _ordered_unique_symbols(selected_frame, spec), excluded, diagnostics
 
     def _select_candidates(
         self,
@@ -735,6 +734,15 @@ def _is_missing_scalar(value: Any) -> bool:
         pass
     text = str(value).strip().lower()
     return text in {"", "nan", "nat", "none", "<na>"}
+
+
+def _ordered_unique_symbols(frame: pd.DataFrame, spec: UniverseSpec) -> list[str]:
+    if frame.empty or "symbol" not in frame.columns:
+        return []
+    ordered = frame
+    if spec.ranking is None and spec.selection.mode != "explicit_symbols":
+        ordered = frame.sort_values("symbol", kind="stable")
+    return list(dict.fromkeys(ordered["symbol"].astype(str).tolist()))
 
 
 def _apply_limit(
