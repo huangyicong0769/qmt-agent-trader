@@ -218,3 +218,52 @@ def test_latest_weight_snapshot_rejects_invalid_member(member) -> None:
 
     assert exc_info.value.code == "INDEX_MEMBERSHIP_SOURCE_INVALID"
     assert exc_info.value.field == "raw/tushare/index_weight.con_code"
+
+
+def test_index_member_rejects_inverted_effective_interval() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "index_code": "000300.SH",
+                "con_code": "000001.SZ",
+                "in_date": "20250101",
+                "out_date": "20240101",
+            }
+        ]
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        index_interval_members_by_code_asof(
+            frame,
+            ["000300.SH"],
+            date(2024, 6, 1),
+        )
+
+    assert exc_info.value.code == "INDEX_MEMBERSHIP_SOURCE_INVALID"
+    assert exc_info.value.field == "raw/tushare/index_member"
+    assert exc_info.value.details["invalid_row_count"] == 1
+    assert exc_info.value.details["sample_keys"] == [
+        "000300.SH:000001.SZ"
+    ]
+
+
+def test_index_member_rejects_zero_length_interval() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "index_code": "000300.SH",
+                "con_code": "000001.SZ",
+                "in_date": "20240101",
+                "out_date": "20240101",
+            }
+        ]
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        index_interval_members_by_code_asof(
+            frame,
+            ["000300.SH"],
+            date(2024, 1, 1),
+        )
+
+    assert exc_info.value.code == "INDEX_MEMBERSHIP_SOURCE_INVALID"

@@ -38,6 +38,28 @@ def _normalized_member_values(
     return sorted(normalized)
 
 
+def _raise_invalid_interval(
+    *,
+    invalid: pd.Series,
+    code: str,
+    message: str,
+    field: str,
+    sample_keys: pd.Series,
+) -> None:
+    if not invalid.any():
+        return
+    samples = sample_keys.loc[invalid].astype(str).head(5).tolist()
+    raise BacktestUniverseIntegrityError(
+        code=code,
+        message=message,
+        field=field,
+        details={
+            "invalid_row_count": int(invalid.sum()),
+            "sample_keys": samples,
+        },
+    )
+
+
 def security_master_asof(
     stock_basic: pd.DataFrame,
     as_of_date: date,
@@ -82,6 +104,19 @@ def security_master_asof(
         )
     else:
         data["delist_date"] = pd.NaT
+    bounded_listing = data["delist_date"].notna() & data["list_date"].notna()
+    invalid_interval = pd.Series(False, index=data.index)
+    invalid_interval.loc[bounded_listing] = data.loc[
+        bounded_listing,
+        "delist_date",
+    ].lt(data.loc[bounded_listing, "list_date"])
+    _raise_invalid_interval(
+        invalid=invalid_interval,
+        code="UNIVERSE_SECURITY_MASTER_INVALID",
+        message="stock_basic contains an inverted listing interval",
+        field="raw/tushare/stock_basic",
+        sample_keys=data["ts_code"],
+    )
     data["display_name"] = (
         data["name"].astype("string")
         if "name" in data.columns
@@ -217,6 +252,24 @@ def index_interval_members_by_code_asof(
         data["out_date"],
         field="raw/tushare/index_member.out_date",
         error_code="INDEX_MEMBERSHIP_SOURCE_INVALID",
+    )
+    bounded_membership = data["out_date"].notna() & data["in_date"].notna()
+    invalid_interval = pd.Series(False, index=data.index)
+    invalid_interval.loc[bounded_membership] = data.loc[
+        bounded_membership,
+        "out_date",
+    ].le(data.loc[bounded_membership, "in_date"])
+    member_keys = (
+        data["index_code"].astype(str)
+        + ":"
+        + data["con_code"].astype(str)
+    )
+    _raise_invalid_interval(
+        invalid=invalid_interval,
+        code="INDEX_MEMBERSHIP_SOURCE_INVALID",
+        message="index_member contains an invalid effective interval",
+        field="raw/tushare/index_member",
+        sample_keys=member_keys,
     )
     requested = set(index_codes)
     active = data[

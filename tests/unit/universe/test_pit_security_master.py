@@ -178,3 +178,27 @@ def test_historical_industry_selection_requires_dated_evidence(
         resolver._resolve_for_date(spec, as_of_date="20200105")
 
     assert exc_info.value.code == "UNIVERSE_PIT_CLASSIFICATION_NOT_READY"
+
+
+def test_security_master_rejects_inverted_listing_interval() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "name": "Fixture",
+                "list_date": "20250101",
+                "delist_date": "20240101",
+            }
+        ]
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        security_master_asof(
+            frame,
+            date(2024, 6, 1),
+        )
+
+    assert exc_info.value.code == "UNIVERSE_SECURITY_MASTER_INVALID"
+    assert exc_info.value.field == "raw/tushare/stock_basic"
+    assert exc_info.value.details["invalid_row_count"] == 1
+    assert exc_info.value.details["sample_keys"] == ["000001.SZ"]
