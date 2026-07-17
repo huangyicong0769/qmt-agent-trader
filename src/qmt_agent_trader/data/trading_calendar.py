@@ -111,7 +111,27 @@ def latest_open_session_on_or_before(
             field="trade_cal",
             details={"as_of": boundary.isoformat()},
         )
-    return max(candidates)
+    candidate = max(candidates)
+    required_dates = _natural_dates(
+        candidate,
+        boundary,
+    )
+    missing_dates = [day for day in required_dates if day not in states]
+    if missing_dates:
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_PARTIAL_COVERAGE",
+            message=(
+                "trade calendar lacks continuous evidence between "
+                "the previous open session and requested boundary"
+            ),
+            field="trade_cal",
+            details={
+                "candidate_open_session": candidate.isoformat(),
+                "as_of": boundary.isoformat(),
+                "missing_dates": [day.isoformat() for day in missing_dates],
+            },
+        )
+    return candidate
 
 
 def load_session_window(
