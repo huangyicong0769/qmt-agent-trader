@@ -13,6 +13,10 @@ from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
 from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
+from qmt_agent_trader.universe.pit_metadata import (
+    require_historical_classification_support,
+    security_master_asof,
+)
 from qmt_agent_trader.universe.validators import normalize_symbol
 
 
@@ -185,7 +189,13 @@ class UniverseResolver:
         as_of_date: str,
     ) -> tuple[list[str], list[dict[str, str]], dict[str, Any]]:
         recent = self._load_recent_bars(as_of_date, spec.asset_types)
-        stock_basic = self._stock_basic()
+        as_of = _parse_date(as_of_date)
+        stock_basic = security_master_asof(self._stock_basic(), as_of)
+        require_historical_classification_support(
+            selection_mode=spec.selection.mode,
+            as_of_date=as_of,
+            classification_frame=None,
+        )
         candidates = self._select_candidates(spec, recent, stock_basic, as_of_date=as_of_date)
         candidate_count = len(candidates)
         candidates = self._attach_metrics(candidates, spec, as_of_date=as_of_date)
@@ -307,20 +317,20 @@ class UniverseResolver:
         filters = spec.filters
         if filters.require_bar_coverage and not bool(row.get("has_bar_coverage", False)):
             return "no_bar_coverage"
-        list_status = str(row.get("list_status", "L"))
-        if list_status and list_status not in {"L", "上市", "None", "nan"}:
-            return "not_listed"
-        list_date_raw = row.get("list_date")
-        if not _is_missing_scalar(list_date_raw):
-            try:
-                listed_days = (_parse_date(as_of_date) - _parse_date(str(list_date_raw))).days
-            except ValueError:
-                return "invalid_list_date"
+        if str(row.get("asset_type") or "stock") == "stock":
+            listed_as_of = row.get("listed_as_of")
+            if _is_missing_scalar(listed_as_of) or not bool(listed_as_of):
+                return "not_listed_as_of"
+            list_date_raw = row.get("list_date")
+            if not _is_missing_scalar(list_date_raw):
+                listed_days = (
+                    _parse_date(as_of_date) - _parse_date(str(list_date_raw))
+                ).days
             if listed_days < 0:
                 return "not_yet_listed"
             if listed_days < filters.min_listed_days:
                 return "listed_days_below_minimum"
-        if filters.exclude_st and (bool(row["st"]) or "ST" in str(row.get("name", "")).upper()):
+        if filters.exclude_st and bool(row["st"]):
             return "st"
         if filters.exclude_suspended and bool(row["suspended"]):
             return "suspended"
@@ -579,14 +589,20 @@ def _merge_recent_and_stock_basic(recent: pd.DataFrame, stock_basic: pd.DataFram
 
 
 def _merge_stock_basic_columns(frame: pd.DataFrame, stock_basic: pd.DataFrame) -> pd.DataFrame:
-    if stock_basic.empty or "ts_code" not in stock_basic.columns:
+    if stock_basic.empty or "symbol" not in stock_basic.columns:
         return frame
     columns = [
         column
-        for column in ("ts_code", "name", "industry", "list_status", "list_date")
+        for column in (
+            "symbol",
+            "display_name",
+            "list_date",
+            "delist_date",
+            "listed_as_of",
+        )
         if column in stock_basic.columns
     ]
-    basics = stock_basic[columns].rename(columns={"ts_code": "symbol"})
+    basics = stock_basic[columns]
     return frame.merge(basics, on="symbol", how="left")
 
 
@@ -618,8 +634,8 @@ def _universe_diagnostics(
         max_staleness_days = int(staleness.max()) if not staleness.empty else 0
         symbols_with_bar = int(recent["symbol"].nunique())
     stock_basic_count = (
-        int(stock_basic["ts_code"].astype(str).nunique())
-        if not stock_basic.empty and "ts_code" in stock_basic.columns
+        int(stock_basic["symbol"].astype(str).nunique())
+        if not stock_basic.empty and "symbol" in stock_basic.columns
         else 0
     )
     exclusion_counts: dict[str, int] = {}
