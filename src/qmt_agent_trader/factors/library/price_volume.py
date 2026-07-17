@@ -16,14 +16,23 @@ def reversal_5d(frame: pd.DataFrame) -> pd.Series:
     return -momentum(frame, 5)
 
 
-def volatility_20d(frame: pd.DataFrame) -> pd.Series:
+def _grouped_rolling_std(
+    values: pd.Series,
+    symbols: pd.Series,
+    window: int,
+) -> pd.Series:
     return (
-        frame.groupby("symbol")["close"]
-        .pct_change()
-        .rolling(20)
+        values.groupby(symbols, sort=False)
+        .rolling(window)
         .std()
         .reset_index(level=0, drop=True)
+        .reindex(values.index)
     )
+
+
+def volatility_20d(frame: pd.DataFrame) -> pd.Series:
+    returns = frame.groupby("symbol", sort=False)["close"].pct_change()
+    return _grouped_rolling_std(returns, frame["symbol"], 20)
 
 
 def turnover_20d(frame: pd.DataFrame) -> pd.Series:
