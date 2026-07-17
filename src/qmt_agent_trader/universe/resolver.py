@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
@@ -28,6 +29,35 @@ from qmt_agent_trader.universe.pit_metadata import (
 from qmt_agent_trader.universe.validators import normalize_symbol
 
 LIQUIDITY_WINDOW_SESSIONS = 20
+
+
+@dataclass(frozen=True)
+class _ResolvedUniverseSession:
+    requested_as_of: date
+    effective_date: date
+
+    @property
+    def requested_key(self) -> str:
+        return f"{self.requested_as_of:%Y%m%d}"
+
+    @property
+    def effective_key(self) -> str:
+        return f"{self.effective_date:%Y%m%d}"
+
+
+def _resolve_effective_session(
+    lake: DataLake,
+    requested_as_of: str,
+) -> _ResolvedUniverseSession:
+    requested = _parse_date(requested_as_of)
+    effective = latest_open_session_on_or_before(
+        lake,
+        as_of=requested,
+    )
+    return _ResolvedUniverseSession(
+        requested_as_of=requested,
+        effective_date=effective,
+    )
 
 
 class UniverseResolver:
@@ -198,22 +228,44 @@ class UniverseResolver:
         *,
         as_of_date: str,
     ) -> tuple[list[str], list[dict[str, str]], dict[str, Any]]:
-        recent = self._load_recent_bars(as_of_date, spec.asset_types)
-        as_of = _parse_date(as_of_date)
-        stock_basic = security_master_asof(self._stock_basic(), as_of)
+        session = _resolve_effective_session(
+            self.lake,
+            as_of_date,
+        )
+        recent = self._load_recent_bars(
+            session.effective_date,
+            spec.asset_types,
+        )
+        stock_basic = security_master_asof(
+            self._stock_basic(),
+            session.effective_date,
+        )
         require_historical_classification_support(
             selection_mode=spec.selection.mode,
-            as_of_date=as_of,
+            as_of_date=session.effective_date,
             classification_frame=None,
         )
-        candidates = self._select_candidates(spec, recent, stock_basic, as_of_date=as_of_date)
+        candidates = self._select_candidates(
+            spec,
+            recent,
+            stock_basic,
+            effective_date=session.effective_date,
+        )
         candidate_count = len(candidates)
-        candidates = self._attach_metrics(candidates, spec, as_of_date=as_of_date)
+        candidates = self._attach_metrics(
+            candidates,
+            spec,
+            effective_date=session.effective_date,
+        )
         selected: list[dict[str, Any]] = []
         excluded: list[dict[str, str]] = []
         for row in candidates.to_dict(orient="records"):
             symbol = str(row.get("symbol", ""))
-            reason = self._exclusion_reason(spec, row, as_of_date=as_of_date)
+            reason = self._exclusion_reason(
+                spec,
+                row,
+                as_of_date=session.effective_key,
+            )
             if reason is not None:
                 excluded.append({"symbol": symbol, "reason": reason})
                 continue
@@ -225,17 +277,14 @@ class UniverseResolver:
             recent=recent,
             stock_basic=stock_basic,
             candidates=candidates,
-            as_of_date=as_of_date,
+            as_of_date=session.effective_key,
             selection_mode=spec.selection.mode,
             selected_count=0 if selected_frame.empty else len(selected_frame),
             candidate_count=candidate_count,
             excluded=excluded,
         )
-        effective_date = latest_open_session_on_or_before(
-            self.lake,
-            as_of=as_of_date,
-        )
-        diagnostics["effective_market_session"] = f"{effective_date:%Y%m%d}"
+        diagnostics["requested_as_of_date"] = session.requested_key
+        diagnostics["effective_market_session"] = session.effective_key
         if selected_frame.empty:
             return [], excluded, diagnostics
         return _ordered_unique_symbols(selected_frame, spec), excluded, diagnostics
@@ -246,7 +295,7 @@ class UniverseResolver:
         recent: pd.DataFrame,
         stock_basic: pd.DataFrame,
         *,
-        as_of_date: str,
+        effective_date: date,
     ) -> pd.DataFrame:
         selection = spec.selection
         if selection.mode == "explicit_symbols":
@@ -266,7 +315,7 @@ class UniverseResolver:
             return self._theme_candidates(selection.theme_concepts, recent, stock_basic)
         if selection.mode == "index_constituents":
             return _candidate_frame_for_symbols(
-                self._index_constituents(selection.index_codes, as_of_date),
+                self._index_constituents(selection.index_codes, effective_date),
                 recent,
                 stock_basic,
             )
@@ -423,7 +472,7 @@ class UniverseResolver:
         candidates: pd.DataFrame,
         spec: UniverseSpec,
         *,
-        as_of_date: str,
+        effective_date: date,
     ) -> pd.DataFrame:
         if candidates.empty:
             return candidates
@@ -440,7 +489,7 @@ class UniverseResolver:
             )
         )
         if needs_20d:
-            metrics = self._avg_20d_metrics(as_of_date, spec.asset_types)
+            metrics = self._avg_20d_metrics(effective_date, spec.asset_types)
             data = data.merge(metrics, on="symbol", how="left")
         needs_market_cap = (
             spec.filters.require_fundamental_coverage
@@ -450,14 +499,14 @@ class UniverseResolver:
             or any(rule.field == "market_cap" for rule in spec.selection.rules)
         )
         if needs_market_cap:
-            data = data.merge(self._market_cap_asof(as_of_date), on="symbol", how="left")
+            data = data.merge(self._market_cap_asof(effective_date), on="symbol", how="left")
         return data
 
-    def _avg_20d_metrics(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
-        effective_date = latest_open_session_on_or_before(
-            self.lake,
-            as_of=as_of_date,
-        )
+    def _avg_20d_metrics(
+        self,
+        effective_date: date,
+        asset_types: Sequence[str],
+    ) -> pd.DataFrame:
         end_key = f"{effective_date:%Y%m%d}"
         window = load_session_window(
             self.lake,
@@ -518,14 +567,14 @@ class UniverseResolver:
         )
         return metrics
 
-    def _market_cap_asof(self, as_of_date: str) -> pd.DataFrame:
+    def _market_cap_asof(self, effective_date: date) -> pd.DataFrame:
         path = self.lake.dataset_path("raw", "tushare/daily_basic")
         if not path.exists():
             return pd.DataFrame(columns=["symbol", "market_cap"])
         raw = self.lake.read_parquet_filtered(
             "raw",
             "tushare/daily_basic",
-            end=as_of_date,
+            end=f"{effective_date:%Y%m%d}",
             columns=["ts_code", "trade_date", "total_mv"],
         )
         if raw.empty or "total_mv" not in raw.columns:
@@ -545,11 +594,11 @@ class UniverseResolver:
             .tail(1)[["symbol", "market_cap"]]
         )
 
-    def _load_recent_bars(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
-        effective_date = latest_open_session_on_or_before(
-            self.lake,
-            as_of=as_of_date,
-        )
+    def _load_recent_bars(
+        self,
+        effective_date: date,
+        asset_types: Sequence[str],
+    ) -> pd.DataFrame:
         key = f"{effective_date:%Y%m%d}"
         bars = load_daily_bars(
             self.lake,
@@ -578,8 +627,11 @@ class UniverseResolver:
             return pd.DataFrame()
         return self.lake.read_parquet("raw", "tushare/stock_basic")
 
-    def _index_constituents(self, index_codes: list[str], as_of_date: str) -> list[str]:
-        as_of = _parse_date(as_of_date)
+    def _index_constituents(
+        self,
+        index_codes: list[str],
+        effective_date: date,
+    ) -> list[str]:
         normalized_codes = list(dict.fromkeys(str(code) for code in index_codes))
         weight_by_code: dict[str, list[str]] = {}
         member_by_code: dict[str, list[str]] = {}
@@ -589,7 +641,7 @@ class UniverseResolver:
             weight_by_code = index_weight_members_by_code_asof(
                 self.lake.read_parquet("raw", "tushare/index_weight"),
                 normalized_codes,
-                as_of,
+                effective_date,
             )
 
         member_path = self.lake.dataset_path("raw", "tushare/index_member")
@@ -597,7 +649,7 @@ class UniverseResolver:
             member_by_code = index_interval_members_by_code_asof(
                 self.lake.read_parquet("raw", "tushare/index_member"),
                 normalized_codes,
-                as_of,
+                effective_date,
             )
 
         missing_codes: list[str] = []
@@ -616,7 +668,7 @@ class UniverseResolver:
             raise BacktestUniverseIntegrityError(
                 code="INDEX_MEMBERSHIP_NOT_READY",
                 message="one or more requested indices lack as-of membership evidence",
-                trade_date=as_of.isoformat(),
+                trade_date=effective_date.isoformat(),
                 field="index_membership",
                 details={"missing_index_codes": missing_codes},
             )

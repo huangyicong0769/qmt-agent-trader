@@ -6,11 +6,13 @@ import pandas as pd
 import pytest
 
 from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
+from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.pit_metadata import (
     index_interval_members_asof,
     index_weight_members_asof,
     index_weight_members_by_code_asof,
 )
+from qmt_agent_trader.universe.resolver import UniverseResolver
 
 
 def test_index_weight_uses_latest_snapshot_not_historical_union() -> None:
@@ -137,3 +139,34 @@ def test_index_weight_returns_members_grouped_by_requested_code() -> None:
         "000300.SH": ["300_A.SZ"],
         "000905.SH": ["905_A.SZ"],
     }
+
+
+def test_index_membership_uses_effective_market_session_not_closed_boundary(
+    tmp_path,
+) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "index_code": "000300.SH",
+                    "con_code": "000001.SZ",
+                    "trade_date": "20240105",
+                },
+                {
+                    "index_code": "000300.SH",
+                    "con_code": "000002.SZ",
+                    "trade_date": "20240108",
+                },
+            ]
+        ),
+        "raw",
+        "tushare/index_weight",
+    )
+
+    observed = UniverseResolver(lake)._index_constituents(
+        ["000300.SH"],
+        date(2024, 1, 5),
+    )
+
+    assert observed == ["000001.SZ"]

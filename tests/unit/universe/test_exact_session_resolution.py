@@ -180,7 +180,7 @@ def test_twenty_session_metrics_use_bounded_raw_read(tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(lake, "read_parquet_filtered", recording_read)
 
-    metrics = UniverseResolver(lake)._avg_20d_metrics("20240120", ["stock"])
+    metrics = UniverseResolver(lake)._avg_20d_metrics(date(2024, 1, 20), ["stock"])
 
     assert metrics["avg_amount_20d"].tolist() == [1000.0]
     assert observed_reads == [
@@ -223,7 +223,7 @@ def test_nineteen_sessions_do_not_produce_twenty_day_liquidity(tmp_path) -> None
     )
 
     observed = UniverseResolver(lake)._avg_20d_metrics(
-        f"{days[-1]:%Y%m%d}",
+        days[-1],
         ["stock"],
     )
 
@@ -254,7 +254,7 @@ def test_null_amount_invalidates_only_amount_window(tmp_path) -> None:
     _write_daily_rows(lake, rows)
 
     observed = UniverseResolver(lake)._avg_20d_metrics(
-        f"{days[-1]:%Y%m%d}",
+        days[-1],
         ["stock"],
     )
 
@@ -262,3 +262,98 @@ def test_null_amount_invalidates_only_amount_window(tmp_path) -> None:
     assert observed.loc[0, "volume_observation_count"] == 20
     assert pd.isna(observed.loc[0, "avg_amount_20d"])
     assert observed.loc[0, "avg_volume_20d"] == 100.0
+
+
+def test_closed_boundary_uses_previous_open_session_for_all_pit_inputs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": "20240105", "is_open": 1},
+                {"exchange": "SZSE", "cal_date": "20240105", "is_open": 1},
+                {"exchange": "SSE", "cal_date": "20240106", "is_open": 0},
+                {"exchange": "SZSE", "cal_date": "20240106", "is_open": 0},
+                {"exchange": "SSE", "cal_date": "20240107", "is_open": 0},
+                {"exchange": "SZSE", "cal_date": "20240107", "is_open": 0},
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    observed: dict[str, object] = {}
+    resolver = UniverseResolver(lake)
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "closed-boundary",
+            "name": "Closed boundary",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {
+                "mode": "index_constituents",
+                "index_codes": ["000300.SH"],
+            },
+            "filters": {"min_listed_days": 0},
+        }
+    )
+
+    def fake_bars(effective_date, _asset_types):
+        observed["bars_date"] = effective_date
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": "000001.SZ",
+                    "trade_date": effective_date,
+                    "asset_type": "stock",
+                    "st": False,
+                    "suspended": False,
+                    "volume": 100.0,
+                    "amount": 1000.0,
+                }
+            ]
+        )
+
+    def fake_index(_codes, effective_date):
+        observed["index_date"] = effective_date
+        return ["000001.SZ"]
+
+    def fake_metrics(frame, _spec, *, effective_date):
+        observed["metrics_date"] = effective_date
+        return frame
+
+    monkeypatch.setattr(resolver, "_load_recent_bars", fake_bars)
+    monkeypatch.setattr(
+        resolver,
+        "_stock_basic",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "Fixture",
+                    "list_date": "20000101",
+                    "delist_date": None,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(resolver, "_index_constituents", fake_index)
+    monkeypatch.setattr(resolver, "_attach_metrics", fake_metrics)
+
+    result = resolver.build(
+        spec,
+        mode="snapshot",
+        as_of_date="20240107",
+    )
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["000001.SZ"]
+    assert observed == {
+        "bars_date": date(2024, 1, 5),
+        "index_date": date(2024, 1, 5),
+        "metrics_date": date(2024, 1, 5),
+    }
+    diagnostics = result["metadata"]["diagnostics"]
+    assert diagnostics["requested_as_of_date"] == "20240107"
+    assert diagnostics["effective_market_session"] == "20240105"
