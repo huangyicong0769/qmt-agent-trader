@@ -104,11 +104,11 @@ def require_historical_classification_support(
         )
 
 
-def index_weight_members_asof(
+def index_weight_members_by_code_asof(
     frame: pd.DataFrame,
     index_codes: list[str],
     as_of: date,
-) -> list[str]:
+) -> dict[str, list[str]]:
     required = {"index_code", "con_code", "trade_date"}
     missing = sorted(required.difference(frame.columns))
     if missing:
@@ -119,17 +119,19 @@ def index_weight_members_asof(
             details={"missing_columns": missing},
         )
     data = frame.copy()
+    data["index_code"] = data["index_code"].astype(str)
     data["trade_date"] = _required_date(
         data["trade_date"],
         field="raw/tushare/index_weight.trade_date",
         error_code="INDEX_MEMBERSHIP_SOURCE_INVALID",
     )
+    requested = set(index_codes)
     data = data[
-        data["index_code"].astype(str).isin(index_codes)
+        data["index_code"].isin(requested)
         & data["trade_date"].map(lambda value: value <= as_of)
     ]
-    members: list[str] = []
-    for _index_code, group in data.groupby("index_code", sort=True):
+    result: dict[str, list[str]] = {}
+    for index_code, group in data.groupby("index_code", sort=True):
         snapshot_date = group["trade_date"].max()
         snapshot = group[group["trade_date"].eq(snapshot_date)]
         require_unique_keys(
@@ -138,15 +140,28 @@ def index_weight_members_asof(
             code="DUPLICATE_UNIVERSE_SOURCE_KEY",
             field="raw/tushare/index_weight",
         )
-        members.extend(snapshot["con_code"].astype(str).tolist())
-    return sorted(dict.fromkeys(members))
+        result[str(index_code)] = sorted(
+            snapshot["con_code"].astype(str).unique().tolist()
+        )
+    return result
 
 
-def index_interval_members_asof(
+def index_weight_members_asof(
     frame: pd.DataFrame,
     index_codes: list[str],
     as_of: date,
 ) -> list[str]:
+    grouped = index_weight_members_by_code_asof(frame, index_codes, as_of)
+    return sorted(
+        {symbol for members in grouped.values() for symbol in members}
+    )
+
+
+def index_interval_members_by_code_asof(
+    frame: pd.DataFrame,
+    index_codes: list[str],
+    as_of: date,
+) -> dict[str, list[str]]:
     required = {"index_code", "con_code", "in_date", "out_date"}
     missing = sorted(required.difference(frame.columns))
     if missing:
@@ -157,6 +172,7 @@ def index_interval_members_asof(
             details={"missing_columns": missing},
         )
     data = frame.copy()
+    data["index_code"] = data["index_code"].astype(str)
     data["in_date"] = _required_date(
         data["in_date"],
         field="raw/tushare/index_member.in_date",
@@ -167,8 +183,12 @@ def index_interval_members_asof(
         field="raw/tushare/index_member.out_date",
         error_code="INDEX_MEMBERSHIP_SOURCE_INVALID",
     )
+    requested = set(index_codes)
+    evidence_codes = set(
+        data.loc[data["index_code"].isin(requested), "index_code"]
+    )
     active = data[
-        data["index_code"].astype(str).isin(index_codes)
+        data["index_code"].isin(requested)
         & data["in_date"].map(lambda value: value <= as_of)
         & data["out_date"].map(lambda value: pd.isna(value) or value > as_of)
     ]
@@ -178,7 +198,29 @@ def index_interval_members_asof(
         code="DUPLICATE_UNIVERSE_SOURCE_KEY",
         field="raw/tushare/index_member",
     )
-    return sorted(active["con_code"].astype(str).unique().tolist())
+    return {
+        code: sorted(
+            active.loc[
+                active["index_code"].eq(code),
+                "con_code",
+            ]
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        for code in sorted(evidence_codes)
+    }
+
+
+def index_interval_members_asof(
+    frame: pd.DataFrame,
+    index_codes: list[str],
+    as_of: date,
+) -> list[str]:
+    grouped = index_interval_members_by_code_asof(frame, index_codes, as_of)
+    return sorted(
+        {symbol for members in grouped.values() for symbol in members}
+    )
 
 
 _MISSING_DATE_TOKENS = {"", "nan", "nat", "none", "<na>"}

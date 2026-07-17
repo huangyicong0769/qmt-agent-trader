@@ -1,7 +1,10 @@
 import pandas as pd
 import pytest
 
-from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
+from qmt_agent_trader.backtest.errors import (
+    BacktestDataIntegrityError,
+    BacktestUniverseIntegrityError,
+)
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.models import UniverseSpec
 from qmt_agent_trader.universe.resolver import (
@@ -163,6 +166,70 @@ def test_amount_filter_rejects_incomplete_twenty_day_window() -> None:
     )
 
     assert reason == "amount_20d_coverage_incomplete"
+
+
+def test_multiple_indices_resolve_from_independent_sources(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "index_code": "000300.SH",
+                    "con_code": "000001.SZ",
+                    "trade_date": "20240201",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/index_weight",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "index_code": "000905.SH",
+                    "con_code": "000002.SZ",
+                    "in_date": "20240101",
+                    "out_date": None,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/index_member",
+    )
+
+    observed = UniverseResolver(lake)._index_constituents(
+        ["000300.SH", "000905.SH"],
+        "20240215",
+    )
+
+    assert observed == ["000001.SZ", "000002.SZ"]
+
+
+def test_missing_one_requested_index_fails_closed(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "index_code": "000300.SH",
+                    "con_code": "000001.SZ",
+                    "trade_date": "20240201",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/index_weight",
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        UniverseResolver(lake)._index_constituents(
+            ["000300.SH", "000905.SH"],
+            "20240215",
+        )
+
+    assert exc_info.value.code == "INDEX_MEMBERSHIP_NOT_READY"
+    assert exc_info.value.details["missing_index_codes"] == ["000905.SH"]
 
 
 def test_resolver_preserves_ranked_top_symbols_before_limit(tmp_path, monkeypatch) -> None:

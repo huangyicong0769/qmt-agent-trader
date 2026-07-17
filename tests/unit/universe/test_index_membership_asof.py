@@ -9,6 +9,7 @@ from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
 from qmt_agent_trader.universe.pit_metadata import (
     index_interval_members_asof,
     index_weight_members_asof,
+    index_weight_members_by_code_asof,
 )
 
 
@@ -108,3 +109,31 @@ def test_non_empty_invalid_in_date_fails_closed() -> None:
 
     assert exc_info.value.code == "INDEX_MEMBERSHIP_SOURCE_INVALID"
     assert exc_info.value.field == "raw/tushare/index_member.in_date"
+
+
+def test_index_weight_returns_members_grouped_by_requested_code() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "index_code": "000300.SH",
+                "con_code": "300_A.SZ",
+                "trade_date": "20240201",
+            },
+            {
+                "index_code": "000905.SH",
+                "con_code": "905_A.SZ",
+                "trade_date": "20240202",
+            },
+        ]
+    )
+
+    observed = index_weight_members_by_code_asof(
+        frame,
+        ["000300.SH", "000905.SH"],
+        date(2024, 2, 15),
+    )
+
+    assert observed == {
+        "000300.SH": ["300_A.SZ"],
+        "000905.SH": ["905_A.SZ"],
+    }
