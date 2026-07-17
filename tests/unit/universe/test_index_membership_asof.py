@@ -9,6 +9,7 @@ from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.pit_metadata import (
     index_interval_members_asof,
+    index_interval_members_by_code_asof,
     index_weight_members_asof,
     index_weight_members_by_code_asof,
 )
@@ -20,12 +21,12 @@ def test_index_weight_uses_latest_snapshot_not_historical_union() -> None:
         [
             {
                 "index_code": "000300.SH",
-                "con_code": "OLD.SZ",
+                "con_code": "000001.SZ",
                 "trade_date": "20240101",
             },
             {
                 "index_code": "000300.SH",
-                "con_code": "NEW.SZ",
+                "con_code": "000002.SZ",
                 "trade_date": "20240201",
             },
         ]
@@ -37,7 +38,7 @@ def test_index_weight_uses_latest_snapshot_not_historical_union() -> None:
         date(2024, 2, 15),
     )
 
-    assert observed == ["NEW.SZ"]
+    assert observed == ["000002.SZ"]
 
 
 def test_index_member_uses_effective_interval() -> None:
@@ -45,13 +46,13 @@ def test_index_member_uses_effective_interval() -> None:
         [
             {
                 "index_code": "000300.SH",
-                "con_code": "OLD.SZ",
+                "con_code": "000001.SZ",
                 "in_date": "20230101",
                 "out_date": "20240131",
             },
             {
                 "index_code": "000300.SH",
-                "con_code": "NEW.SZ",
+                "con_code": "000002.SZ",
                 "in_date": "20240201",
                 "out_date": None,
             },
@@ -64,7 +65,7 @@ def test_index_member_uses_effective_interval() -> None:
         date(2024, 2, 15),
     )
 
-    assert observed == ["NEW.SZ"]
+    assert observed == ["000002.SZ"]
 
 
 def test_non_empty_invalid_out_date_fails_closed() -> None:
@@ -118,12 +119,12 @@ def test_index_weight_returns_members_grouped_by_requested_code() -> None:
         [
             {
                 "index_code": "000300.SH",
-                "con_code": "300_A.SZ",
+                "con_code": "000001.SZ",
                 "trade_date": "20240201",
             },
             {
                 "index_code": "000905.SH",
-                "con_code": "905_A.SZ",
+                "con_code": "000002.SZ",
                 "trade_date": "20240202",
             },
         ]
@@ -136,8 +137,8 @@ def test_index_weight_returns_members_grouped_by_requested_code() -> None:
     )
 
     assert observed == {
-        "000300.SH": ["300_A.SZ"],
-        "000905.SH": ["905_A.SZ"],
+        "000300.SH": ["000001.SZ"],
+        "000905.SH": ["000002.SZ"],
     }
 
 
@@ -170,3 +171,50 @@ def test_index_membership_uses_effective_market_session_not_closed_boundary(
     )
 
     assert observed == ["000001.SZ"]
+
+
+def test_index_with_only_expired_history_has_no_current_evidence() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "index_code": "000905.SH",
+                "con_code": "000001.SZ",
+                "in_date": "20200101",
+                "out_date": "20231231",
+            }
+        ]
+    )
+
+    observed = index_interval_members_by_code_asof(
+        frame,
+        ["000905.SH"],
+        date(2024, 2, 15),
+    )
+
+    assert observed == {}
+
+
+@pytest.mark.parametrize(
+    "member",
+    [None, "", "not-a-symbol"],
+)
+def test_latest_weight_snapshot_rejects_invalid_member(member) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "index_code": "000300.SH",
+                "con_code": member,
+                "trade_date": "20240201",
+            }
+        ]
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        index_weight_members_by_code_asof(
+            frame,
+            ["000300.SH"],
+            date(2024, 2, 15),
+        )
+
+    assert exc_info.value.code == "INDEX_MEMBERSHIP_SOURCE_INVALID"
+    assert exc_info.value.field == "raw/tushare/index_weight.con_code"

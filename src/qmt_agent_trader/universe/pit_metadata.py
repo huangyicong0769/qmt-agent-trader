@@ -8,6 +8,34 @@ import pandas as pd
 
 from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
 from qmt_agent_trader.data.integrity import require_unique_keys
+from qmt_agent_trader.universe.validators import normalize_symbol
+
+
+def _normalized_member_values(
+    values: pd.Series,
+    *,
+    field: str,
+) -> list[str]:
+    normalized: list[str] = []
+    invalid_count = 0
+    for raw in values.tolist():
+        text = "" if raw is None else str(raw).strip()
+        symbol = normalize_symbol(text) if text else None
+        if symbol is None:
+            invalid_count += 1
+            continue
+        if symbol not in normalized:
+            normalized.append(symbol)
+    if invalid_count:
+        raise BacktestUniverseIntegrityError(
+            code="INDEX_MEMBERSHIP_SOURCE_INVALID",
+            message="index membership contains invalid member identifiers",
+            field=field,
+            details={
+                "invalid_row_count": invalid_count,
+            },
+        )
+    return sorted(normalized)
 
 
 def security_master_asof(
@@ -140,9 +168,12 @@ def index_weight_members_by_code_asof(
             code="DUPLICATE_UNIVERSE_SOURCE_KEY",
             field="raw/tushare/index_weight",
         )
-        result[str(index_code)] = sorted(
-            snapshot["con_code"].astype(str).unique().tolist()
+        members = _normalized_member_values(
+            snapshot["con_code"],
+            field="raw/tushare/index_weight.con_code",
         )
+        if members:
+            result[str(index_code)] = members
     return result
 
 
@@ -184,9 +215,6 @@ def index_interval_members_by_code_asof(
         error_code="INDEX_MEMBERSHIP_SOURCE_INVALID",
     )
     requested = set(index_codes)
-    evidence_codes = set(
-        data.loc[data["index_code"].isin(requested), "index_code"]
-    )
     active = data[
         data["index_code"].isin(requested)
         & data["in_date"].map(lambda value: value <= as_of)
@@ -198,18 +226,18 @@ def index_interval_members_by_code_asof(
         code="DUPLICATE_UNIVERSE_SOURCE_KEY",
         field="raw/tushare/index_member",
     )
-    return {
-        code: sorted(
-            active.loc[
-                active["index_code"].eq(code),
-                "con_code",
-            ]
-            .astype(str)
-            .unique()
-            .tolist()
+    result: dict[str, list[str]] = {}
+    for code in sorted(requested):
+        code_active = active[active["index_code"].eq(code)]
+        if code_active.empty:
+            continue
+        members = _normalized_member_values(
+            code_active["con_code"],
+            field="raw/tushare/index_member.con_code",
         )
-        for code in sorted(evidence_codes)
-    }
+        if members:
+            result[code] = members
+    return result
 
 
 def index_interval_members_asof(

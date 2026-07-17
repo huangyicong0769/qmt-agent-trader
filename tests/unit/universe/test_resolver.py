@@ -528,3 +528,32 @@ def test_volume_ranking_requires_twenty_non_null_observations(
     ranked = resolver._apply_ranking(frame, spec)
 
     assert ranked["symbol"].tolist() == ["000001.SZ"]
+
+
+def test_expired_index_history_is_not_valid_asof_evidence(
+    tmp_path,
+) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "index_code": "000905.SH",
+                    "con_code": "000001.SZ",
+                    "in_date": "20200101",
+                    "out_date": "20231231",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/index_member",
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        UniverseResolver(lake)._index_constituents(
+            ["000905.SH"],
+            date(2024, 2, 15),
+        )
+
+    assert exc_info.value.code == "INDEX_MEMBERSHIP_NOT_READY"
+    assert exc_info.value.details["missing_index_codes"] == ["000905.SH"]
