@@ -28,7 +28,7 @@ def test_profile_helpers_query_external_parquet(tmp_path: Path) -> None:
             ]
         ),
         "raw",
-        "tushare_daily",
+        "tushare/daily",
     )
 
     assert module._date_bounds(lake) == {"start": "20240102", "end": "20240103"}
