@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
 
@@ -259,6 +260,86 @@ def normalize_financial_statement(
     if "update_flag" not in data.columns:
         data["update_flag"] = None
     return data
+
+
+def financial_field_asof_source(
+    raw: pd.DataFrame,
+    *,
+    field: str,
+    source: str,
+) -> pd.DataFrame:
+    normalized = normalize_financial_statement(
+        raw,
+        statement_type=source.rsplit("/", 1)[-1],
+        source=source,
+    )
+    required = {
+        "symbol",
+        "visible_date",
+        "period_end",
+        "actual_announced_at",
+        "update_flag",
+        field,
+    }
+    missing = sorted(required.difference(normalized.columns))
+    if missing:
+        raise BacktestDataIntegrityError(
+            code="INVALID_FINANCIAL_SOURCE",
+            message="financial source lacks revision identity",
+            field=source,
+            details={"missing_columns": missing},
+        )
+    for column in ("visible_date", "period_end", "actual_announced_at"):
+        normalized[column] = pd.to_datetime(
+            normalized[column], errors="coerce"
+        ).dt.date
+    data = normalized.dropna(subset=["symbol", "visible_date", field]).copy()
+    data["update_rank"] = pd.to_numeric(
+        data["update_flag"],
+        errors="coerce",
+    ).fillna(-1)
+    rank_columns = [
+        "symbol",
+        "visible_date",
+        "period_end",
+        "update_rank",
+        "actual_announced_at",
+    ]
+    duplicate_rank = data.duplicated(rank_columns, keep=False)
+    if duplicate_rank.any():
+        conflicts = (
+            data.loc[duplicate_rank]
+            .groupby(rank_columns, dropna=False)[field]
+            .nunique(dropna=False)
+        )
+        if (conflicts > 1).any():
+            raise BacktestDataIntegrityError(
+                code="AMBIGUOUS_FINANCIAL_REVISION",
+                message="financial revisions share an identical business rank",
+                field=f"{source}:{field}",
+                symbols=tuple(
+                    sorted(
+                        data.loc[duplicate_rank, "symbol"].astype(str).unique()
+                    )
+                ),
+            )
+        data = data.drop_duplicates(rank_columns)
+    selected = (
+        data.sort_values(
+            [
+                "symbol",
+                "visible_date",
+                "period_end",
+                "update_rank",
+                "actual_announced_at",
+            ],
+            kind="stable",
+            na_position="first",
+        )
+        .groupby(["symbol", "visible_date"], as_index=False)
+        .tail(1)
+    )
+    return selected[["symbol", "visible_date", field]].reset_index(drop=True)
 
 
 def _latest_financial_metadata(data: pd.DataFrame, as_of: date) -> pd.DataFrame:

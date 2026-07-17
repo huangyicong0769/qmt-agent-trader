@@ -11,6 +11,7 @@ from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.bars import column_quality, load_daily_bars
 from qmt_agent_trader.data.field_sources import FieldSourceIndex, FieldSourceSpec, FillPolicy
 from qmt_agent_trader.data.frequency import Frequency
+from qmt_agent_trader.data.fundamentals import financial_field_asof_source
 from qmt_agent_trader.data.integrity import require_unique_keys, require_unique_symbol_dates
 from qmt_agent_trader.data.macro import get_macro_dataset, macro_visible_date
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
@@ -264,6 +265,29 @@ def _join_asof_snapshot_field(
     raw = lake.read_parquet("raw", source.raw_dataset_name)
     if source_field not in raw.columns:
         return _add_missing_field(panel, metadata, field, source, reason="raw_field_missing")
+    if source.api_name in {
+        "income",
+        "balancesheet",
+        "cashflow",
+        "fina_indicator",
+    }:
+        data = financial_field_asof_source(
+            raw,
+            field=source_field,
+            source=source.raw_dataset_name,
+        ).rename(columns={source_field: field})
+        if symbols:
+            data = data[data["symbol"].astype(str).isin(symbols)]
+        data = data[data["visible_date"] <= end]
+        if data.empty:
+            return _add_missing_field(
+                panel,
+                metadata,
+                field,
+                source,
+                reason="no_source_rows",
+            )
+        return _join_symbol_asof(panel, data, field)
     data = raw.copy()
     if source.entity_column is not None:
         if source.entity_column not in data.columns:
