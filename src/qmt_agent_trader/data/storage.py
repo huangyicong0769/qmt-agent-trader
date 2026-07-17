@@ -14,6 +14,9 @@ import pandas as pd
 
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.database import DatabaseCoordinator
+from qmt_agent_trader.persistence.dataset_manifests import (
+    ensure_dataset_content_fingerprint_assume_dataset_locked,
+)
 from qmt_agent_trader.persistence.errors import StorageMigrationRequiredError
 from qmt_agent_trader.persistence.locks import LockManager
 
@@ -128,8 +131,23 @@ class DataLake:
         writable = frame
         if len(frame.columns) == 0:
             writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
-        self.atomic_store.write_parquet(path, writable)
+        with self.lock_manager.resource_lock(path):
+            self.atomic_store.write_parquet_assume_locked(path, writable)
+            ensure_dataset_content_fingerprint_assume_dataset_locked(
+                path,
+                atomic_store=self.atomic_store,
+            )
         return path
+
+    def dataset_fingerprint(self, layer: str, name: str) -> str | None:
+        path = self.dataset_path(layer, name)
+        if not path.exists():
+            return None
+        with self.lock_manager.resource_lock(path):
+            return ensure_dataset_content_fingerprint_assume_dataset_locked(
+                path,
+                atomic_store=self.atomic_store,
+            )
 
     def write_incremental_parquet(
         self,
@@ -171,6 +189,10 @@ class DataLake:
             if len(merged.columns) == 0:
                 writable = pd.DataFrame({"_empty": pd.Series(dtype="bool")})
             self.atomic_store.write_parquet_assume_locked(path, writable)
+            ensure_dataset_content_fingerprint_assume_dataset_locked(
+                path,
+                atomic_store=self.atomic_store,
+            )
             table_name = name if name.replace("_", "").isalnum() else name.replace("/", "_")
             self.register_parquet(table_name, layer, name)
         return path
