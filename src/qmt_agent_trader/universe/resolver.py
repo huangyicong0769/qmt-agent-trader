@@ -96,6 +96,17 @@ def _field_evidence_eligible_rows(
     ].copy()
 
 
+def _requires_stock_master(
+    spec: UniverseSpec,
+) -> bool:
+    if "stock" in spec.asset_types:
+        return True
+    return spec.selection.mode in {
+        "industry",
+        "theme",
+    }
+
+
 class UniverseResolver:
     def __init__(self, lake: DataLake) -> None:
         self.lake = lake
@@ -272,9 +283,21 @@ class UniverseResolver:
             session.effective_date,
             spec.asset_types,
         )
-        stock_basic = security_master_asof(
-            self._stock_basic(),
-            session.effective_date,
+        stock_basic = (
+            security_master_asof(
+                self._stock_basic(),
+                session.effective_date,
+            )
+            if _requires_stock_master(spec)
+            else pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "display_name",
+                    "list_date",
+                    "delist_date",
+                    "listed_as_of",
+                ]
+            )
         )
         require_historical_classification_support(
             selection_mode=spec.selection.mode,

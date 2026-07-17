@@ -534,3 +534,157 @@ def test_etf_category_candidate_helper_never_falls_back_to_all_etfs(
         )
 
     assert exc_info.value.code == "UNIVERSE_PIT_CLASSIFICATION_NOT_READY"
+
+
+def test_etf_only_snapshot_ignores_unrelated_invalid_stock_basic(
+    tmp_path,
+) -> None:
+    lake = DataLake(
+        tmp_path / "lake",
+        tmp_path / "research.duckdb",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "exchange": "SSE",
+                    "cal_date": "20240102",
+                    "is_open": 1,
+                },
+                {
+                    "exchange": "SZSE",
+                    "cal_date": "20240102",
+                    "is_open": 1,
+                },
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "trade_date": "20240102",
+                    "open": 3.5,
+                    "high": 3.6,
+                    "low": 3.4,
+                    "close": 3.55,
+                    "vol": 100.0,
+                    "amount": 350.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/fund_daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "trade_date": "20240102",
+                    "up_limit": 3.85,
+                    "down_limit": 3.15,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "list_date": "bad-date",
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
+    )
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "etf-only",
+            "name": "ETF only",
+            "source": "user_defined",
+            "asset_types": ["etf"],
+            "selection": {"mode": "all"},
+            "filters": {"min_listed_days": 0},
+        }
+    )
+
+    result = UniverseResolver(lake).build(
+        spec,
+        as_of_date="20240102",
+    )
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["510300.SH"]
+
+
+def test_mixed_universe_still_validates_stock_basic(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+    monkeypatch.setattr(
+        resolver,
+        "_stock_basic",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "list_date": "bad-date",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_resolve_effective_session",
+        lambda *_args, **_kwargs: resolver_module._ResolvedUniverseSession(
+            requested_as_of=date(2024, 1, 2),
+            effective_date=date(2024, 1, 2),
+        ),
+    )
+    monkeypatch.setattr(
+        resolver,
+        "_load_recent_bars",
+        lambda *_args: pd.DataFrame(
+            [
+                {
+                    "symbol": "000001.SZ",
+                    "trade_date": date(2024, 1, 2),
+                    "asset_type": "stock",
+                },
+                {
+                    "symbol": "510300.SH",
+                    "trade_date": date(2024, 1, 2),
+                    "asset_type": "etf",
+                },
+            ]
+        ),
+    )
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "mixed",
+            "name": "Mixed",
+            "source": "user_defined",
+            "asset_types": ["stock", "etf"],
+            "selection": {"mode": "all"},
+            "filters": {"min_listed_days": 0},
+        }
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        resolver._resolve_for_date(
+            spec,
+            as_of_date="20240102",
+        )
+
+    assert exc_info.value.code == "UNIVERSE_SECURITY_MASTER_INVALID"
