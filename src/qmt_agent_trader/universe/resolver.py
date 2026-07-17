@@ -76,24 +76,32 @@ def _field_evidence_eligible_rows(
     if count_field not in frame.columns:
         return frame.iloc[0:0].copy()
 
-    values = pd.to_numeric(
-        frame[field],
-        errors="coerce",
+    complete_evidence = pd.Series(
+        (
+            _has_complete_liquidity_evidence(value, count)
+            for value, count in zip(
+                frame[field],
+                frame[count_field],
+                strict=True,
+            )
+        ),
+        index=frame.index,
+        dtype=bool,
     )
-    finite_values = values.map(
-        lambda value: bool(
-            pd.notna(value)
-            and math.isfinite(float(value))
-        )
+    return frame.loc[complete_evidence].copy()
+
+
+def _has_complete_liquidity_evidence(
+    value: Any,
+    observation_count: Any,
+) -> bool:
+    numeric_value = _float_or_none(value)
+    numeric_count = _float_or_none(observation_count)
+    return bool(
+        numeric_value is not None
+        and math.isfinite(numeric_value)
+        and numeric_count == float(LIQUIDITY_WINDOW_SESSIONS)
     )
-    counts = pd.to_numeric(
-        frame[count_field],
-        errors="coerce",
-    )
-    return frame.loc[
-        finite_values
-        & counts.eq(LIQUIDITY_WINDOW_SESSIONS)
-    ].copy()
 
 
 def _requires_stock_master(
@@ -474,7 +482,10 @@ class UniverseResolver:
                 return "volume_20d_coverage_incomplete"
         if (
             filters.min_avg_amount_20d is not None
-            and _float_or_none(row.get("avg_amount_20d")) is None
+            and not _has_complete_liquidity_evidence(
+                row.get("avg_amount_20d"),
+                row.get("amount_observation_count"),
+            )
         ):
             return "amount_coverage_missing"
         if filters.min_avg_amount_20d is not None and float(row.get("avg_amount_20d") or 0) < float(
@@ -483,7 +494,10 @@ class UniverseResolver:
             return "avg_amount_20d_below_minimum"
         if (
             filters.min_avg_volume_20d is not None
-            and _float_or_none(row.get("avg_volume_20d")) is None
+            and not _has_complete_liquidity_evidence(
+                row.get("avg_volume_20d"),
+                row.get("volume_observation_count"),
+            )
         ):
             return "volume_coverage_missing"
         if filters.min_avg_volume_20d is not None and float(row.get("avg_volume_20d") or 0) < float(
