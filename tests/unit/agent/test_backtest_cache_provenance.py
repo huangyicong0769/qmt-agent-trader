@@ -205,7 +205,7 @@ def test_backtest_provenance_reuses_dataset_manifests(
     )
 
 
-def test_provenance_records_universe_session_semantic_version(
+def test_provenance_records_pit_rule_semantic_version(
     tmp_path,
 ) -> None:
     lake = DataLake(
@@ -239,5 +239,5 @@ def test_provenance_records_universe_session_semantic_version(
     )
 
     assert manifest["engine_semantic_version"] == (
-        "2026-07-universe-session-integrity-v4"
+        "2026-07-universe-pit-rule-integrity-v5"
     )

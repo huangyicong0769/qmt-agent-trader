@@ -71,8 +71,8 @@ subsequent cache-key construction reads the small manifest instead of the full
 Parquet payload. Strategy specs, saved state, strategy and factor code, resolved
 universe payloads, and all selected raw datasets remain part of provenance. The
 same manifest is stored in the completed response and report config. Engine
-semantic version `2026-07-universe-session-integrity-v4` invalidates successful
-cache entries created before the session-aligned universe contract.
+semantic version `2026-07-universe-pit-rule-integrity-v5` invalidates successful
+cache entries created before the PIT rule-integrity contract.
 
 The adapter ranks normalized factor values descending. `lower_is_better` negates the
 declared single factor before ranking and IC diagnostics. Existing holdings inside
@@ -172,6 +172,12 @@ forward as current eligibility evidence. Listing eligibility uses `list_date` an
 filters. Historical industry/theme selection blocks without dated classification
 records.
 
+`etf_category` is a point-in-time classification mode. It requires explicit
+category values and dated classification evidence. Current `fund_basic`
+metadata, missing classification datasets, and empty category values never
+fall back to all ETFs. Until a dated source is implemented, historical ETF
+category requests fail with `UNIVERSE_PIT_CLASSIFICATION_NOT_READY`.
+
 Index-weight universes use the latest snapshot on or before the as-of date. Interval
 membership uses `in_date <= as_of < out_date`.
 
@@ -201,12 +207,17 @@ partial snapshot raises `UNIVERSE_MARKET_SESSION_NOT_READY`.
 
 `avg_amount_20d` and `avg_volume_20d` require exactly 20 official sessions and
 20 non-null observations for the corresponding field. Short listings, missing
-sessions, suspension gaps, and null values leave the metric unavailable and
-produce explicit observation-count evidence.
+sessions, suspension gaps, null values, and non-finite values leave the metric
+unavailable and produce explicit observation-count evidence.
 
 Rows with incomplete 20-session liquidity evidence are excluded before
 `avg_amount_20d` or `avg_volume_20d` ranking. They are never used to fill a
 requested Top-N after valid candidates are exhausted.
+
+The same evidence gate applies to declarative selection rules and ranking.
+Rules using `avg_amount_20d` or `avg_volume_20d` cannot evaluate a row unless
+its corresponding observation count is exactly 20 and the metric is finite.
+This includes negative operators such as `ne` and `not_in`.
 
 ## Point-in-time date and index evidence
 
@@ -224,11 +235,20 @@ valid normalized member exists. Invalid member identifiers fail closed with
 `INDEX_MEMBERSHIP_SOURCE_INVALID`; no current membership raises
 `INDEX_MEMBERSHIP_NOT_READY`.
 
+Listing intervals with `delist_date < list_date` and index membership intervals
+with `out_date <= in_date` are invalid source evidence. Index members are
+normalized before duplicate validation, so aliases such as `000001` and
+`000001.SZ` are treated as conflicting duplicate records.
+
 ## ETF opening state
 
 ETF opening limit state uses `tushare/stk_limit`. ETF ST state is not applicable, and
 presence of a valid exact-session `fund_daily` row is the evidence that the row is
 tradable rather than suspended.
+
+Pure ETF universes do not read or validate unrelated stock master data. Mixed
+or stock universes continue to require strict point-in-time `stock_basic`
+evidence.
 
 ## Financial revisions
 
