@@ -27,6 +27,7 @@ def _result(overlap: float | None) -> FactorRankResearchResult:
 def _config() -> StrategyBacktestConfig:
     return StrategyBacktestConfig(
         strategy_id="factor_rank",
+        strategy_identity_mode="adhoc",
         start_date="20240101",
         end_date="20240131",
     )

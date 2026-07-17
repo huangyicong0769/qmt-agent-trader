@@ -47,6 +47,7 @@ def test_diagnostics_use_canonical_cost_drag_and_overlap() -> None:
     result = factor_rank_result()
     config = StrategyBacktestConfig(
         strategy_id="factor_rank",
+        strategy_identity_mode="adhoc",
         start_date="20240101",
         end_date="20240331",
         initial_cash=1_000_000,
@@ -92,6 +93,7 @@ def test_missing_overlap_is_not_computed_not_passed() -> None:
     result = replace(factor_rank_result(), average_top_n_overlap=None)
     config = StrategyBacktestConfig(
         strategy_id="factor_rank",
+        strategy_identity_mode="adhoc",
         start_date="20240101",
         end_date="20240331",
     )

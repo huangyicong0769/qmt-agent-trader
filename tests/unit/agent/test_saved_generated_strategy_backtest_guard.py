@@ -127,6 +127,7 @@ def test_direct_adapter_call_blocks_registry_generated_implementation(
         StrategyRegistry(wired_strategy_tools.root.parent / "strategies"),
         StrategyBacktestConfig(
             strategy_id=saved.strategy_id,
+            strategy_identity_mode="registry",
             start_date="20240101",
             end_date="20240331",
         ),

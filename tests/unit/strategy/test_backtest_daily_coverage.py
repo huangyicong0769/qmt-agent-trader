@@ -11,6 +11,7 @@ def test_abrupt_cross_section_collapse_is_blocking() -> None:
     }
     config = StrategyBacktestConfig(
         strategy_id="strategy",
+        strategy_identity_mode="adhoc",
         start_date="20240101",
         end_date="20240630",
         top_n=20,
@@ -25,6 +26,7 @@ def test_small_universe_does_not_trigger_broad_coverage_gate() -> None:
     }
     config = StrategyBacktestConfig(
         strategy_id="strategy",
+        strategy_identity_mode="adhoc",
         start_date="20240101",
         end_date="20240630",
         top_n=5,

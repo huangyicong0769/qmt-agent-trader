@@ -20,7 +20,7 @@ def test_factor_only_request_does_not_load_same_named_saved_strategy(
 ) -> None:
     saved_spec = StrategySpec.model_validate(
         {
-            "strategy_id": "factor_momentum_20d",
+            "strategy_id": "adhoc_factor_momentum_20d",
             "name": "Saved collision",
             "kind": "FACTOR_RANK_LONG_ONLY",
             "factors": [{"factor_id": "momentum_20d"}],
@@ -49,5 +49,6 @@ def test_factor_only_request_does_not_load_same_named_saved_strategy(
     assert not isinstance(intent, dict)
     assert intent.saved_strategy is None
     assert intent.strategy_id == "adhoc_factor_momentum_20d"
+    assert intent.strategy_identity_mode == "adhoc"
     assert intent.strategy_spec.portfolio.top_n == 20
     assert intent.strategy_spec.rebalance.frequency == "weekly"

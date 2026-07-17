@@ -61,6 +61,7 @@ def test_cache_key_changes_with_complete_provenance(tmp_path) -> None:
     )
     config = StrategyBacktestConfig(
         strategy_id=spec.strategy_id,
+        strategy_identity_mode="inline",
         strategy_spec=spec,
         factor_name=factor_id,
         start_date="20240101",

@@ -45,6 +45,7 @@ def spec() -> StrategySpec:
 def matching_config() -> StrategyBacktestConfig:
     return StrategyBacktestConfig(
         strategy_id="weekly_value",
+        strategy_identity_mode="inline",
         strategy_spec=spec(),
         factor_name="pb",
         start_date="20240101",

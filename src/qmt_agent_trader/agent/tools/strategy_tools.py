@@ -77,11 +77,13 @@ _cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
 BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v3"
 BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-factor-universe-pit-v2"
+StrategyIdentityMode = Literal["registry", "inline", "adhoc"]
 
 
 @dataclass(frozen=True)
 class _ResolvedBacktestIntent:
     strategy_id: str
+    strategy_identity_mode: StrategyIdentityMode
     strategy_spec: StrategySpec
     saved_strategy: SavedStrategy | None
     effective_code_path: str | None
@@ -583,6 +585,7 @@ def _run_backtest(input_data: dict[str, Any], context: ToolContext) -> dict[str,
     single_factor = strategy_spec.factors[0] if len(strategy_spec.factors) == 1 else None
     semantic_config = StrategyBacktestConfig(
         strategy_id=strategy_spec.strategy_id,
+        strategy_identity_mode=intent.strategy_identity_mode,
         strategy_spec=strategy_spec,
         implementation_code_path=effective_code_path,
         factor_name=factor_name,
@@ -776,6 +779,12 @@ def _resolve_backtest_intent(
         if explicit_identity
         else None
     )
+    if saved_strategy is not None:
+        strategy_identity_mode: StrategyIdentityMode = "registry"
+    elif inline_spec is not None:
+        strategy_identity_mode = "inline"
+    else:
+        strategy_identity_mode = "adhoc"
     if saved_strategy is not None and inline_spec is not None:
         if strategy_spec_fingerprint(saved_strategy.spec) != strategy_spec_fingerprint(
             inline_spec
@@ -864,6 +873,7 @@ def _resolve_backtest_intent(
     ) or (factor_name,)
     return _ResolvedBacktestIntent(
         strategy_id=effective_id,
+        strategy_identity_mode=strategy_identity_mode,
         strategy_spec=strategy_spec,
         saved_strategy=saved_strategy,
         effective_code_path=effective_code_path,
