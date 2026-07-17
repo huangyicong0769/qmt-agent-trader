@@ -99,6 +99,77 @@ def require_historical_classification_support(
         )
 
 
+def index_weight_members_asof(
+    frame: pd.DataFrame,
+    index_codes: list[str],
+    as_of: date,
+) -> list[str]:
+    required = {"index_code", "con_code", "trade_date"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise BacktestUniverseIntegrityError(
+            code="INDEX_MEMBERSHIP_SOURCE_INVALID",
+            message="index_weight lacks required columns",
+            field="raw/tushare/index_weight",
+            details={"missing_columns": missing},
+        )
+    data = frame.copy()
+    data["trade_date"] = _required_date(
+        data["trade_date"],
+        field="raw/tushare/index_weight.trade_date",
+    )
+    data = data[
+        data["index_code"].astype(str).isin(index_codes)
+        & data["trade_date"].map(lambda value: value <= as_of)
+    ]
+    members: list[str] = []
+    for _index_code, group in data.groupby("index_code", sort=True):
+        snapshot_date = group["trade_date"].max()
+        snapshot = group[group["trade_date"].eq(snapshot_date)]
+        require_unique_keys(
+            snapshot,
+            keys=("index_code", "con_code", "trade_date"),
+            code="DUPLICATE_UNIVERSE_SOURCE_KEY",
+            field="raw/tushare/index_weight",
+        )
+        members.extend(snapshot["con_code"].astype(str).tolist())
+    return sorted(dict.fromkeys(members))
+
+
+def index_interval_members_asof(
+    frame: pd.DataFrame,
+    index_codes: list[str],
+    as_of: date,
+) -> list[str]:
+    required = {"index_code", "con_code", "in_date", "out_date"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise BacktestUniverseIntegrityError(
+            code="INDEX_MEMBERSHIP_SOURCE_INVALID",
+            message="index_member lacks effective interval columns",
+            field="raw/tushare/index_member",
+            details={"missing_columns": missing},
+        )
+    data = frame.copy()
+    data["in_date"] = _required_date(
+        data["in_date"],
+        field="raw/tushare/index_member.in_date",
+    )
+    data["out_date"] = _optional_date(data["out_date"])
+    active = data[
+        data["index_code"].astype(str).isin(index_codes)
+        & data["in_date"].map(lambda value: value <= as_of)
+        & data["out_date"].map(lambda value: pd.isna(value) or value > as_of)
+    ]
+    require_unique_keys(
+        active,
+        keys=("index_code", "con_code"),
+        code="DUPLICATE_UNIVERSE_SOURCE_KEY",
+        field="raw/tushare/index_member",
+    )
+    return sorted(active["con_code"].astype(str).unique().tolist())
+
+
 def _required_date(values: pd.Series, *, field: str) -> pd.Series:
     parsed = pd.to_datetime(
         values.astype("string"), format="mixed", errors="coerce"

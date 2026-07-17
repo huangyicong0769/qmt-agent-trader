@@ -18,6 +18,8 @@ from qmt_agent_trader.data.trading_calendar import (
 from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
 from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
 from qmt_agent_trader.universe.pit_metadata import (
+    index_interval_members_asof,
+    index_weight_members_asof,
     require_historical_classification_support,
     security_master_asof,
 )
@@ -531,28 +533,32 @@ class UniverseResolver:
         return self.lake.read_parquet("raw", "tushare/stock_basic")
 
     def _index_constituents(self, index_codes: list[str], as_of_date: str) -> list[str]:
-        for dataset in ("tushare/index_weight", "tushare/index_member"):
-            path = self.lake.dataset_path("raw", dataset)
-            if not path.exists():
-                continue
-            raw = self.lake.read_parquet_filtered(
-                "raw",
-                dataset,
-                end=as_of_date,
-                columns=["index_code", "con_code", "ts_code", "trade_date"],
+        as_of = _parse_date(as_of_date)
+        weight_path = self.lake.dataset_path("raw", "tushare/index_weight")
+        if weight_path.exists():
+            members = index_weight_members_asof(
+                self.lake.read_parquet("raw", "tushare/index_weight"),
+                index_codes,
+                as_of,
             )
-            if raw.empty or "index_code" not in raw.columns:
-                continue
-            code_column = "con_code" if "con_code" in raw.columns else "ts_code"
-            matches = raw[raw["index_code"].astype(str).isin(index_codes)]
-            if not matches.empty:
+            if members:
                 return [
-                    symbol
-                    for symbol in (
-                        normalize_symbol(item) for item in matches[code_column].astype(str)
-                    )
-                    if symbol is not None
+                    normalized
+                    for item in members
+                    if (normalized := normalize_symbol(item)) is not None
                 ]
+        member_path = self.lake.dataset_path("raw", "tushare/index_member")
+        if member_path.exists():
+            members = index_interval_members_asof(
+                self.lake.read_parquet("raw", "tushare/index_member"),
+                index_codes,
+                as_of,
+            )
+            return [
+                normalized
+                for item in members
+                if (normalized := normalize_symbol(item)) is not None
+            ]
         return []
 
     def _rebalance_dates(
