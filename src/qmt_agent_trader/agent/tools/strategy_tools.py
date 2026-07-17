@@ -768,13 +768,12 @@ def _resolve_backtest_intent(
     inline_spec = parsed
     top_level_id = str(input_data.get("strategy_id") or "").strip()
     factor_name = str(input_data.get("factor_name") or "").strip()
-    effective_id = (
-        top_level_id
-        or (inline_spec.strategy_id if inline_spec is not None else "")
-        or (f"factor_{factor_name}" if factor_name else "")
-    )
+    inline_id = inline_spec.strategy_id if inline_spec is not None else ""
+    explicit_identity = top_level_id or inline_id
     saved_strategy = (
-        _strategy_registry().get_strategy(effective_id) if effective_id else None
+        _strategy_registry().get_strategy(explicit_identity)
+        if explicit_identity
+        else None
     )
     if saved_strategy is not None and inline_spec is not None:
         if strategy_spec_fingerprint(saved_strategy.spec) != strategy_spec_fingerprint(
@@ -783,12 +782,12 @@ def _resolve_backtest_intent(
             return {
                 "status": "BLOCKED",
                 "reason": "SAVED_STRATEGY_SPEC_MISMATCH",
-                "strategy_id": effective_id,
+                "strategy_id": explicit_identity,
                 "research_only": True,
                 "live_trading_allowed": False,
             }
     strategy_spec = saved_strategy.spec if saved_strategy is not None else inline_spec
-    if strategy_spec is None and top_level_id and not factor_name:
+    if strategy_spec is None and top_level_id:
         return {
             "status": "STRATEGY_NOT_FOUND",
             "strategy_id": top_level_id,
@@ -828,7 +827,7 @@ def _resolve_backtest_intent(
     )
     if strategy_spec is None:
         strategy_spec = StrategySpec(
-            strategy_id=effective_id or f"factor_{factor_name}",
+            strategy_id=f"adhoc_factor_{factor_name}",
             name=f"Factor baseline: {factor_name}",
             kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
             universe="",
@@ -836,7 +835,7 @@ def _resolve_backtest_intent(
             portfolio={"top_n": requested_top_n},
             rebalance={"frequency": strategy_frequency},
         )
-        effective_id = strategy_spec.strategy_id
+    effective_id = strategy_spec.strategy_id
     effective_code_path = _effective_implementation_code_path(
         input_data, saved_strategy
     )
