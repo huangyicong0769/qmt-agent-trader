@@ -11,6 +11,7 @@ from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
 )
+from qmt_agent_trader.strategy.models import StrategySpec
 from qmt_agent_trader.strategy.registry import StrategyRegistry
 
 
@@ -162,6 +163,17 @@ def test_adapter_loads_factor_lookback_before_requested_start(
     monkeypatch.setattr(execution_adapter, "build_target_frequency_panel", fake_panel)
     monkeypatch.setattr(execution_adapter, "FactorRankResearchRunner", FakeRunner)
 
+    strategy_spec = StrategySpec.model_validate(
+        {
+            "strategy_id": "factor_reversal_5d",
+            "name": "factor_reversal_5d",
+            "kind": "FACTOR_RANK_LONG_ONLY",
+            "factors": [{"factor_id": "reversal_5d"}],
+            "portfolio": {"top_n": 1},
+            "rebalance": {"frequency": "daily"},
+        }
+    )
+
     with pytest.raises(BacktestDataIntegrityError, match="stop after warm-up"):
         run_strategy_backtest(
             lake,
@@ -169,6 +181,7 @@ def test_adapter_loads_factor_lookback_before_requested_start(
             StrategyBacktestConfig(
                 strategy_id="factor_reversal_5d",
                 strategy_identity_mode="adhoc",
+                strategy_spec=strategy_spec,
                 factor_name="reversal_5d",
                 start_date="20240109",
                 end_date="20240110",
