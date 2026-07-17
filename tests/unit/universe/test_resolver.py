@@ -171,6 +171,63 @@ def test_amount_filter_rejects_incomplete_twenty_day_window() -> None:
     assert reason == "amount_20d_coverage_incomplete"
 
 
+@pytest.mark.parametrize(
+    ("filter_field", "metric_field", "count_field", "expected_reason"),
+    [
+        (
+            "min_avg_amount_20d",
+            "avg_amount_20d",
+            "amount_observation_count",
+            "amount_coverage_missing",
+        ),
+        (
+            "min_avg_volume_20d",
+            "avg_volume_20d",
+            "volume_observation_count",
+            "volume_coverage_missing",
+        ),
+    ],
+)
+def test_liquidity_filter_rejects_non_finite_metric(
+    filter_field: str,
+    metric_field: str,
+    count_field: str,
+    expected_reason: str,
+) -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "liquidity_filter",
+            "name": "Liquidity filter",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+            "filters": {
+                "min_listed_days": 0,
+                filter_field: 1.0,
+            },
+        }
+    )
+    row = {
+        "symbol": "000001.SZ",
+        "asset_type": "stock",
+        "has_bar_coverage": True,
+        "listed_as_of": True,
+        "list_date": "20000101",
+        "st": False,
+        "suspended": False,
+        metric_field: float("inf"),
+        count_field: 20,
+    }
+
+    reason = UniverseResolver.__new__(UniverseResolver)._exclusion_reason(
+        spec,
+        row,
+        as_of_date="20240131",
+    )
+
+    assert reason == expected_reason
+
+
 def test_multiple_indices_resolve_from_independent_sources(tmp_path) -> None:
     lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
     lake.write_parquet(
