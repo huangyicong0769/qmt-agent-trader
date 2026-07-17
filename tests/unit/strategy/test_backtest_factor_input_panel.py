@@ -242,9 +242,21 @@ def _config(
     end_date: str = "20240320",
     symbols: list[str],
 ) -> StrategyBacktestConfig:
+    strategy_id = f"factor_{factor_name}"
+    strategy_spec = StrategySpec.model_validate(
+        {
+            "strategy_id": strategy_id,
+            "name": strategy_id,
+            "kind": "FACTOR_RANK_LONG_ONLY",
+            "factors": [{"factor_id": factor_name}],
+            "portfolio": {"top_n": 1},
+            "rebalance": {"frequency": "daily"},
+        }
+    )
     return StrategyBacktestConfig(
-        strategy_id=f"factor_{factor_name}",
+        strategy_id=strategy_id,
         strategy_identity_mode="adhoc",
+        strategy_spec=strategy_spec,
         factor_name=factor_name,
         start_date=start_date,
         end_date=end_date,
