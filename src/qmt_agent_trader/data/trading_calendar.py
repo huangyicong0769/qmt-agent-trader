@@ -23,7 +23,9 @@ class TradingSessionWindow:
         return self.expected_dates[0]
 
 
-def _parse_boundary(value: str) -> date:
+def _parse_boundary(value: str | date) -> date:
+    if isinstance(value, date):
+        return value
     for fmt in ("%Y%m%d", "%Y-%m-%d"):
         try:
             return datetime.strptime(str(value), fmt).date()
@@ -61,6 +63,27 @@ def load_open_sessions(
         warmup_sessions=0,
         exchanges=exchanges,
     ).expected_dates
+
+
+def latest_open_session_on_or_before(
+    lake: DataLake,
+    *,
+    as_of: str | date,
+    exchanges: tuple[str, ...] = ("SSE", "SZSE"),
+) -> date:
+    boundary = as_of if isinstance(as_of, date) else _parse_boundary(str(as_of))
+    states = _load_normalized_calendar_states(lake, exchanges=exchanges)
+    candidates = [
+        day for day, is_open in states.items() if day <= boundary and is_open == 1
+    ]
+    if not candidates:
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_EMPTY",
+            message="no open session exists on or before the requested date",
+            field="trade_cal",
+            details={"as_of": boundary.isoformat()},
+        )
+    return max(candidates)
 
 
 def load_session_window(
