@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
+from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.models import UniverseFilters, UniverseSelection, UniverseSpec
 from qmt_agent_trader.universe.resolver import UniverseResolver
@@ -16,7 +18,7 @@ def test_resolver_builds_snapshot_stock_universe_with_exclusions(tmp_path: Path)
             [
                 _bar("000001.SZ", "20240103"),
                 _bar("000002.SZ", "20240103", suspended=True),
-                _bar("000003.SZ", "20240103"),
+                _bar("000003.SZ", "20240103", st=True),
             ]
         ),
         "raw",
@@ -61,7 +63,7 @@ def test_resolver_builds_snapshot_stock_universe_with_exclusions(tmp_path: Path)
     assert excluded["000003.SZ"] == "st"
 
 
-def test_resolver_tolerates_missing_list_date(tmp_path: Path) -> None:
+def test_resolver_rejects_missing_list_date(tmp_path: Path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
         pd.DataFrame([_bar("000001.SZ", "20240103")]),
@@ -94,14 +96,13 @@ def test_resolver_tolerates_missing_list_date(tmp_path: Path) -> None:
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = _resolver(lake).build(spec, as_of_date="20240103")
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        _resolver(lake).build(spec, as_of_date="20240103")
 
-    assert result["status"] == "OK"
-    assert result["symbols"] == ["000001.SZ"]
-    assert "Invalid isoformat string" not in str(result)
+    assert exc_info.value.code == "UNIVERSE_SECURITY_MASTER_INVALID"
 
 
-def test_resolver_reports_malformed_list_date_without_crashing(tmp_path: Path) -> None:
+def test_resolver_rejects_malformed_list_date(tmp_path: Path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     lake.write_parquet(
         pd.DataFrame([_bar("000001.SZ", "20240103")]),
@@ -134,17 +135,14 @@ def test_resolver_reports_malformed_list_date_without_crashing(tmp_path: Path) -
         created_at="2026-07-09T00:00:00+08:00",
     )
 
-    result = _resolver(lake).build(
-        spec,
-        as_of_date="20240103",
-        include_exclusions=True,
-    )
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        _resolver(lake).build(
+            spec,
+            as_of_date="20240103",
+            include_exclusions=True,
+        )
 
-    assert result["status"] == "OK"
-    assert result["symbols"] == []
-    assert result["metadata"]["excluded_symbols"] == [
-        {"symbol": "000001.SZ", "reason": "invalid_list_date"}
-    ]
+    assert exc_info.value.code == "UNIVERSE_SECURITY_MASTER_INVALID"
 
 
 def test_broad_universe_uses_per_symbol_latest_asof_not_global_latest(
@@ -230,7 +228,13 @@ def test_snapshot_universe_exposes_staleness_diagnostics(tmp_path: Path) -> None
     assert diagnostics["recent_bar_symbol_count"] == 3
 
 
-def _bar(symbol: str, trade_date: str, *, suspended: bool = False) -> dict[str, object]:
+def _bar(
+    symbol: str,
+    trade_date: str,
+    *,
+    suspended: bool = False,
+    st: bool = False,
+) -> dict[str, object]:
     return {
         "ts_code": symbol,
         "trade_date": trade_date,
@@ -241,6 +245,7 @@ def _bar(symbol: str, trade_date: str, *, suspended: bool = False) -> dict[str, 
         "vol": 1000.0,
         "amount": 10000.0,
         "suspended": suspended,
+        "st": st,
     }
 
 
@@ -271,19 +276,12 @@ def _resolver(lake: DataLake) -> UniverseResolver:
         "raw",
         "tushare/stk_limit",
     )
-    stock_basic = lake.read_parquet("raw", "tushare/stock_basic")
-    st_symbols = set(
-        stock_basic.loc[
-            stock_basic["name"].astype(str).str.contains("ST", case=False, na=False),
-            "ts_code",
-        ].astype(str)
-    )
     st_state = (
         bars["st"].fillna(False).astype(bool)
         if "st" in bars.columns
         else pd.Series(False, index=bars.index)
     )
-    st_symbols.update(bars.loc[st_state, "ts_code"].astype(str))
+    st_symbols = set(bars.loc[st_state, "ts_code"].astype(str))
     namechange = pd.DataFrame(
         [
             {
