@@ -9,7 +9,10 @@ import pandas as pd
 from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.data.trade_state import normalize_stock_opening_trade_state
+from qmt_agent_trader.data.trade_state import (
+    normalize_etf_opening_trade_state,
+    normalize_stock_opening_trade_state,
+)
 
 CANONICAL_BAR_COLUMNS = [
     "symbol",
@@ -27,13 +30,6 @@ CANONICAL_BAR_COLUMNS = [
     "limit_up_at_open",
     "limit_down_at_open",
 ]
-
-_REQUIRED_TRADE_STATE_DATASETS = {
-    "suspended": "tushare/suspend_d",
-    "limit_up_down": "tushare/stk_limit",
-    "st": "tushare/namechange",
-}
-
 
 def normalize_tushare_daily(frame: pd.DataFrame, *, asset_type: str | None = None) -> pd.DataFrame:
     resolved_asset_type = asset_type or "stock"
@@ -178,23 +174,11 @@ def load_daily_bars(
         result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
         return result
 
-    etf_bars = bars[bars["asset_type"] == "etf"]
-    if not etf_bars.empty:
-        raise BacktestDataIntegrityError(
-            code="UNSUPPORTED_ETF_TRADE_STATE_MODEL",
-            message="ETF rows cannot use stock-only stk_limit evidence",
-            field="trade_state",
-            symbols=tuple(sorted(etf_bars["symbol"].astype(str).unique())),
-        )
-
-    _require_trade_state_sources(lake)
-    suspend = lake.read_parquet_filtered(
-        "raw",
-        "tushare/suspend_d",
-        columns=["ts_code", "trade_date", "suspend_type"],
-        start=start,
-        end=end,
-        symbols=symbols,
+    stock_bars = bars[bars["asset_type"].eq("stock")].copy()
+    etf_bars = bars[bars["asset_type"].eq("etf")].copy()
+    _require_trade_state_sources(
+        lake,
+        require_stock_metadata=not stock_bars.empty,
     )
     stk_limit = lake.read_parquet_filtered(
         "raw",
@@ -204,22 +188,44 @@ def load_daily_bars(
         end=end,
         symbols=symbols,
     )
-    namechange = _filter_namechange_overlap(
-        lake.read_parquet_filtered(
+    parts: list[pd.DataFrame] = []
+    if not stock_bars.empty:
+        suspend = lake.read_parquet_filtered(
             "raw",
-            "tushare/namechange",
-            columns=["ts_code", "name", "start_date", "end_date"],
+            "tushare/suspend_d",
+            columns=["ts_code", "trade_date", "suspend_type"],
+            start=start,
+            end=end,
             symbols=symbols,
-        ),
-        start=start,
-        end=end,
-    )
-    bars = enrich_trade_states(
-        bars,
-        suspend=suspend,
-        stk_limit=stk_limit,
-        namechange=namechange,
-    )
+        )
+        namechange = _filter_namechange_overlap(
+            lake.read_parquet_filtered(
+                "raw",
+                "tushare/namechange",
+                columns=["ts_code", "name", "start_date", "end_date"],
+                symbols=symbols,
+            ),
+            start=start,
+            end=end,
+        )
+        parts.append(
+            normalize_stock_opening_trade_state(
+                stock_bars,
+                suspend=suspend,
+                stk_limit=stk_limit,
+                namechange=namechange,
+            )
+        )
+    if not etf_bars.empty:
+        parts.append(
+            normalize_etf_opening_trade_state(
+                etf_bars,
+                stk_limit=stk_limit,
+            )
+        )
+    bars = pd.concat(parts, ignore_index=True)
+    bars.attrs["column_quality"] = _merge_column_quality(parts)
+    bars.attrs["trade_state_quality"] = _merge_trade_state_quality(parts)
 
     result = bars.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
@@ -227,10 +233,17 @@ def load_daily_bars(
     return result
 
 
-def _require_trade_state_sources(lake: DataLake) -> None:
+def _require_trade_state_sources(
+    lake: DataLake,
+    *,
+    require_stock_metadata: bool,
+) -> None:
+    required = ["tushare/stk_limit"]
+    if require_stock_metadata:
+        required.extend(["tushare/suspend_d", "tushare/namechange"])
     missing = [
         dataset
-        for dataset in _REQUIRED_TRADE_STATE_DATASETS.values()
+        for dataset in required
         if not lake.dataset_path("raw", dataset).exists()
     ]
     if missing:
@@ -304,6 +317,36 @@ def _merge_column_quality(frames: list[pd.DataFrame]) -> dict[str, dict[str, obj
                 existing["source"] = "mixed"
             existing["imputed"] = bool(existing.get("imputed")) or bool(entry.get("imputed"))
     return merged
+
+
+def _merge_trade_state_quality(frames: list[pd.DataFrame]) -> dict[str, object]:
+    qualities = [
+        frame.attrs.get("trade_state_quality")
+        for frame in frames
+        if isinstance(frame.attrs.get("trade_state_quality"), dict)
+    ]
+    if len(qualities) == 1:
+        return dict(qualities[0])
+    result: dict[str, object] = {
+        "asset_type": "mixed",
+        "execution_time": "open",
+    }
+    for field in ("suspended", "st", "limit_up_at_open", "limit_down_at_open"):
+        entries = [quality.get(field) for quality in qualities]
+        sources = {
+            str(entry.get("source"))
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+        result[field] = {
+            "source": next(iter(sources)) if len(sources) == 1 else "asset_specific",
+            "complete": bool(entries)
+            and all(
+                isinstance(entry, dict) and entry.get("complete") is True
+                for entry in entries
+            ),
+        }
+    return result
 
 
 def _parse_date(value: str | date) -> date:

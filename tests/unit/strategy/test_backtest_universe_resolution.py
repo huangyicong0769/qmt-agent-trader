@@ -171,3 +171,19 @@ def _write_bars(lake: DataLake, *, symbols: list[str] | None = None) -> None:
         "raw",
         "tushare/trade_cal",
     )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": symbol,
+                    "name": symbol,
+                    "list_status": "L",
+                    "list_date": "20000101",
+                    "delist_date": None,
+                }
+                for symbol in symbols
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
+    )

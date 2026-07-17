@@ -28,36 +28,7 @@ def normalize_stock_opening_trade_state(
     limits = _normalize_stock_limits(stk_limit)
     suspend_events = _normalize_suspend_events(suspend)
     st_periods = _normalize_namechange_periods(namechange)
-    result = bars.copy()
-    _require_columns(result, ("symbol", "trade_date", "open"), field="bars")
-    result["symbol"] = result["symbol"].astype(str)
-    result["trade_date"] = _coerce_dates(result["trade_date"], field="bars.trade_date")
-    require_unique_symbol_dates(
-        result,
-        symbol_column="symbol",
-        date_column="trade_date",
-        code="DUPLICATE_SYMBOL_DATE_BAR",
-        field="bars",
-    )
-    result = result.merge(
-        limits,
-        on=["symbol", "trade_date"],
-        how="left",
-        validate="one_to_one",
-    )
-    missing = result["up_limit"].isna() | result["down_limit"].isna()
-    if missing.any():
-        raise BacktestDataIntegrityError(
-            code="TRADE_STATE_PARTIAL_COVERAGE",
-            message="stock limit source does not cover every stock bar",
-            field="raw/tushare/stk_limit",
-            symbols=tuple(sorted(result.loc[missing, "symbol"].astype(str).unique())),
-            details={"field": "limit_up_down", "missing_key_count": int(missing.sum())},
-        )
-    opening_prices = pd.to_numeric(result["open"], errors="coerce")
-    tolerance = 1e-6
-    result["limit_up_at_open"] = opening_prices >= result["up_limit"] - tolerance
-    result["limit_down_at_open"] = opening_prices <= result["down_limit"] + tolerance
+    result = _apply_opening_limits(bars, limits)
     suspended_keys = set(
         zip(suspend_events["symbol"], suspend_events["trade_date"], strict=False)
     )
@@ -91,7 +62,83 @@ def normalize_stock_opening_trade_state(
             "complete": True,
         },
     }
+    return result
+
+
+def _apply_opening_limits(
+    bars: pd.DataFrame,
+    limits: pd.DataFrame,
+) -> pd.DataFrame:
+    result = bars.copy()
+    _require_columns(result, ("symbol", "trade_date", "open"), field="bars")
+    result["symbol"] = result["symbol"].astype(str)
+    result["trade_date"] = _coerce_dates(result["trade_date"], field="bars.trade_date")
+    require_unique_symbol_dates(
+        result,
+        symbol_column="symbol",
+        date_column="trade_date",
+        code="DUPLICATE_SYMBOL_DATE_BAR",
+        field="bars",
+    )
+    result = result.merge(
+        limits,
+        on=["symbol", "trade_date"],
+        how="left",
+        validate="one_to_one",
+    )
+    missing = result["up_limit"].isna() | result["down_limit"].isna()
+    if missing.any():
+        raise BacktestDataIntegrityError(
+            code="TRADE_STATE_PARTIAL_COVERAGE",
+            message="limit source does not cover every executable bar",
+            field="raw/tushare/stk_limit",
+            symbols=tuple(sorted(result.loc[missing, "symbol"].astype(str).unique())),
+            details={"field": "limit_up_down", "missing_key_count": int(missing.sum())},
+        )
+    opening_prices = pd.to_numeric(result["open"], errors="coerce")
+    if opening_prices.isna().any():
+        raise BacktestDataIntegrityError(
+            code="INVALID_REQUIRED_PRICE",
+            message="opening price is required for opening-limit state",
+            field="open",
+            details={"invalid_row_count": int(opening_prices.isna().sum())},
+        )
+    tolerance = 1e-6
+    result["limit_up_at_open"] = opening_prices >= result["up_limit"] - tolerance
+    result["limit_down_at_open"] = opening_prices <= result["down_limit"] + tolerance
     return result.drop(columns=["up_limit", "down_limit"])
+
+
+def normalize_etf_opening_trade_state(
+    bars: pd.DataFrame,
+    *,
+    stk_limit: pd.DataFrame,
+) -> pd.DataFrame:
+    limits = _normalize_stock_limits(stk_limit)
+    result = _apply_opening_limits(bars, limits)
+    result["suspended"] = False
+    result["st"] = False
+    for column in OPENING_TRADE_STATE_COLUMNS:
+        result[column] = result[column].astype(bool)
+    result.attrs["column_quality"] = bars.attrs.get("column_quality", {})
+    result.attrs["trade_state_quality"] = {
+        "asset_type": "etf",
+        "execution_time": "open",
+        "suspended": {
+            "source": "presence_of_valid_fund_daily_bar",
+            "complete": True,
+        },
+        "st": {"source": "not_applicable_for_etf", "complete": True},
+        "limit_up_at_open": {
+            "source": "raw/tushare/stk_limit",
+            "complete": True,
+        },
+        "limit_down_at_open": {
+            "source": "raw/tushare/stk_limit",
+            "complete": True,
+        },
+    }
+    return result
 
 
 def _normalize_stock_limits(frame: pd.DataFrame) -> pd.DataFrame:
