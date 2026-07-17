@@ -111,7 +111,11 @@ def require_historical_classification_support(
     as_of_date: date,
     classification_frame: pd.DataFrame | None,
 ) -> None:
-    if selection_mode not in {"industry", "theme"}:
+    if selection_mode not in {
+        "industry",
+        "theme",
+        "etf_category",
+    }:
         return
     required = {"symbol", "effective_from", "effective_to"}
     available = (

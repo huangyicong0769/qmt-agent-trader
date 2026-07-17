@@ -384,30 +384,31 @@ class UniverseResolver:
         symbols = stock_basic.loc[mask, "ts_code"].astype(str).tolist()
         return _candidate_frame_for_symbols(symbols, recent, stock_basic)
 
-    def _etf_category_candidates(self, categories: list[str], recent: pd.DataFrame) -> pd.DataFrame:
-        path = self.lake.dataset_path("raw", "tushare/fund_basic")
-        if not path.exists() or not categories:
-            return recent[recent.get("asset_type", "") == "etf"].copy()
-        fund_basic = self.lake.read_parquet("raw", "tushare/fund_basic")
-        if fund_basic.empty or "ts_code" not in fund_basic.columns:
-            return recent.iloc[0:0].copy()
-        fields = [
-            field
-            for field in ("fund_type", "category", "investment_type")
-            if field in fund_basic.columns
-        ]
-        if not fields:
-            return recent.iloc[0:0].copy()
-        haystack = pd.Series("", index=fund_basic.index)
-        for field in fields:
-            haystack = haystack + " " + fund_basic[field].astype(str)
-        mask = pd.Series(False, index=fund_basic.index)
-        for category in categories:
-            mask = mask | haystack.str.contains(category, case=False, regex=False, na=False)
-        return _candidate_frame_for_symbols(
-            fund_basic.loc[mask, "ts_code"].astype(str).tolist(),
-            recent,
-            pd.DataFrame(),
+    def _etf_category_candidates(
+        self,
+        categories: list[str],
+        recent: pd.DataFrame,
+    ) -> pd.DataFrame:
+        if not categories:
+            raise BacktestUniverseIntegrityError(
+                code="UNIVERSE_PIT_CLASSIFICATION_NOT_READY",
+                message="ETF category selection lacks category values",
+                field="classification_history",
+                details={
+                    "selection_mode": "etf_category",
+                },
+            )
+        raise BacktestUniverseIntegrityError(
+            code="UNIVERSE_PIT_CLASSIFICATION_NOT_READY",
+            message=(
+                "historical ETF category selection requires dated "
+                "classification evidence"
+            ),
+            field="classification_history",
+            details={
+                "selection_mode": "etf_category",
+                "categories": list(categories),
+            },
         )
 
     def _exclusion_reason(
