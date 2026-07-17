@@ -30,11 +30,24 @@ def test_cache_key_changes_with_complete_provenance(tmp_path) -> None:
     lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
     code_path = tmp_path / "generated.py"
     code_path.write_text("VALUE = 1\n", encoding="utf-8")
+    factor_path = tmp_path / "custom_roe.py"
+    factor_path.write_text("VALUE = 1\n", encoding="utf-8")
+    factor_id = "custom_roe"
+    strategy_tools._factor_registry(lake).save_factor(
+        factor_id=factor_id,
+        name="Custom ROE",
+        version="0.1.0",
+        implementation_ref=f"file:{factor_path}",
+        required_columns=("symbol", "trade_date", "turnover", "roe"),
+        lookback=1,
+        params={},
+        created_by="test",
+    )
     spec = StrategySpec(
         strategy_id="provenance_strategy",
         name="Provenance strategy",
         kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
-        factors=[{"factor_id": "pb_rank", "ascending": True}],
+        factors=[{"factor_id": factor_id, "ascending": True}],
     )
     saved = SavedStrategy(
         strategy_id=spec.strategy_id,
@@ -49,7 +62,7 @@ def test_cache_key_changes_with_complete_provenance(tmp_path) -> None:
     config = StrategyBacktestConfig(
         strategy_id=spec.strategy_id,
         strategy_spec=spec,
-        factor_name="pb_rank",
+        factor_name=factor_id,
         start_date="20240101",
         end_date="20240331",
         symbols=["000001.SZ"],
@@ -59,6 +72,9 @@ def test_cache_key_changes_with_complete_provenance(tmp_path) -> None:
         "tushare/trade_cal",
         "tushare/namechange",
         "tushare/daily_basic",
+        "tushare/stock_basic",
+        "tushare/index_weight",
+        "tushare/fina_indicator",
     ):
         path = lake.dataset_path("raw", dataset)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -68,27 +84,39 @@ def test_cache_key_changes_with_complete_provenance(tmp_path) -> None:
         provenance = strategy_tools._backtest_provenance_manifest(
             lake,
             config=config,
-            requested_factor_ids=["pb_rank"],
+            requested_factor_ids=[factor_id],
             saved_strategy=saved,
             effective_code_path=str(code_path),
             resolved_universe=universe,
         )
         return strategy_tools._backtest_cache_key(
             config=config,
-            factor_name="pb_rank",
-            requested_factor_ids=["pb_rank"],
+            factor_name=factor_id,
+            requested_factor_ids=[factor_id],
             provenance=provenance,
         )
 
     baseline = key({"symbols": ["000001.SZ"]})
-    for dataset in ("tushare/trade_cal", "tushare/namechange", "tushare/daily_basic"):
+    for dataset in (
+        "tushare/trade_cal",
+        "tushare/namechange",
+        "tushare/daily_basic",
+        "tushare/stock_basic",
+        "tushare/index_weight",
+        "tushare/fina_indicator",
+    ):
         path = lake.dataset_path("raw", dataset)
         path.write_bytes(path.read_bytes() + b"-changed")
         changed = key({"symbols": ["000001.SZ"]})
-        assert changed != baseline
+        assert changed != baseline, dataset
         baseline = changed
 
-    code_path.write_text("VALUE = 2\n# changed\n", encoding="utf-8")
+    factor_path.write_text("VALUE = 2\n", encoding="utf-8")
+    changed_factor = key({"symbols": ["000001.SZ"]})
+    assert changed_factor != baseline
+    baseline = changed_factor
+
+    code_path.write_text("VALUE = 2\n", encoding="utf-8")
     changed_code = key({"symbols": ["000001.SZ"]})
     assert changed_code != baseline
 

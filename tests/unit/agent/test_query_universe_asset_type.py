@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
 from qmt_agent_trader.agent.schemas import ToolContext
 from qmt_agent_trader.agent.tools.query_tools import query_universe_tool, set_data_lake
-from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
 from qmt_agent_trader.data.storage import DataLake
 
 
@@ -37,7 +35,13 @@ def _lake_with_stock_and_etf(tmp_path) -> DataLake:
                     "trade_date": "20260708",
                     "up_limit": 1.1,
                     "down_limit": 0.9,
-                }
+                },
+                {
+                    "ts_code": "159259.SZ",
+                    "trade_date": "20260708",
+                    "up_limit": 1.1,
+                    "down_limit": 0.9,
+                },
             ]
         ),
         "raw",
@@ -47,6 +51,28 @@ def _lake_with_stock_and_etf(tmp_path) -> DataLake:
         pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date"]),
         "raw",
         "tushare/namechange",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [{"exchange": "SSE", "cal_date": "20260708", "is_open": 1}]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "Stock",
+                    "list_status": "L",
+                    "list_date": "20000101",
+                    "delist_date": None,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stock_basic",
     )
     return lake
 
@@ -64,28 +90,28 @@ def test_query_universe_stock_excludes_etf_source(tmp_path) -> None:
     assert result["metadata"]["count"] == 1
 
 
-def test_query_universe_etf_blocks_without_etf_state_model(tmp_path) -> None:
+def test_query_universe_etf_uses_asset_specific_state(tmp_path) -> None:
     set_data_lake(_lake_with_stock_and_etf(tmp_path))
 
-    with pytest.raises(BacktestDataIntegrityError) as exc_info:
-        query_universe_tool.run(
-            {"as_of_date": "20260708", "universe_type": "etf"},
-            ToolContext(run_id="universe-etf"),
-        )
+    result = query_universe_tool.run(
+        {"as_of_date": "20260708", "universe_type": "etf"},
+        ToolContext(run_id="universe-etf"),
+    )
 
-    assert exc_info.value.code == "UNSUPPORTED_ETF_TRADE_STATE_MODEL"
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["159259.SZ"]
 
 
-def test_query_universe_mixed_blocks_without_etf_state_model(tmp_path) -> None:
+def test_query_universe_mixed_uses_complete_asset_specific_state(tmp_path) -> None:
     set_data_lake(_lake_with_stock_and_etf(tmp_path))
 
-    with pytest.raises(BacktestDataIntegrityError) as exc_info:
-        query_universe_tool.run(
-            {"as_of_date": "20260708", "universe_type": "mixed"},
-            ToolContext(run_id="universe-mixed"),
-        )
+    result = query_universe_tool.run(
+        {"as_of_date": "20260708", "universe_type": "mixed"},
+        ToolContext(run_id="universe-mixed"),
+    )
 
-    assert exc_info.value.code == "UNSUPPORTED_ETF_TRADE_STATE_MODEL"
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["000001.SZ", "159259.SZ"]
 
 
 def test_query_universe_rejects_cyclical_theme_for_etf(tmp_path) -> None:
