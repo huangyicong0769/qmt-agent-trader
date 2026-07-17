@@ -23,7 +23,54 @@ from qmt_agent_trader.strategy.execution_adapter import (
     StrategyBacktestConfig,
     run_strategy_backtest,
 )
+from qmt_agent_trader.strategy.models import (
+    StrategyKind,
+    StrategySpec,
+)
 from qmt_agent_trader.strategy.registry import StrategyRegistry
+
+
+def _profile_strategy_spec(
+    top_n: int,
+) -> StrategySpec:
+    return StrategySpec.model_validate(
+        {
+            "strategy_id": "profile_momentum_20d",
+            "name": "Profile momentum 20d",
+            "kind": StrategyKind.FACTOR_RANK_LONG_ONLY,
+            "factors": [{"factor_id": "momentum_20d"}],
+            "portfolio": {"top_n": top_n},
+            "rebalance": {"frequency": "daily"},
+        }
+    )
+
+
+def _profile_backtest_config(
+    *,
+    start: str,
+    end: str,
+    symbols: list[str],
+) -> StrategyBacktestConfig:
+    top_n = min(5, max(1, len(symbols)))
+    spec = _profile_strategy_spec(top_n)
+    return StrategyBacktestConfig(
+        strategy_id=spec.strategy_id,
+        strategy_identity_mode="adhoc",
+        strategy_spec=spec,
+        factor_name="momentum_20d",
+        start_date=start,
+        end_date=end,
+        symbols=symbols,
+        top_n=top_n,
+        max_single_position_pct=spec.portfolio.max_single_position_pct,
+        cash_buffer_pct=spec.portfolio.cash_buffer_pct,
+        rebalance_frequency=spec.rebalance.frequency,
+        min_turnover_threshold=spec.rebalance.min_turnover_threshold,
+        rank_buffer=spec.rebalance.rank_buffer,
+        execution_delay_days=spec.execution.execution_delay_days,
+        slippage_bps=spec.execution.slippage_bps,
+        lower_is_better=False,
+    )
 
 
 def main() -> None:
@@ -110,13 +157,10 @@ def main() -> None:
             lambda: run_strategy_backtest(
                 lake,
                 StrategyRegistry(settings.resolved_data_dir / "strategies"),
-                StrategyBacktestConfig(
-                    strategy_id="profile_momentum_20d",
-                    factor_name="momentum_20d",
-                    start_date=start,
-                    end_date=end,
+                _profile_backtest_config(
+                    start=start,
+                    end=end,
                     symbols=symbols,
-                    top_n=min(5, max(1, len(symbols))),
                 ),
                 reports_dir=Path("reports/research"),
             ).model_dump(mode="json"),

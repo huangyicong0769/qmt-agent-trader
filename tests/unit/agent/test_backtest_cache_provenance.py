@@ -203,3 +203,41 @@ def test_backtest_provenance_reuses_dataset_manifests(
         effective_code_path=None,
         resolved_universe={"symbols": ["000001.SZ"]},
     )
+
+
+def test_provenance_records_universe_session_semantic_version(
+    tmp_path,
+) -> None:
+    lake = DataLake(
+        tmp_path / "lake",
+        tmp_path / "research.duckdb",
+    )
+    spec = StrategySpec.model_validate(
+        {
+            "strategy_id": "adhoc_fixture",
+            "name": "Adhoc fixture",
+            "kind": "FACTOR_RANK_LONG_ONLY",
+            "factors": [{"factor_id": "momentum_20d"}],
+        }
+    )
+    config = StrategyBacktestConfig(
+        strategy_id=spec.strategy_id,
+        strategy_identity_mode="adhoc",
+        strategy_spec=spec,
+        factor_name="momentum_20d",
+        start_date="20240101",
+        end_date="20240131",
+    )
+
+    manifest = strategy_tools._backtest_provenance_manifest(
+        lake,
+        config=config,
+        requested_factor_ids=["momentum_20d"],
+        saved_strategy=None,
+        effective_code_path=None,
+        resolved_universe=None,
+    )
+
+    assert manifest["engine_semantic_version"] == (
+        "2026-07-universe-session-integrity-v4"
+    )
