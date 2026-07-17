@@ -1,3 +1,5 @@
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -200,7 +202,7 @@ def test_multiple_indices_resolve_from_independent_sources(tmp_path) -> None:
 
     observed = UniverseResolver(lake)._index_constituents(
         ["000300.SH", "000905.SH"],
-        "20240215",
+        date(2024, 2, 15),
     )
 
     assert observed == ["000001.SZ", "000002.SZ"]
@@ -225,7 +227,7 @@ def test_missing_one_requested_index_fails_closed(tmp_path) -> None:
     with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
         UniverseResolver(lake)._index_constituents(
             ["000300.SH", "000905.SH"],
-            "20240215",
+            date(2024, 2, 15),
         )
 
     assert exc_info.value.code == "INDEX_MEMBERSHIP_NOT_READY"
@@ -439,6 +441,6 @@ def test_market_cap_asof_rejects_duplicate_symbol_date(tmp_path) -> None:
     )
 
     with pytest.raises(BacktestDataIntegrityError) as exc_info:
-        UniverseResolver(lake)._market_cap_asof("20240102")
+        UniverseResolver(lake)._market_cap_asof(date(2024, 1, 2))
 
     assert exc_info.value.code == "DUPLICATE_UNIVERSE_SOURCE_KEY"
