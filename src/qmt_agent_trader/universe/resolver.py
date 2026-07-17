@@ -27,6 +27,8 @@ from qmt_agent_trader.universe.pit_metadata import (
 )
 from qmt_agent_trader.universe.validators import normalize_symbol
 
+LIQUIDITY_WINDOW_SESSIONS = 20
+
 
 class UniverseResolver:
     def __init__(self, lake: DataLake) -> None:
@@ -347,6 +349,14 @@ class UniverseResolver:
             return "st"
         if filters.exclude_suspended and bool(row["suspended"]):
             return "suspended"
+        if filters.min_avg_amount_20d is not None:
+            amount_count = _float_or_none(row.get("amount_observation_count"))
+            if amount_count != float(LIQUIDITY_WINDOW_SESSIONS):
+                return "amount_20d_coverage_incomplete"
+        if filters.min_avg_volume_20d is not None:
+            volume_count = _float_or_none(row.get("volume_observation_count"))
+            if volume_count != float(LIQUIDITY_WINDOW_SESSIONS):
+                return "volume_20d_coverage_incomplete"
         if (
             filters.min_avg_amount_20d is not None
             and _float_or_none(row.get("avg_amount_20d")) is None
@@ -473,13 +483,38 @@ class UniverseResolver:
             normalized = normalize_tushare_daily(raw, asset_type=asset_type)
             frames.append(normalized)
         if not frames:
-            return pd.DataFrame(columns=["symbol", "avg_amount_20d", "avg_volume_20d"])
+            return pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "observed_session_count",
+                    "avg_amount_20d",
+                    "amount_observation_count",
+                    "avg_volume_20d",
+                    "volume_observation_count",
+                ]
+            )
         bars = pd.concat(frames, ignore_index=True).sort_values(["symbol", "trade_date"])
         allowed_dates = set((*window.warmup_dates, *window.expected_dates))
         bars = bars[bars["trade_date"].isin(allowed_dates)]
+        bars["amount"] = pd.to_numeric(bars["amount"], errors="coerce")
+        bars["volume"] = pd.to_numeric(bars["volume"], errors="coerce")
         metrics = bars.groupby("symbol", as_index=False).agg(
+            observed_session_count=("trade_date", "nunique"),
             avg_amount_20d=("amount", "mean"),
+            amount_observation_count=("amount", "count"),
             avg_volume_20d=("volume", "mean"),
+            volume_observation_count=("volume", "count"),
+        )
+        complete_sessions = metrics["observed_session_count"].eq(
+            LIQUIDITY_WINDOW_SESSIONS
+        )
+        metrics["avg_amount_20d"] = metrics["avg_amount_20d"].where(
+            complete_sessions
+            & metrics["amount_observation_count"].eq(LIQUIDITY_WINDOW_SESSIONS)
+        )
+        metrics["avg_volume_20d"] = metrics["avg_volume_20d"].where(
+            complete_sessions
+            & metrics["volume_observation_count"].eq(LIQUIDITY_WINDOW_SESSIONS)
         )
         return metrics
 

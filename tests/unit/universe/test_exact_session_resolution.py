@@ -75,6 +75,17 @@ def _write_calendar_sessions(lake: DataLake, session_keys: list[str]) -> None:
     )
 
 
+def _write_daily_rows(
+    lake: DataLake,
+    rows: list[dict[str, object]],
+) -> None:
+    lake.write_parquet(
+        pd.DataFrame(rows),
+        "raw",
+        "tushare/daily",
+    )
+
+
 def _all_stock_spec() -> UniverseSpec:
     return UniverseSpec.model_validate(
         {
@@ -188,3 +199,66 @@ def test_twenty_session_metrics_use_bounded_raw_read(tmp_path, monkeypatch) -> N
             ],
         }
     ]
+
+
+def test_nineteen_sessions_do_not_produce_twenty_day_liquidity(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    days = [date(2024, 1, 1) + timedelta(days=offset) for offset in range(20)]
+    _write_calendar_sessions(lake, [f"{day:%Y%m%d}" for day in days])
+    _write_daily_rows(
+        lake,
+        [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": f"{day:%Y%m%d}",
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "vol": 100.0,
+                "amount": 1000.0,
+            }
+            for day in days[1:]
+        ],
+    )
+
+    observed = UniverseResolver(lake)._avg_20d_metrics(
+        f"{days[-1]:%Y%m%d}",
+        ["stock"],
+    )
+
+    assert observed.loc[0, "amount_observation_count"] == 19
+    assert observed.loc[0, "volume_observation_count"] == 19
+    assert pd.isna(observed.loc[0, "avg_amount_20d"])
+    assert pd.isna(observed.loc[0, "avg_volume_20d"])
+
+
+def test_null_amount_invalidates_only_amount_window(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    days = [date(2024, 1, 1) + timedelta(days=offset) for offset in range(20)]
+    _write_calendar_sessions(lake, [f"{day:%Y%m%d}" for day in days])
+    rows = []
+    for index, day in enumerate(days):
+        rows.append(
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": f"{day:%Y%m%d}",
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "vol": 100.0,
+                "amount": None if index == 0 else 1000.0,
+            }
+        )
+    _write_daily_rows(lake, rows)
+
+    observed = UniverseResolver(lake)._avg_20d_metrics(
+        f"{days[-1]:%Y%m%d}",
+        ["stock"],
+    )
+
+    assert observed.loc[0, "amount_observation_count"] == 19
+    assert observed.loc[0, "volume_observation_count"] == 20
+    assert pd.isna(observed.loc[0, "avg_amount_20d"])
+    assert observed.loc[0, "avg_volume_20d"] == 100.0
