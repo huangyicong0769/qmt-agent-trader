@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from qmt_agent_trader.agent.tools import strategy_tools
 from qmt_agent_trader.core.types import ApprovalStatus
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.persistence import dataset_manifests
 from qmt_agent_trader.persistence.provenance import fingerprint_path_tree
 from qmt_agent_trader.strategy.execution_adapter import StrategyBacktestConfig
 from qmt_agent_trader.strategy.models import (
@@ -11,6 +14,23 @@ from qmt_agent_trader.strategy.models import (
     StrategySource,
     StrategySpec,
 )
+
+
+def _fixture_config() -> StrategyBacktestConfig:
+    spec = StrategySpec(
+        strategy_id="adhoc_factor_momentum_20d",
+        name="Factor baseline: momentum_20d",
+        kind=StrategyKind.FACTOR_RANK_LONG_ONLY,
+        factors=[{"factor_id": "momentum_20d"}],
+    )
+    return StrategyBacktestConfig(
+        strategy_id=spec.strategy_id,
+        strategy_identity_mode="adhoc",
+        strategy_spec=spec,
+        factor_name="momentum_20d",
+        start_date="20240101",
+        end_date="20240331",
+    )
 
 
 def test_tree_fingerprint_changes_when_nested_file_changes(tmp_path) -> None:
@@ -123,3 +143,63 @@ def test_cache_key_changes_with_complete_provenance(tmp_path) -> None:
 
     changed_universe = key({"symbols": ["000002.SZ"]})
     assert changed_universe != changed_code
+
+
+def test_backtest_provenance_reuses_dataset_manifests(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    for dataset in (
+        "tushare/daily",
+        "tushare/fund_daily",
+        "tushare/trade_cal",
+        "tushare/suspend_d",
+        "tushare/stk_limit",
+        "tushare/namechange",
+        "tushare/stock_basic",
+        "tushare/index_weight",
+        "tushare/index_member",
+    ):
+        lake.write_parquet(
+            pd.DataFrame([{"dataset": dataset}]),
+            "raw",
+            dataset,
+        )
+    config = _fixture_config()
+    strategy_tools._backtest_provenance_manifest(
+        lake,
+        config=config,
+        requested_factor_ids=[],
+        saved_strategy=None,
+        effective_code_path=None,
+        resolved_universe={"symbols": ["000001.SZ"]},
+    )
+    monkeypatch.setattr(
+        dataset_manifests,
+        "_content_digest",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("dataset payload must not be rehashed")
+        ),
+    )
+    original_tree_fingerprint = strategy_tools.fingerprint_path_tree
+    monkeypatch.setattr(
+        strategy_tools,
+        "fingerprint_path_tree",
+        lambda path: (
+            (_ for _ in ()).throw(
+                AssertionError("datasets must use governed manifests")
+            )
+            if path.suffix == ".parquet"
+            else original_tree_fingerprint(path)
+        ),
+    )
+
+    strategy_tools._backtest_provenance_manifest(
+        lake,
+        config=config,
+        requested_factor_ids=[],
+        saved_strategy=None,
+        effective_code_path=None,
+        resolved_universe={"symbols": ["000001.SZ"]},
+    )

@@ -75,8 +75,8 @@ _cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
     "strategy_tool_cache", default=None
 )
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
-BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v3"
-BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-factor-universe-pit-v2"
+BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v4"
+BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-universe-integrity-v3"
 StrategyIdentityMode = Literal["registry", "inline", "adhoc"]
 
 
@@ -2325,7 +2325,7 @@ def _backtest_provenance_manifest(
             if resolved is not None:
                 dataset_names.add(resolved.source.raw_dataset_name)
     dataset_fingerprints = {
-        name: fingerprint_path_tree(lake.dataset_path("raw", name))
+        name: lake.dataset_fingerprint("raw", name)
         for name in sorted(dataset_names)
     }
     code_path = effective_code_path or (
