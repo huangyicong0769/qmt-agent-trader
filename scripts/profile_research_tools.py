@@ -29,6 +29,11 @@ from qmt_agent_trader.strategy.models import (
 )
 from qmt_agent_trader.strategy.registry import StrategyRegistry
 
+MARKET_DATASETS: tuple[str, str] = (
+    "tushare/daily",
+    "tushare/fund_daily",
+)
+
 
 def _profile_strategy_spec(
     top_n: int,
@@ -95,7 +100,9 @@ def main() -> None:
     if not _has_bars(lake):
         payload = {
             "status": "NO_LOCAL_DATA",
-            "message": "raw tushare_daily/tushare_fund_daily parquet is not available",
+            "message": (
+                "raw tushare/daily or tushare/fund_daily parquet is not available"
+            ),
             "lake_root": str(lake.root),
         }
         _write_reports(report_root, stamp, payload)
@@ -219,14 +226,17 @@ def _shape(value: Any) -> dict[str, Any]:
 
 def _has_bars(lake: DataLake) -> bool:
     return any(
-        lake.dataset_path("raw", name).exists()
-        for name in ("tushare_daily", "tushare_fund_daily")
+        lake.dataset_path(
+            "raw",
+            name,
+        ).exists()
+        for name in MARKET_DATASETS
     )
 
 
 def _date_bounds(lake: DataLake) -> dict[str, str]:
     frames: list[Any] = []
-    for name in ("tushare_daily", "tushare_fund_daily"):
+    for name in MARKET_DATASETS:
         path = lake.dataset_path("raw", name)
         if not path.exists():
             continue
@@ -247,7 +257,7 @@ def _date_bounds(lake: DataLake) -> dict[str, str]:
 
 
 def _sample_symbols(lake: DataLake, *, start: str, end: str, limit: int) -> list[str]:
-    for name in ("tushare_daily", "tushare_fund_daily"):
+    for name in MARKET_DATASETS:
         path = lake.dataset_path("raw", name)
         if not path.exists():
             continue
