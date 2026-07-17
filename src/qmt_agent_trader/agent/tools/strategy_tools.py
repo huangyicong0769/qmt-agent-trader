@@ -76,7 +76,7 @@ _cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
 )
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
 BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v4"
-BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-universe-integrity-v3"
+BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-universe-session-integrity-v4"
 StrategyIdentityMode = Literal["registry", "inline", "adhoc"]
 
 
