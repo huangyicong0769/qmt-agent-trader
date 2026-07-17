@@ -56,13 +56,34 @@ def load_open_sessions(
     end: str,
     exchanges: tuple[str, ...] = ("SSE", "SZSE"),
 ) -> tuple[date, ...]:
-    return load_session_window(
+    return open_sessions_between(
         lake,
         start=start,
         end=end,
-        warmup_sessions=0,
         exchanges=exchanges,
-    ).expected_dates
+    )
+
+
+def open_sessions_between(
+    lake: DataLake,
+    *,
+    start: str | date,
+    end: str | date,
+    exchanges: tuple[str, ...] = ("SSE", "SZSE"),
+) -> tuple[date, ...]:
+    start_date = start if isinstance(start, date) else _parse_boundary(str(start))
+    end_date = end if isinstance(end, date) else _parse_boundary(str(end))
+    states = _load_normalized_calendar_states(lake, exchanges=exchanges)
+    natural_dates = _natural_dates(start_date, end_date)
+    missing_dates = [day for day in natural_dates if day not in states]
+    if missing_dates:
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_PARTIAL_COVERAGE",
+            message="trade calendar lacks evidence for requested universe dates",
+            field="trade_cal",
+            details={"missing_dates": [day.isoformat() for day in missing_dates]},
+        )
+    return tuple(day for day in natural_dates if states[day] == 1)
 
 
 def latest_open_session_on_or_before(
@@ -73,6 +94,13 @@ def latest_open_session_on_or_before(
 ) -> date:
     boundary = as_of if isinstance(as_of, date) else _parse_boundary(str(as_of))
     states = _load_normalized_calendar_states(lake, exchanges=exchanges)
+    if boundary not in states:
+        raise BacktestDataIntegrityError(
+            code="TRADING_CALENDAR_PARTIAL_COVERAGE",
+            message="trade calendar lacks evidence for requested as-of date",
+            field="trade_cal",
+            details={"missing_dates": [boundary.isoformat()]},
+        )
     candidates = [
         day for day, is_open in states.items() if day <= boundary and is_open == 1
     ]

@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
 
+from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.models import UniverseSpec
 from qmt_agent_trader.universe.resolver import UniverseResolver
@@ -55,8 +57,42 @@ def _write_stock_basic(lake: DataLake, symbols: list[str]) -> None:
     )
 
 
-def test_previous_session_bar_is_not_current_session_coverage(tmp_path) -> None:
+def _write_calendar_sessions(lake: DataLake, session_keys: list[str]) -> None:
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "exchange": exchange,
+                    "cal_date": session_key,
+                    "is_open": 1,
+                }
+                for session_key in session_keys
+                for exchange in ("SSE", "SZSE")
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+
+
+def _all_stock_spec() -> UniverseSpec:
+    return UniverseSpec.model_validate(
+        {
+            "universe_id": "all_stock",
+            "name": "All stock",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+            "filters": {"min_listed_days": 0},
+        }
+    )
+
+
+def test_open_market_session_without_any_bars_fails_closed(tmp_path) -> None:
     lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    _write_calendar_sessions(lake, ["20240102", "20240103"])
+    _write_stock_basic(lake, ["000001.SZ"])
+    _write_empty_trade_state_sources(lake)
     lake.write_parquet(
         pd.DataFrame(
             [
@@ -75,39 +111,16 @@ def test_previous_session_bar_is_not_current_session_coverage(tmp_path) -> None:
         "raw",
         "tushare/daily",
     )
-    lake.write_parquet(
-        pd.DataFrame(
-            [
-                {"exchange": "SSE", "cal_date": "20240102", "is_open": 1},
-                {"exchange": "SSE", "cal_date": "20240103", "is_open": 1},
-                {"exchange": "SZSE", "cal_date": "20240102", "is_open": 1},
-                {"exchange": "SZSE", "cal_date": "20240103", "is_open": 1},
-            ]
-        ),
-        "raw",
-        "tushare/trade_cal",
-    )
-    _write_empty_trade_state_sources(lake)
-    _write_stock_basic(lake, ["000001.SZ"])
-    spec = UniverseSpec.model_validate(
-        {
-            "universe_id": "all_stock",
-            "name": "All stock",
-            "source": "user_defined",
-            "asset_types": ["stock"],
-            "selection": {"mode": "all"},
-            "filters": {"min_listed_days": 0},
-        }
-    )
 
-    result = UniverseResolver(lake).build(
-        spec,
-        mode="snapshot",
-        as_of_date="20240103",
-    )
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        UniverseResolver(lake).build(
+            _all_stock_spec(),
+            mode="snapshot",
+            as_of_date="20240103",
+        )
 
-    assert result["status"] == "OK"
-    assert result["symbols"] == []
+    assert exc_info.value.code == "UNIVERSE_MARKET_SESSION_NOT_READY"
+    assert exc_info.value.trade_date == "2024-01-03"
 
 
 def test_twenty_session_metrics_use_bounded_raw_read(tmp_path, monkeypatch) -> None:

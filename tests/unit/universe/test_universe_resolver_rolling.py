@@ -80,6 +80,45 @@ def test_resolver_builds_rolling_universe_per_rebalance_date(tmp_path: Path) -> 
     )
 
 
+def test_rolling_rebalance_dates_come_from_trade_calendar(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    session_keys = ["20240102", "20240103", "20240104", "20240105"]
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "exchange": exchange,
+                    "cal_date": session_key,
+                    "is_open": 1,
+                }
+                for session_key in session_keys
+                for exchange in ("SSE", "SZSE")
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "rolling_stock",
+            "name": "Rolling stock",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+            "filters": {"min_listed_days": 0},
+        }
+    )
+
+    observed = UniverseResolver(lake)._rebalance_dates(
+        spec,
+        start_date="20240102",
+        end_date="20240105",
+        frequency="daily",
+    )
+
+    assert observed == ["20240102", "20240103", "20240104", "20240105"]
+
+
 def _bar(
     symbol: str,
     trade_date: str,

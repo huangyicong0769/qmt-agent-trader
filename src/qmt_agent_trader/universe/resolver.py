@@ -8,12 +8,14 @@ from typing import Any
 
 import pandas as pd
 
+from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
 from qmt_agent_trader.data.bars import load_daily_bars, normalize_tushare_daily
 from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.data.trading_calendar import (
     latest_open_session_on_or_before,
     load_session_window,
+    open_sessions_between,
 )
 from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
 from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
@@ -521,10 +523,19 @@ class UniverseResolver:
             include_trade_state=True,
             asset_types=list(asset_types),
         )
-        return bars[
+        exact = bars[
             bars["trade_date"].eq(effective_date)
             & bars["asset_type"].isin(asset_types)
         ].reset_index(drop=True)
+        if exact.empty:
+            raise BacktestUniverseIntegrityError(
+                code="UNIVERSE_MARKET_SESSION_NOT_READY",
+                message="official open session has no market bars for requested assets",
+                trade_date=effective_date.isoformat(),
+                field="daily_bars",
+                details={"asset_types": sorted(set(asset_types))},
+            )
+        return exact
 
     def _stock_basic(self) -> pd.DataFrame:
         path = self.lake.dataset_path("raw", "tushare/stock_basic")
@@ -569,7 +580,12 @@ class UniverseResolver:
         end_date: str,
         frequency: str,
     ) -> list[str]:
-        dates = _trade_dates(self.lake, spec.asset_types, start=start_date, end=end_date)
+        sessions = open_sessions_between(
+            self.lake,
+            start=start_date,
+            end=end_date,
+        )
+        dates = [f"{session:%Y%m%d}" for session in sessions]
         return _period_end_dates(dates, frequency)
 
 
