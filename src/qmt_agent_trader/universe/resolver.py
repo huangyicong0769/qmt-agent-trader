@@ -699,10 +699,12 @@ class UniverseResolver:
         missing_codes: list[str] = []
         ordered_members: list[str] = []
         for code in normalized_codes:
-            if code in weight_by_code:
-                members = weight_by_code[code]
-            elif code in member_by_code:
-                members = member_by_code[code]
+            weight_members = weight_by_code.get(code) or []
+            interval_members = member_by_code.get(code) or []
+            if weight_members:
+                members = weight_members
+            elif interval_members:
+                members = interval_members
             else:
                 missing_codes.append(code)
                 continue
