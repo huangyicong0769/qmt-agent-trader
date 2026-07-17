@@ -20,8 +20,8 @@ from qmt_agent_trader.data.trading_calendar import (
 from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
 from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
 from qmt_agent_trader.universe.pit_metadata import (
-    index_interval_members_asof,
-    index_weight_members_asof,
+    index_interval_members_by_code_asof,
+    index_weight_members_by_code_asof,
     require_historical_classification_support,
     security_master_asof,
 )
@@ -580,32 +580,52 @@ class UniverseResolver:
 
     def _index_constituents(self, index_codes: list[str], as_of_date: str) -> list[str]:
         as_of = _parse_date(as_of_date)
+        normalized_codes = list(dict.fromkeys(str(code) for code in index_codes))
+        weight_by_code: dict[str, list[str]] = {}
+        member_by_code: dict[str, list[str]] = {}
+
         weight_path = self.lake.dataset_path("raw", "tushare/index_weight")
         if weight_path.exists():
-            members = index_weight_members_asof(
+            weight_by_code = index_weight_members_by_code_asof(
                 self.lake.read_parquet("raw", "tushare/index_weight"),
-                index_codes,
+                normalized_codes,
                 as_of,
             )
-            if members:
-                return [
-                    normalized
-                    for item in members
-                    if (normalized := normalize_symbol(item)) is not None
-                ]
+
         member_path = self.lake.dataset_path("raw", "tushare/index_member")
         if member_path.exists():
-            members = index_interval_members_asof(
+            member_by_code = index_interval_members_by_code_asof(
                 self.lake.read_parquet("raw", "tushare/index_member"),
-                index_codes,
+                normalized_codes,
                 as_of,
             )
-            return [
-                normalized
-                for item in members
-                if (normalized := normalize_symbol(item)) is not None
-            ]
-        return []
+
+        missing_codes: list[str] = []
+        ordered_members: list[str] = []
+        for code in normalized_codes:
+            if code in weight_by_code:
+                members = weight_by_code[code]
+            elif code in member_by_code:
+                members = member_by_code[code]
+            else:
+                missing_codes.append(code)
+                continue
+            ordered_members.extend(members)
+
+        if missing_codes:
+            raise BacktestUniverseIntegrityError(
+                code="INDEX_MEMBERSHIP_NOT_READY",
+                message="one or more requested indices lack as-of membership evidence",
+                trade_date=as_of.isoformat(),
+                field="index_membership",
+                details={"missing_index_codes": missing_codes},
+            )
+
+        return [
+            normalized
+            for item in dict.fromkeys(ordered_members)
+            if (normalized := normalize_symbol(item)) is not None
+        ]
 
     def _rebalance_dates(
         self,
