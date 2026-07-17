@@ -7,6 +7,7 @@ import pytest
 
 from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.universe import resolver as resolver_module
 from qmt_agent_trader.universe.models import UniverseSpec
 from qmt_agent_trader.universe.resolver import UniverseResolver
 
@@ -357,3 +358,73 @@ def test_closed_boundary_uses_previous_open_session_for_all_pit_inputs(
     diagnostics = result["metadata"]["diagnostics"]
     assert diagnostics["requested_as_of_date"] == "20240107"
     assert diagnostics["effective_market_session"] == "20240105"
+
+
+def test_mixed_universe_requires_each_requested_asset_type(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "load_daily_bars",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            [
+                {
+                    "symbol": "000001.SZ",
+                    "trade_date": date(2024, 1, 2),
+                    "asset_type": "stock",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        resolver._load_recent_bars(
+            date(2024, 1, 2),
+            ["stock", "etf"],
+        )
+
+    assert exc_info.value.code == "UNIVERSE_MARKET_SESSION_NOT_READY"
+    assert exc_info.value.details == {
+        "requested_asset_types": ["etf", "stock"],
+        "observed_asset_types": ["stock"],
+        "missing_asset_types": ["etf"],
+    }
+
+
+def test_mixed_universe_accepts_stock_and_etf_rows(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+    expected = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "trade_date": date(2024, 1, 2),
+                "asset_type": "stock",
+            },
+            {
+                "symbol": "510300.SH",
+                "trade_date": date(2024, 1, 2),
+                "asset_type": "etf",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "load_daily_bars",
+        lambda *_args, **_kwargs: expected.copy(),
+    )
+
+    observed = resolver._load_recent_bars(
+        date(2024, 1, 2),
+        ["stock", "etf"],
+    )
+
+    assert observed["asset_type"].tolist() == ["stock", "etf"]
