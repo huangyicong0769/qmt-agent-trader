@@ -70,7 +70,9 @@ inode. A missing or stale manifest triggers one full rehash and refresh;
 subsequent cache-key construction reads the small manifest instead of the full
 Parquet payload. Strategy specs, saved state, strategy and factor code, resolved
 universe payloads, and all selected raw datasets remain part of provenance. The
-same manifest is stored in the completed response and report config.
+same manifest is stored in the completed response and report config. Engine
+semantic version `2026-07-universe-session-integrity-v4` invalidates successful
+cache entries created before the session-aligned universe contract.
 
 The adapter ranks normalized factor values descending. `lower_is_better` negates the
 declared single factor before ranking and IC diagnostics. Existing holdings inside
@@ -182,12 +184,29 @@ market-wide bars for the requested asset type raises
 `UNIVERSE_MARKET_SESSION_NOT_READY`; it is not reported as a valid empty
 universe.
 
+A snapshot resolves exactly one effective market session. Bars, listing and
+delisting state, index membership, market-cap evidence, liquidity windows,
+classification checks, and diagnostics all use that same session. The original
+requested date is retained only as request-audit metadata.
+
+For a closed boundary, the previous open session is valid only when every
+natural date between that session and the requested boundary has `trade_cal`
+evidence.
+
+For a mixed stock-and-ETF universe, the exact effective session must contain at
+least one validated row for each requested asset type. A stock-only or ETF-only
+partial snapshot raises `UNIVERSE_MARKET_SESSION_NOT_READY`.
+
 ## Liquidity-window completeness
 
 `avg_amount_20d` and `avg_volume_20d` require exactly 20 official sessions and
 20 non-null observations for the corresponding field. Short listings, missing
 sessions, suspension gaps, and null values leave the metric unavailable and
 produce explicit observation-count evidence.
+
+Rows with incomplete 20-session liquidity evidence are excluded before
+`avg_amount_20d` or `avg_volume_20d` ranking. They are never used to fill a
+requested Top-N after valid candidates are exhausted.
 
 ## Point-in-time date and index evidence
 
@@ -197,6 +216,12 @@ malformed dates are invalid source evidence and fail closed.
 Each requested index code is resolved independently. The resolver uses the
 latest `index_weight` snapshot for that code when available, otherwise active
 `index_member` intervals. Missing evidence for any requested code raises
+`INDEX_MEMBERSHIP_NOT_READY`.
+
+Historical membership rows with no active member at the effective session are
+not current evidence. A requested index code resolves only when at least one
+valid normalized member exists. Invalid member identifiers fail closed with
+`INDEX_MEMBERSHIP_SOURCE_INVALID`; no current membership raises
 `INDEX_MEMBERSHIP_NOT_READY`.
 
 ## ETF opening state
