@@ -8,7 +8,7 @@ from qmt_agent_trader.backtest.errors import (
     BacktestUniverseIntegrityError,
 )
 from qmt_agent_trader.data.storage import DataLake
-from qmt_agent_trader.universe.models import UniverseSpec
+from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
 from qmt_agent_trader.universe.resolver import (
     UniverseResolver,
     _apply_limit,
@@ -557,3 +557,180 @@ def test_expired_index_history_is_not_valid_asof_evidence(
 
     assert exc_info.value.code == "INDEX_MEMBERSHIP_NOT_READY"
     assert exc_info.value.details["missing_index_codes"] == ["000905.SH"]
+
+
+def test_liquidity_rule_ne_rejects_incomplete_window(tmp_path) -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "amount-rule-ne",
+            "name": "Amount rule ne",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {
+                "mode": "all",
+                "rules": [
+                    {
+                        "field": "avg_amount_20d",
+                        "operator": "ne",
+                        "value": 0,
+                    }
+                ],
+            },
+            "filters": {"min_listed_days": 0},
+        }
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "avg_amount_20d": 1000.0,
+                "amount_observation_count": 20,
+            },
+            {
+                "symbol": "000002.SZ",
+                "avg_amount_20d": pd.NA,
+                "amount_observation_count": 19,
+            },
+        ]
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    observed = resolver._apply_rules(frame, spec.selection.rules)
+
+    assert observed["symbol"].tolist() == ["000001.SZ"]
+
+
+def test_liquidity_rule_not_in_rejects_missing_evidence(tmp_path) -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "volume-rule-not-in",
+            "name": "Volume rule not in",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {
+                "mode": "all",
+                "rules": [
+                    {
+                        "field": "avg_volume_20d",
+                        "operator": "not_in",
+                        "value": [0],
+                    }
+                ],
+            },
+            "filters": {"min_listed_days": 0},
+        }
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "avg_volume_20d": 100.0,
+                "volume_observation_count": 20,
+            },
+            {
+                "symbol": "000002.SZ",
+                "avg_volume_20d": pd.NA,
+                "volume_observation_count": 19,
+            },
+        ]
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    observed = resolver._apply_rules(frame, spec.selection.rules)
+
+    assert observed["symbol"].tolist() == ["000001.SZ"]
+
+
+def test_liquidity_rule_requires_observation_count_column(tmp_path) -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "amount-rule-count",
+            "name": "Amount rule count",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {
+                "mode": "all",
+                "rules": [
+                    {
+                        "field": "avg_amount_20d",
+                        "operator": "gt",
+                        "value": 10,
+                    }
+                ],
+            },
+            "filters": {"min_listed_days": 0},
+        }
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "avg_amount_20d": 1000.0,
+            }
+        ]
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    observed = resolver._apply_rules(frame, spec.selection.rules)
+
+    assert observed.empty
+
+
+def test_liquidity_rule_rejects_non_finite_metric(tmp_path) -> None:
+    rule = UniverseRule.model_validate(
+        {
+            "field": "avg_amount_20d",
+            "operator": "gt",
+            "value": 10,
+        }
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "avg_amount_20d": 100.0,
+                "amount_observation_count": 20,
+            },
+            {
+                "symbol": "000002.SZ",
+                "avg_amount_20d": float("inf"),
+                "amount_observation_count": 20,
+            },
+        ]
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    observed = resolver._apply_rules(frame, [rule])
+
+    assert observed["symbol"].tolist() == ["000001.SZ"]
+
+
+def test_non_liquidity_rule_keeps_existing_semantics(tmp_path) -> None:
+    rule = UniverseRule.model_validate(
+        {
+            "field": "market_cap",
+            "operator": "gte",
+            "value": 100,
+        }
+    )
+    frame = pd.DataFrame(
+        [
+            {"symbol": "000001.SZ", "market_cap": 100.0},
+            {"symbol": "000002.SZ", "market_cap": 99.0},
+        ]
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    observed = resolver._apply_rules(frame, [rule])
+
+    assert observed["symbol"].tolist() == ["000001.SZ"]
