@@ -166,6 +166,10 @@ def test_resolver_preserves_ranked_top_symbols_before_limit(tmp_path, monkeypatc
         "_exclusion_reason",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        "qmt_agent_trader.universe.resolver.latest_open_session_on_or_before",
+        lambda *_args, **_kwargs: pd.Timestamp("2024-01-31").date(),
+    )
 
     symbols, _, _ = resolver._resolve_for_date(spec, as_of_date="20240131")
     selected, _ = _apply_limit(symbols, spec=spec, limit=None)
@@ -230,6 +234,13 @@ def test_snapshot_uses_validated_non_null_trade_state(tmp_path) -> None:
         ),
         "raw",
         "tushare/stock_basic",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [{"exchange": "SSE", "cal_date": "20240102", "is_open": 1}]
+        ),
+        "raw",
+        "tushare/trade_cal",
     )
     spec = UniverseSpec.model_validate(
         {

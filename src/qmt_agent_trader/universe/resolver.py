@@ -11,6 +11,10 @@ import pandas as pd
 from qmt_agent_trader.data.bars import load_daily_bars, normalize_tushare_daily
 from qmt_agent_trader.data.integrity import require_unique_symbol_dates
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.data.trading_calendar import (
+    latest_open_session_on_or_before,
+    load_session_window,
+)
 from qmt_agent_trader.universe.fingerprints import fingerprint_spec, fingerprint_symbols
 from qmt_agent_trader.universe.models import UniverseRule, UniverseSpec
 from qmt_agent_trader.universe.pit_metadata import (
@@ -221,6 +225,11 @@ class UniverseResolver:
             candidate_count=candidate_count,
             excluded=excluded,
         )
+        effective_date = latest_open_session_on_or_before(
+            self.lake,
+            as_of=as_of_date,
+        )
+        diagnostics["effective_market_session"] = f"{effective_date:%Y%m%d}"
         if selected_frame.empty:
             return [], excluded, diagnostics
         return _ordered_unique_symbols(selected_frame, spec), excluded, diagnostics
@@ -431,6 +440,18 @@ class UniverseResolver:
         return data
 
     def _avg_20d_metrics(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
+        effective_date = latest_open_session_on_or_before(
+            self.lake,
+            as_of=as_of_date,
+        )
+        end_key = f"{effective_date:%Y%m%d}"
+        window = load_session_window(
+            self.lake,
+            start=end_key,
+            end=end_key,
+            warmup_sessions=19,
+        )
+        start_key = f"{window.panel_start:%Y%m%d}"
         frames: list[pd.DataFrame] = []
         for dataset, asset_type in _datasets_for_asset_types(asset_types):
             path = self.lake.dataset_path("raw", dataset)
@@ -439,7 +460,8 @@ class UniverseResolver:
             raw = self.lake.read_parquet_filtered(
                 "raw",
                 dataset,
-                end=as_of_date,
+                start=start_key,
+                end=end_key,
                 columns=["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
             )
             if raw.empty:
@@ -449,8 +471,9 @@ class UniverseResolver:
         if not frames:
             return pd.DataFrame(columns=["symbol", "avg_amount_20d", "avg_volume_20d"])
         bars = pd.concat(frames, ignore_index=True).sort_values(["symbol", "trade_date"])
-        latest = bars.groupby("symbol", group_keys=False).tail(20)
-        metrics = latest.groupby("symbol", as_index=False).agg(
+        allowed_dates = set((*window.warmup_dates, *window.expected_dates))
+        bars = bars[bars["trade_date"].isin(allowed_dates)]
+        metrics = bars.groupby("symbol", as_index=False).agg(
             avg_amount_20d=("amount", "mean"),
             avg_volume_20d=("volume", "mean"),
         )
@@ -484,19 +507,22 @@ class UniverseResolver:
         )
 
     def _load_recent_bars(self, as_of_date: str, asset_types: Sequence[str]) -> pd.DataFrame:
+        effective_date = latest_open_session_on_or_before(
+            self.lake,
+            as_of=as_of_date,
+        )
+        key = f"{effective_date:%Y%m%d}"
         bars = load_daily_bars(
             self.lake,
-            end=as_of_date,
+            start=key,
+            end=key,
             include_trade_state=True,
             asset_types=list(asset_types),
         )
-        bars = bars[bars["asset_type"].isin(asset_types)].copy()
-        return (
-            bars.sort_values(["symbol", "trade_date"], kind="stable")
-            .groupby("symbol", as_index=False, group_keys=False)
-            .tail(1)
-            .reset_index(drop=True)
-        )
+        return bars[
+            bars["trade_date"].eq(effective_date)
+            & bars["asset_type"].isin(asset_types)
+        ].reset_index(drop=True)
 
     def _stock_basic(self) -> pd.DataFrame:
         path = self.lake.dataset_path("raw", "tushare/stock_basic")

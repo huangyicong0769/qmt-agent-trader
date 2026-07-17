@@ -145,7 +145,7 @@ def test_resolver_rejects_malformed_list_date(tmp_path: Path) -> None:
     assert exc_info.value.code == "UNIVERSE_SECURITY_MASTER_INVALID"
 
 
-def test_broad_universe_uses_per_symbol_latest_asof_not_global_latest(
+def test_broad_universe_requires_exact_effective_session_bars(
     tmp_path: Path,
 ) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
@@ -183,14 +183,14 @@ def test_broad_universe_uses_per_symbol_latest_asof_not_global_latest(
     result = _resolver(lake).build(spec, as_of_date="20260708", limit=2500)
 
     assert result["status"] == "OK"
-    assert len(result["symbols"]) == 2000
+    assert len(result["symbols"]) == 3
     diagnostics = result["metadata"]["diagnostics"]
     assert diagnostics["latest_global_trade_date"] == "20260708"
     assert diagnostics["symbols_on_latest_global_trade_date"] == 3
-    assert diagnostics["symbols_with_bar_before_as_of"] == 2000
+    assert diagnostics["symbols_with_bar_before_as_of"] == 3
 
 
-def test_snapshot_universe_exposes_staleness_diagnostics(tmp_path: Path) -> None:
+def test_snapshot_universe_diagnostics_exclude_stale_bars(tmp_path: Path) -> None:
     lake = DataLake(root=tmp_path / "lake", duckdb_path=tmp_path / "db.duckdb")
     symbols = ["000001.SZ", "000002.SZ", "000003.SZ"]
     lake.write_parquet(
@@ -223,9 +223,10 @@ def test_snapshot_universe_exposes_staleness_diagnostics(tmp_path: Path) -> None
     result = _resolver(lake).build(spec, as_of_date="20260708")
 
     diagnostics = result["metadata"]["diagnostics"]
-    assert diagnostics["stale_symbol_count"] == 2
-    assert diagnostics["max_bar_staleness_days"] == 5
-    assert diagnostics["recent_bar_symbol_count"] == 3
+    assert result["symbols"] == ["000001.SZ"]
+    assert diagnostics["stale_symbol_count"] == 0
+    assert diagnostics["max_bar_staleness_days"] == 0
+    assert diagnostics["recent_bar_symbol_count"] == 1
 
 
 def _bar(
@@ -261,6 +262,26 @@ def _stock_basic(symbol: str, name: str, industry: str) -> dict[str, object]:
 
 def _resolver(lake: DataLake) -> UniverseResolver:
     bars = lake.read_parquet("raw", "tushare/daily")
+    calendar_dates = pd.date_range(
+        pd.to_datetime(bars["trade_date"].astype(str).min()),
+        pd.to_datetime(bars["trade_date"].astype(str).max()),
+        freq="D",
+    )
+    open_dates = set(bars["trade_date"].astype(str))
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "exchange": "SSE",
+                    "cal_date": f"{day:%Y%m%d}",
+                    "is_open": int(f"{day:%Y%m%d}" in open_dates),
+                }
+                for day in calendar_dates
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
     suspended = (
         bars["suspended"].fillna(False).astype(bool)
         if "suspended" in bars.columns
