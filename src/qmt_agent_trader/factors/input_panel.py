@@ -8,13 +8,14 @@ from typing import Any
 import pandas as pd
 
 from qmt_agent_trader.backtest.errors import BacktestDataIntegrityError
-from qmt_agent_trader.data.bars import load_daily_bars
+from qmt_agent_trader.data.bars import column_quality, load_daily_bars
 from qmt_agent_trader.data.field_sources import FieldSourceIndex, FieldSourceSpec, FillPolicy
 from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.data.integrity import require_unique_keys, require_unique_symbol_dates
 from qmt_agent_trader.data.macro import get_macro_dataset, macro_visible_date
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
+from qmt_agent_trader.factors.source_aliases import resolve_canonical_field_source
 
 
 def build_target_frequency_panel(
@@ -82,20 +83,32 @@ def build_target_frequency_panel(
     panel = panel.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
     for field in dict.fromkeys(required_fields):
-        if field in panel.columns:
+        if not _panel_field_requires_resolution(panel, field):
             continue
-        source = source_index.best_source_for_field(field, target_frequency=target_frequency)
+        resolved = resolve_canonical_field_source(
+            source_index,
+            field,
+            target_frequency=target_frequency,
+        )
         candidates = source_index.sources_for_field(field)
-        if source is None:
+        if resolved is None:
             _record_unresolved_source(metadata, field, candidates)
             continue
-        metadata["field_sources"][field] = source.as_metadata()
+        source = resolved.source
+        source_field = resolved.source_field
+        panel = panel.drop(columns=[field], errors="ignore")
+        metadata["field_sources"][field] = {
+            **source.as_metadata(),
+            "source_field": source_field,
+            "canonical_field": field,
+        }
         if source.fill_policy is FillPolicy.EXACT:
             panel = _join_exact_field(
                 lake,
                 panel,
                 source=source,
                 field=field,
+                source_field=source_field,
                 start=start,
                 end=end,
                 symbols=symbols,
@@ -107,6 +120,7 @@ def build_target_frequency_panel(
                 panel,
                 source=source,
                 field=field,
+                source_field=source_field,
                 end=end,
                 symbols=symbols,
                 metadata=metadata,
@@ -146,12 +160,22 @@ def build_target_frequency_panel(
     return panel, metadata
 
 
+def _panel_field_requires_resolution(panel: pd.DataFrame, field: str) -> bool:
+    if field not in panel.columns:
+        return True
+    quality = column_quality(panel, field)
+    if quality.get("usable_for_factor") is False:
+        return True
+    return bool(panel[field].isna().all())
+
+
 def _join_exact_field(
     lake: DataLake,
     panel: pd.DataFrame,
     *,
     source: FieldSourceSpec,
     field: str,
+    source_field: str,
     start: date,
     end: date,
     symbols: list[str] | None,
@@ -172,7 +196,7 @@ def _join_exact_field(
             reason="raw_dataset_missing",
         )
 
-    columns = _source_read_columns(source, field)
+    columns = _source_read_columns(source, source_field)
     raw = lake.read_parquet_filtered(
         "raw",
         source.raw_dataset_name,
@@ -185,7 +209,7 @@ def _join_exact_field(
     )
     missing_columns = [
         column
-        for column in (source.entity_column, source.visible_time_column, field)
+        for column in (source.entity_column, source.visible_time_column, source_field)
         if column is not None and column not in raw.columns
     ]
     if missing_columns:
@@ -200,7 +224,9 @@ def _join_exact_field(
     if raw.empty:
         return _add_missing_field(panel, metadata, field, source, reason="no_source_rows")
 
-    data = raw.rename(columns={source.entity_column: "symbol"}).copy()
+    data = raw.rename(
+        columns={source.entity_column: "symbol", source_field: field}
+    ).copy()
     data["trade_date"] = _coerce_date(data[source.visible_time_column])
     require_unique_symbol_dates(
         data,
@@ -222,6 +248,7 @@ def _join_asof_snapshot_field(
     *,
     source: FieldSourceSpec,
     field: str,
+    source_field: str,
     end: date,
     symbols: list[str] | None,
     metadata: dict[str, Any],
@@ -235,7 +262,7 @@ def _join_asof_snapshot_field(
             reason="raw_dataset_missing",
         )
     raw = lake.read_parquet("raw", source.raw_dataset_name)
-    if field not in raw.columns:
+    if source_field not in raw.columns:
         return _add_missing_field(panel, metadata, field, source, reason="raw_field_missing")
     data = raw.copy()
     if source.entity_column is not None:
@@ -258,6 +285,7 @@ def _join_asof_snapshot_field(
         return panel
     data = data.copy()
     data["visible_date"] = visible
+    data = data.rename(columns={source_field: field})
     data = data[data["visible_date"].notna()]
     data = data[data["visible_date"] <= end]
     if data.empty:
