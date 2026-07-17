@@ -480,14 +480,17 @@ class DeepSeekClient:
                         result = tool_map[tc_name].fn(**arguments)
                     except Exception as exc:
                         result = {"error": str(exc)}
-                    if is_cancel_requested():
-                        yield cancelled_event()
-                        return
                     yield ToolResult(
                         tool_call_id=tc_id,
                         tool_name=tc_name,
                         result=result,
                     )
+                    # A synchronous tool cannot be safely killed.  Once it
+                    # returns, its completed fact/result must be observable
+                    # before cancellation stops the next model round.
+                    if is_cancel_requested():
+                        yield cancelled_event()
+                        return
                     assistant_msg: dict[str, Any] = {
                         "role": "assistant",
                         "tool_calls": [

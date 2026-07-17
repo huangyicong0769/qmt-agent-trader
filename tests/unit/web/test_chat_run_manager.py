@@ -102,6 +102,78 @@ class _ManyEventsOrchestrator:
         yield OrchestratorEvent(type="done", run_id=run_id, message="done")
 
 
+class _FallbackSequenceOrchestrator:
+    def __init__(self, *, fallback: bool) -> None:
+        self.fallback = fallback
+
+    async def execute_stream(self, message: str, **kwargs: object):
+        run_id = str(kwargs["run_id"])
+        yield OrchestratorEvent(type="run_started", run_id=run_id, message="started")
+        yield OrchestratorEvent(
+            type="error",
+            run_id=run_id,
+            message="diagnostic stream error",
+            data={"error": "stream_error", "fallback": self.fallback},
+        )
+        yield OrchestratorEvent(
+            type="final_message",
+            run_id=run_id,
+            message="最终答案",
+            data={"content": "最终答案"},
+        )
+        yield OrchestratorEvent(type="done", run_id=run_id, message="done")
+
+
+class _TokenReplayOrchestrator:
+    def __init__(self) -> None:
+        self.tokens_ready = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute_stream(self, message: str, **kwargs: object):
+        run_id = str(kwargs["run_id"])
+        yield OrchestratorEvent(type="run_started", run_id=run_id, message="started")
+        yield OrchestratorEvent(type="token", run_id=run_id, message="A")
+        yield OrchestratorEvent(type="token", run_id=run_id, message="B")
+        self.tokens_ready.set()
+        await self.release.wait()
+        yield OrchestratorEvent(type="token", run_id=run_id, message="C")
+        yield OrchestratorEvent(type="done", run_id=run_id, message="done")
+
+
+class _ManyTokenOrchestrator:
+    async def execute_stream(self, message: str, **kwargs: object):
+        run_id = str(kwargs["run_id"])
+        yield OrchestratorEvent(type="run_started", run_id=run_id, message="started")
+        for index in range(20):
+            yield OrchestratorEvent(type="token", run_id=run_id, message=str(index))
+        yield OrchestratorEvent(type="done", run_id=run_id, message="done")
+
+
+class _ReplayRegistrationRaceOrchestrator:
+    def __init__(self, *, terminal_only: bool = False) -> None:
+        self.terminal_only = terminal_only
+        self.ready = asyncio.Event()
+        self.trigger = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def prepare(self) -> None:
+        self.ready.clear()
+        self.trigger.clear()
+        self.release.clear()
+
+    async def execute_stream(self, message: str, **kwargs: object):
+        run_id = str(kwargs["run_id"])
+        yield OrchestratorEvent(type="run_started", run_id=run_id, message="started")
+        self.ready.set()
+        await self.trigger.wait()
+        if self.terminal_only:
+            yield OrchestratorEvent(type="done", run_id=run_id, message="done")
+            return
+        yield OrchestratorEvent(type="progress", run_id=run_id, message="race")
+        await self.release.wait()
+        yield OrchestratorEvent(type="done", run_id=run_id, message="done")
+
+
 @pytest.mark.anyio
 async def test_start_run_is_manager_owned_and_rejects_overlapping_session_run(tmp_path) -> None:
     repository = ChatSessionRepository(tmp_path / "sessions")
@@ -195,17 +267,19 @@ async def test_cancelled_subscriber_task_is_removed_without_cancelling_run(tmp_p
     orchestrator = _BlockingOrchestrator()
     manager = ChatRunManager(orchestrator=orchestrator, repository=repository)
     snapshot = await manager.start_run("chat_subscriber_cancel", "订阅取消")
+    subscriber_ready = asyncio.Event()
 
     async def consume() -> None:
         subscription = manager.subscribe(snapshot.run_id)
         try:
             async for _event in subscription:
+                subscriber_ready.set()
                 await asyncio.sleep(0)
         finally:
             await subscription.aclose()
 
     subscriber_task = asyncio.create_task(consume())
-    await asyncio.sleep(0)
+    await subscriber_ready.wait()
     assert manager.subscriber_count(snapshot.run_id) == 1
     subscriber_task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -326,3 +400,193 @@ async def test_delete_session_is_serialized_with_run_ownership(tmp_path) -> None
     await manager.wait_for_run(started.run_id)
     assert await manager.delete_session("chat_delete_guard") is True
     assert repository.get("chat_delete_guard") is None
+
+
+@pytest.mark.anyio
+async def test_fallback_error_is_diagnostic_and_does_not_end_run(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_fallback"))
+    manager = ChatRunManager(
+        orchestrator=_FallbackSequenceOrchestrator(fallback=True),
+        repository=repository,
+    )
+
+    started = await manager.start_run("chat_fallback", "fallback")
+    final = await manager.wait_for_run(started.run_id)
+    events = [event async for event in manager.subscribe(started.run_id)]
+    ordered = [event for event in events if event.sequence > 0]
+
+    assert final.status is RunStatus.COMPLETED
+    assert [event.event_type for event in ordered][-3:] == [
+        "error",
+        "final_message",
+        "done",
+    ]
+    fallback, final_message, done = ordered[-3:]
+    assert fallback.terminal is False
+    assert final_message.terminal is False
+    assert done.terminal is True
+    stored = repository.get("chat_fallback")
+    assert stored is not None
+    assert [message.metadata.get("event_type") for message in stored.messages][-3:] == [
+        "error",
+        "final_message",
+        "done",
+    ]
+
+
+@pytest.mark.anyio
+async def test_non_fallback_error_is_terminal_and_blocks_later_events(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_error_terminal"))
+    manager = ChatRunManager(
+        orchestrator=_FallbackSequenceOrchestrator(fallback=False),
+        repository=repository,
+    )
+
+    started = await manager.start_run("chat_error_terminal", "error")
+    final = await manager.wait_for_run(started.run_id)
+    events = [event async for event in manager.subscribe(started.run_id)]
+    ordered = [event for event in events if event.sequence > 0]
+
+    assert final.status is RunStatus.FAILED
+    assert ordered[-1].event_type == "error"
+    assert ordered[-1].terminal is True
+    assert all(event.event_type not in {"final_message", "done"} for event in ordered)
+
+
+@pytest.mark.anyio
+async def test_draft_snapshot_filters_already_accumulated_token_replay(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_draft_replay"))
+    orchestrator = _TokenReplayOrchestrator()
+    manager = ChatRunManager(orchestrator=orchestrator, repository=repository)
+
+    started = await manager.start_run("chat_draft_replay", "draft")
+    await orchestrator.tokens_ready.wait()
+    stored = repository.get("chat_draft_replay")
+    assert stored is not None
+    repository_cursor = max(
+        int(message.metadata["event_sequence"])
+        for message in stored.messages
+        if message.metadata.get("run_id") == started.run_id
+    )
+    assert repository_cursor == 2
+
+    subscription = manager.subscribe(started.run_id, after_sequence=repository_cursor)
+    snapshot_event = await anext(subscription)
+    snapshot_data = snapshot_event.data["snapshot"]
+    assert snapshot_data["accumulated_draft"] == "AB"
+    assert snapshot_data["accumulated_draft_through_sequence"] == 4
+
+    orchestrator.release.set()
+    resumed = [event async for event in subscription]
+    assert [event.event_type for event in resumed] == ["token", "done"]
+    assert resumed[0].message == "C"
+    assert manager.get_run(started.run_id).accumulated_draft == "ABC"
+
+
+@pytest.mark.anyio
+async def test_bounded_history_still_recovers_complete_draft_from_snapshot(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_bounded_draft"))
+    manager = ChatRunManager(
+        orchestrator=_ManyTokenOrchestrator(),
+        repository=repository,
+        history_limit=8,
+    )
+
+    started = await manager.start_run("chat_bounded_draft", "bounded")
+    await manager.wait_for_run(started.run_id)
+    subscription = manager.subscribe(started.run_id, after_sequence=2)
+    snapshot_event = await anext(subscription)
+    snapshot_data = snapshot_event.data["snapshot"]
+
+    assert snapshot_data["accumulated_draft"] == "012345678910111213141516171819"
+    assert snapshot_data["accumulated_draft_through_sequence"] == 22
+    replay = [event async for event in subscription]
+    assert [event.event_type for event in replay] == ["done"]
+
+
+@pytest.mark.anyio
+async def test_subscribe_registration_race_delivers_progress_exactly_once_100_times(
+    tmp_path,
+) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_replay_registration_race"))
+    orchestrator = _ReplayRegistrationRaceOrchestrator()
+    manager = ChatRunManager(orchestrator=orchestrator, repository=repository)
+
+    for index in range(100):
+        orchestrator.prepare()
+        started = await manager.start_run(
+            "chat_replay_registration_race",
+            f"race-{index}",
+        )
+        await orchestrator.ready.wait()
+        events: list = []
+        progress_seen = asyncio.Event()
+        barrier = asyncio.Barrier(2)
+
+        async def consume(
+            *,
+            barrier=barrier,
+            run_id=started.run_id,
+            events=events,
+            progress_seen=progress_seen,
+        ) -> None:
+            await barrier.wait()
+            async for event in manager.subscribe(run_id, after_sequence=2):
+                events.append(event)
+                if event.event_type == "progress":
+                    progress_seen.set()
+
+        async def trigger(*, barrier=barrier) -> None:
+            await barrier.wait()
+            orchestrator.trigger.set()
+
+        consumer_task = asyncio.create_task(consume())
+        await asyncio.gather(trigger(), progress_seen.wait())
+        orchestrator.release.set()
+        await consumer_task
+        await manager.wait_for_run(started.run_id)
+
+        progress_events = [event for event in events if event.event_type == "progress"]
+        assert len(progress_events) == 1
+        assert [event.sequence for event in events] == sorted(
+            event.sequence for event in events
+        )
+
+
+@pytest.mark.anyio
+async def test_terminal_registration_race_delivers_done_exactly_once(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_terminal_registration_race"))
+    orchestrator = _ReplayRegistrationRaceOrchestrator(terminal_only=True)
+    manager = ChatRunManager(orchestrator=orchestrator, repository=repository)
+
+    for index in range(100):
+        orchestrator.prepare()
+        started = await manager.start_run(
+            "chat_terminal_registration_race",
+            f"terminal-race-{index}",
+        )
+        await orchestrator.ready.wait()
+        events: list = []
+        barrier = asyncio.Barrier(2)
+
+        async def consume(*, barrier=barrier, run_id=started.run_id, events=events) -> None:
+            await barrier.wait()
+            async for event in manager.subscribe(run_id, after_sequence=2):
+                events.append(event)
+
+        async def trigger(*, barrier=barrier) -> None:
+            await barrier.wait()
+            orchestrator.trigger.set()
+
+        consumer_task = asyncio.create_task(consume())
+        await asyncio.gather(trigger(), consumer_task)
+        await manager.wait_for_run(started.run_id)
+        done_events = [event for event in events if event.event_type == "done"]
+        assert len(done_events) == 1
+        assert done_events[0].terminal is True

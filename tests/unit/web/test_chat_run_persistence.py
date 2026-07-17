@@ -11,6 +11,7 @@ from qmt_agent_trader.web.chat_run_manager import (
     RunEvent,
     RunStatus,
 )
+from qmt_agent_trader.web.event_bus import AgentEventType, EventBus
 from qmt_agent_trader.web.schemas import ChatSession
 
 
@@ -95,6 +96,34 @@ class _FailureTeardownOrchestrator:
             self.active -= 1
 
 
+class _ToolResultThenCancelledOrchestrator:
+    async def execute_stream(self, message: str, **kwargs: object):
+        run_id = str(kwargs["run_id"])
+        yield OrchestratorEvent(type="run_started", run_id=run_id, message="started")
+        yield OrchestratorEvent(
+            type="tool_args",
+            run_id=run_id,
+            message="Args ready",
+            data={"tool_name": "lookup", "arguments": {"symbol": "000001.SZ"}},
+        )
+        yield OrchestratorEvent(
+            type="tool_done",
+            run_id=run_id,
+            message="Tool lookup ✓",
+            data={
+                "tool_name": "lookup",
+                "result_id": "result-cancelled",
+                "result_preview": '{"status": "ok"}',
+            },
+        )
+        yield OrchestratorEvent(
+            type="cancelled",
+            run_id=run_id,
+            message="Execution cancelled by user.",
+            data={"reason": "user_interrupt"},
+        )
+
+
 @pytest.mark.anyio
 async def test_manager_persists_run_events_without_token_deltas(tmp_path) -> None:
     repository = ChatSessionRepository(tmp_path / "sessions")
@@ -125,6 +154,31 @@ async def test_manager_persists_run_events_without_token_deltas(tmp_path) -> Non
     assert tool_args.metadata["tool_name"] == "lookup"
     assert '"symbol": "000001.SZ"' in tool_args.content
     assert stored.messages[-2].role == "assistant"
+
+
+@pytest.mark.anyio
+async def test_token_events_do_not_schedule_persistence_work(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_token_persist"))
+    manager = ChatRunManager(
+        orchestrator=_ScriptedOrchestrator(),
+        repository=repository,
+    )
+    original_persist = manager._persist_event
+    persisted_types: list[str] = []
+
+    def record_persisted_event(event: RunEvent) -> None:
+        persisted_types.append(event.event_type)
+        original_persist(event)
+
+    manager._persist_event = record_persisted_event
+    started = await manager.start_run("chat_token_persist", "不持久化 token")
+    await manager.wait_for_run(started.run_id)
+
+    assert "token" not in persisted_types
+    stored = repository.get("chat_token_persist")
+    assert stored is not None
+    assert all(message.metadata.get("event_type") != "token" for message in stored.messages)
 
 
 @pytest.mark.anyio
@@ -246,3 +300,33 @@ async def test_persistence_dedupe_key_is_run_and_sequence_only(tmp_path) -> None
     after = repository.get("chat_pair_key")
     assert after is not None
     assert after.messages == before.messages
+
+
+@pytest.mark.anyio
+async def test_completed_tool_result_is_persisted_before_cancellation(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_tool_cancelled"))
+    bus = EventBus()
+    manager = ChatRunManager(
+        orchestrator=_ToolResultThenCancelledOrchestrator(),
+        repository=repository,
+        bus=bus,
+    )
+
+    started = await manager.start_run("chat_tool_cancelled", "停止工具任务")
+    final = await manager.wait_for_run(started.run_id)
+
+    assert final.status is RunStatus.CANCELLED
+    stored = repository.get("chat_tool_cancelled")
+    assert stored is not None
+    event_types = [message.metadata.get("event_type") for message in stored.messages]
+    assert event_types[-3:] == ["tool_args", "tool_done", "cancelled"]
+    assert "final_message" not in event_types
+    assert "done" not in event_types
+    completed = [
+        event
+        for event in bus.get_history(started.run_id)
+        if event.event_type is AgentEventType.TOOL_CALL_COMPLETED
+    ]
+    assert len(completed) == 1
+    assert completed[0].payload["event_type"] == "tool_done"

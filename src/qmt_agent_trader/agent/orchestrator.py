@@ -473,11 +473,15 @@ class AgentOrchestrator:
             if cancelled or (
                 cancel_requested is not None and cancel_requested()
             ):
+                evidence_report = _ledger_from_stream(rid, stream_buffer).report()
                 yield OrchestratorEvent(
                     type="cancelled",
                     run_id=rid,
                     message="Execution cancelled by user.",
-                    data={"reason": "user_interrupt"},
+                    data={
+                        "reason": "user_interrupt",
+                        "evidence_report": evidence_report,
+                    },
                 )
                 return
 
@@ -506,11 +510,15 @@ class AgentOrchestrator:
                         },
                     )
                     if cancel_requested is not None and cancel_requested():
+                        evidence_report = _ledger_from_stream(rid, stream_buffer).report()
                         yield OrchestratorEvent(
                             type="cancelled",
                             run_id=rid,
                             message="Execution cancelled by user.",
-                            data={"reason": "user_interrupt"},
+                            data={
+                                "reason": "user_interrupt",
+                                "evidence_report": evidence_report,
+                            },
                         )
                         return
                     yield OrchestratorEvent(

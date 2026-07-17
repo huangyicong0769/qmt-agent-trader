@@ -25,6 +25,7 @@ from qmt_agent_trader.web.chat_run_manager import (
     RunStatus,
     SessionDeletionBlockedError,
     SuccessorAlreadyPendingError,
+    is_terminal_run_event,
 )
 from qmt_agent_trader.web.schemas import ChatMessage as StoredChatMessage
 from qmt_agent_trader.web.schemas import ChatSession as StoredChatSession
@@ -46,6 +47,9 @@ INTERRUPT_LEVELS = {
     "interrupt": "打断",
 }
 INTERRUPT_LABELS = {value: key for key, value in INTERRUPT_LEVELS.items()}
+SIDEBAR_REFRESH_EVENT_TYPES = frozenset(
+    {"user_message", "final_message", "error", "done", "cancelled"}
+)
 
 
 @dataclass
@@ -61,6 +65,7 @@ class _PendingMessage:
     level: str
     content: str
     ready_to_send: bool = False
+    session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,7 @@ class _AssistantRenderState:
     card: Any = None
     markdown: Any = None
     persisted_final: bool = False
+    flush_task: asyncio.Task[Any] | None = None
 
 
 @dataclass
@@ -251,6 +257,35 @@ def _ui_target_alive(
     if client is not None and client.is_deleted:
         return False
     return target is not None and not getattr(target, "is_deleted", False)
+
+
+def _should_refresh_sidebar(event: RunEvent) -> bool:
+    return event.event_type in SIDEBAR_REFRESH_EVENT_TYPES
+
+
+def _can_start_successor_subscription(
+    successor_session_id: str,
+    active_session_id: str,
+    session_ids: set[str],
+    *,
+    page_alive: bool,
+) -> bool:
+    return (
+        page_alive
+        and successor_session_id == active_session_id
+        and successor_session_id in session_ids
+    )
+
+
+def _pending_messages_for(
+    pending_messages_by_session: dict[str, list[_PendingMessage]],
+    session_id: str,
+) -> list[_PendingMessage]:
+    return pending_messages_by_session.setdefault(session_id, [])
+
+
+def _pending_message_session(pending: _PendingMessage, fallback_session_id: str) -> str:
+    return pending.session_id or fallback_session_id
 
 
 def _render_stored_message(
@@ -429,6 +464,7 @@ def _render_run_event(
     state: _AssistantRenderState,
     *,
     page_alive: bool | Callable[[], bool],
+    defer_draft: bool = False,
 ) -> None:
     if not _ui_target_alive(client, targets.transcript, page_alive):
         return
@@ -459,12 +495,13 @@ def _render_run_event(
         )
     elif event_type == "token":
         state.text += event.message
-        _render_assistant_draft(
-            client,
-            targets.transcript,
-            state,
-            page_alive=page_alive,
-        )
+        if not defer_draft:
+            _render_assistant_draft(
+                client,
+                targets.transcript,
+                state,
+                page_alive=page_alive,
+            )
     elif event_type == "final_message":
         state.text = event.message or str(event.data.get("content", ""))
         _render_assistant_draft(
@@ -713,7 +750,7 @@ def register() -> None:
         successor_watchers: dict[str, asyncio.Task[Any]] = {}
         subscribed_run_id: str | None = None
         active_sid = ""
-        pending_messages: list[_PendingMessage] = []
+        pending_messages_by_session: dict[str, list[_PendingMessage]] = {}
         last_rendered_sequence: dict[str, int] = {}
         assistant_states: dict[str, _AssistantRenderState] = {}
         run_started_at: dict[str, float] = {}
@@ -755,6 +792,15 @@ def register() -> None:
         def run_is_busy(sid: str | None = None) -> bool:
             return active_run(sid) is not None
 
+        def pending_messages_for(sid: str | None = None) -> list[_PendingMessage]:
+            target_sid = sid or active_sid
+            if not target_sid:
+                return []
+            return _pending_messages_for(pending_messages_by_session, target_sid)
+
+        def current_pending_messages() -> list[_PendingMessage]:
+            return pending_messages_for(active_sid)
+
         def cancel_current_subscription() -> None:
             nonlocal subscription_task, subscribed_run_id
             if subscription_task is not None and not subscription_task.done():
@@ -767,7 +813,12 @@ def register() -> None:
                 while alive():
                     current = manager.get_active_run(sid)
                     if current is not None and current.run_id != old_run_id:
-                        if sid in sessions:
+                        if _can_start_successor_subscription(
+                            sid,
+                            active_sid,
+                            set(sessions),
+                            page_alive=page_alive,
+                        ):
                             start_subscription(sessions[sid], current)
                         return
                     if not manager.has_pending_successor(sid) and current is None:
@@ -803,6 +854,49 @@ def register() -> None:
                 plan_card=plan_card,
                 progress_card=progress_card,
             )
+
+            def flush_draft_now() -> None:
+                task = state.flush_task
+                if task is not None and not task.done():
+                    task.cancel()
+                state.flush_task = None
+                if alive():
+                    _render_assistant_draft(
+                        client,
+                        targets.transcript,
+                        state,
+                        page_alive=alive,
+                    )
+
+            def schedule_draft_flush() -> None:
+                if not alive():
+                    return
+                if state.flush_task is not None and not state.flush_task.done():
+                    return
+
+                async def flush_after_batch() -> None:
+                    try:
+                        await asyncio.sleep(0.05)
+                        if alive():
+                            _render_assistant_draft(
+                                client,
+                                targets.transcript,
+                                state,
+                                page_alive=alive,
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    finally:
+                        if state.flush_task is asyncio.current_task():
+                            state.flush_task = None
+
+                state.flush_task = track_page_task(
+                    asyncio.create_task(
+                        flush_after_batch(),
+                        name=f"chat-draft-flush-{run_id}",
+                    )
+                )
+
             subscription = manager.subscribe(run_id, after_sequence=cursor)
             try:
                 async for event in subscription:
@@ -810,24 +904,40 @@ def register() -> None:
                         return
                     if event.sequence > 0 and event.sequence <= cursor:
                         continue
-                    _render_run_event(
-                        client,
-                        targets,
-                        event,
-                        state,
-                        page_alive=alive,
-                    )
+                    if event.event_type == "token":
+                        _render_run_event(
+                            client,
+                            targets,
+                            event,
+                            state,
+                            page_alive=alive,
+                            defer_draft=True,
+                        )
+                        schedule_draft_flush()
+                    else:
+                        if is_terminal_run_event(event) or event.event_type == "final_message":
+                            flush_draft_now()
+                        _render_run_event(
+                            client,
+                            targets,
+                            event,
+                            state,
+                            page_alive=alive,
+                        )
                     if event.sequence > cursor:
                         cursor = event.sequence
                         last_rendered_sequence[run_id] = cursor
                         _append_local_event(session, event)
-                        refresh_sidebar_safe()
-                    if event.event_type in {"done", "error", "cancelled"}:
-                        if pending_messages:
-                            pending_messages[:] = [
-                                _mark_pending_ready(item) for item in pending_messages
+                        if _should_refresh_sidebar(event):
+                            refresh_sidebar_safe()
+                    if is_terminal_run_event(event):
+                        pending = pending_messages_for(session.sid)
+                        if pending:
+                            pending_messages_by_session[session.sid] = [
+                                _mark_pending_ready(item) for item in pending
                             ]
-                            render_pending_status()
+                            if session.sid == active_sid:
+                                render_pending_status()
                         schedule_successor_watch(session.sid, run_id)
                         return
             except asyncio.CancelledError:
@@ -836,6 +946,9 @@ def register() -> None:
                 logger.exception("chat run subscription failed for %s", run_id)
                 safe_notify(f"运行事件订阅失败：{exc}", type="negative")
             finally:
+                if state.flush_task is not None and not state.flush_task.done():
+                    state.flush_task.cancel()
+                state.flush_task = None
                 await subscription.aclose()
 
         def start_subscription(session: _ChatSession, snapshot: RunSnapshot) -> None:
@@ -876,6 +989,7 @@ def register() -> None:
                     schedule_successor_watch(sid, "")
             else:
                 start_subscription(sessions[sid], current)
+            render_pending_status()
             refresh_sidebar_safe()
 
         def create_session(name: str = "", focus: bool = True) -> _ChatSession:
@@ -922,6 +1036,7 @@ def register() -> None:
                 safe_notify("会话不存在或已删除。", type="warning")
                 return
             sessions.pop(sid)
+            pending_messages_by_session.pop(sid, None)
             if not alive():
                 return
             if not getattr(session.container, "is_deleted", False):
@@ -935,6 +1050,7 @@ def register() -> None:
         def render_pending_status() -> None:
             if not alive() or pending_card is None or pending_label is None:
                 return
+            pending_messages = current_pending_messages()
             if not pending_messages:
                 _set_card_visible(client, queue_badge, False, page_alive=alive)
                 _set_card_visible(client, pending_card, False, page_alive=alive)
@@ -953,7 +1069,7 @@ def register() -> None:
             _set_card_visible(
                 client,
                 pending_send_button,
-                status.can_send and not run_is_busy(),
+                status.can_send and not run_is_busy(active_sid),
                 page_alive=alive,
             )
 
@@ -973,21 +1089,36 @@ def register() -> None:
                 run_timer_badge.update()
 
         def cancel_pending_message() -> None:
-            if not alive() or not pending_messages:
+            if not alive() or not active_sid:
+                return
+            pending_messages = current_pending_messages()
+            if not pending_messages:
                 return
             pending_messages.pop(0)
             render_pending_status()
             safe_notify("已撤销当前待发送消息。")
 
         async def send_pending_message() -> None:
-            if not alive() or not pending_messages:
+            if not alive() or not active_sid:
                 return
-            if run_is_busy():
+            pending_messages = current_pending_messages()
+            if not pending_messages:
+                return
+            pending = pending_messages[0]
+            sid = _pending_message_session(pending, active_sid)
+            if run_is_busy(sid):
                 safe_notify("当前任务仍在运行，稍后再确认发送。", type="warning")
                 return
-            message.value = pending_messages.pop(0).content
-            render_pending_status()
-            await run_send_handler(from_pending=True)
+            pending_messages.pop(0)
+            if sid == active_sid:
+                message.value = pending.content
+                render_pending_status()
+            await run_send_handler(
+                from_pending=True,
+                session_id=sid,
+                content=pending.content,
+                level=pending.level,
+            )
 
         async def stop_active_run() -> None:
             if not alive():
@@ -1001,60 +1132,73 @@ def register() -> None:
                 render_run_timer()
                 safe_notify("正在停止，当前工具调用结束后生效。", type="warning")
 
-        async def run_send_handler(*, from_pending: bool) -> None:
+        async def run_send_handler(
+            *,
+            from_pending: bool,
+            session_id: str | None = None,
+            content: str | None = None,
+            level: str | None = None,
+        ) -> None:
             if not alive():
                 return
-            if not active_sid or active_sid not in sessions:
+            sid = session_id or active_sid
+            if not sid or sid not in sessions:
                 safe_notify("No active session.", type="warning")
                 return
+            pending_messages = pending_messages_for(sid)
             if pending_messages and pending_messages[0].ready_to_send and not from_pending:
                 safe_notify("请先发送或撤销待处理消息。", type="warning")
                 return
-            content = (message.value or "").strip()
-            if not content:
+            requested_content = (content if content is not None else message.value or "").strip()
+            if not requested_content:
                 safe_notify("Enter a message first.", type="warning")
                 return
-            level = INTERRUPT_LABELS.get(interrupt_select.value, "guide")
-            current = active_run()
+            resolved_level = level or INTERRUPT_LABELS.get(interrupt_select.value, "guide")
+            current = active_run(sid)
             if current is not None:
-                if level == "interrupt":
-                    message.value = ""
+                if resolved_level == "interrupt":
+                    if sid == active_sid:
+                        message.value = ""
                     try:
-                        old = await manager.interrupt_and_start(active_sid, content)
+                        old = await manager.interrupt_and_start(sid, requested_content)
                     except SuccessorAlreadyPendingError:
                         safe_notify("已有待执行的打断消息，请等待它完成。", type="warning")
                         return
                     except RunAlreadyActiveError as exc:
                         safe_notify(str(exc), type="warning")
                         return
-                    render_pending_status()
+                    if sid == active_sid:
+                        render_pending_status()
                     safe_notify("旧任务正在停止，新消息将在停止后启动。", type="warning")
                     if old.successor_run_id is not None:
-                        schedule_successor_watch(active_sid, old.run_id)
+                        schedule_successor_watch(sid, old.run_id)
                     return
-                pending = _build_pending_message(level, content)
+                pending = _build_pending_message(resolved_level, requested_content)
                 if pending is None:
                     safe_notify("Enter a message first.", type="warning")
                     return
-                pending_messages.append(pending)
-                message.value = ""
-                render_pending_status()
+                pending_messages.append(replace(pending, session_id=sid))
+                if sid == active_sid:
+                    message.value = ""
+                    render_pending_status()
                 safe_notify(
                     "已排队，当前任务完成后等待你确认发送。"
-                    if level == "queue"
+                    if resolved_level == "queue"
                     else "已加入引导，当前任务完成后等待你确认发送。"
                 )
                 return
 
-            message.value = ""
+            if sid == active_sid:
+                message.value = ""
             try:
-                snapshot = await manager.start_run(active_sid, content)
+                snapshot = await manager.start_run(sid, requested_content)
             except RunAlreadyActiveError as exc:
                 safe_notify(str(exc), type="warning")
                 return
             run_started_at[snapshot.run_id] = time.monotonic()
-            start_subscription(sessions[active_sid], snapshot)
-            render_pending_status()
+            if sid == active_sid:
+                start_subscription(sessions[sid], snapshot)
+                render_pending_status()
 
         async def send_handler() -> None:
             await run_send_handler(from_pending=False)

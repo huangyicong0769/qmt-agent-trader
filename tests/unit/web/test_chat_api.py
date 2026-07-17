@@ -265,6 +265,109 @@ def test_run_api_query_sse_replay_and_event_bus_are_unified(
         )
 
 
+def test_fallback_error_reaches_run_and_compatibility_sse_before_done(
+    isolated_chat_repository: ChatSessionRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FallbackOrchestrator:
+        async def execute_stream(self, message: str, **kwargs: object):
+            run_id = str(kwargs["run_id"])
+            session_id = str(kwargs["session_id"])
+            yield OrchestratorEvent(
+                type="error",
+                run_id=run_id,
+                session_id=session_id,
+                message="fallback diagnostic",
+                data={"fallback": True, "error": "stream"},
+            )
+            yield OrchestratorEvent(
+                type="final_message",
+                run_id=run_id,
+                session_id=session_id,
+                message="fallback final",
+            )
+            yield OrchestratorEvent(
+                type="done",
+                run_id=run_id,
+                session_id=session_id,
+                message="done",
+            )
+
+    manager = ChatRunManager(
+        orchestrator=FallbackOrchestrator(),
+        repository=isolated_chat_repository,
+    )
+    monkeypatch.setattr(chat, "_get_run_manager", lambda: manager)
+    app = FastAPI()
+    app.include_router(chat.router)
+
+    def payloads(response_text: str) -> list[dict[str, object]]:
+        return [
+            json.loads(line.removeprefix("data: "))
+            for line in response_text.splitlines()
+            if line.startswith("data: ")
+        ]
+
+    with TestClient(app) as client:
+        first_session = client.post("/sessions", json={}).json()["session_id"]
+        first_run = client.post(
+            f"/sessions/{first_session}/runs",
+            json={"message": "fallback"},
+        ).json()["run_id"]
+        first_events = payloads(client.get(f"/runs/{first_run}/events").text)
+        first_types = [event["event_type"] for event in first_events]
+        assert first_types[-3:] == ["error", "final_message", "done"]
+        assert first_events[-3]["terminal"] is False
+        assert first_events[-1]["terminal"] is True
+        assert client.get(f"/runs/{first_run}").json()["status"] == "COMPLETED"
+
+        second_session = client.post("/sessions", json={}).json()["session_id"]
+        compatibility = client.post(
+            f"/sessions/{second_session}/execute",
+            json={"message": "fallback compatibility"},
+        )
+        compatibility_events = payloads(compatibility.text)
+        compatibility_types = [event["event_type"] for event in compatibility_events]
+        assert compatibility_types[-3:] == ["error", "final_message", "done"]
+
+
+def test_run_sse_reconnect_does_not_repeat_snapshot_draft_tokens(
+    isolated_chat_repository: ChatSessionRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TokenOrchestrator:
+        async def execute_stream(self, message: str, **kwargs: object):
+            run_id = str(kwargs["run_id"])
+            yield OrchestratorEvent(type="token", run_id=run_id, message="A")
+            yield OrchestratorEvent(type="token", run_id=run_id, message="B")
+            yield OrchestratorEvent(type="done", run_id=run_id, message="done")
+
+    manager = ChatRunManager(
+        orchestrator=TokenOrchestrator(),
+        repository=isolated_chat_repository,
+    )
+    monkeypatch.setattr(chat, "_get_run_manager", lambda: manager)
+    app = FastAPI()
+    app.include_router(chat.router)
+
+    with TestClient(app) as client:
+        session_id = client.post("/sessions", json={}).json()["session_id"]
+        run_id = client.post(
+            f"/sessions/{session_id}/runs",
+            json={"message": "draft replay"},
+        ).json()["run_id"]
+        response = client.get(f"/runs/{run_id}/events?after_sequence=2")
+
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert payloads[0]["event_type"] == "snapshot"
+    assert payloads[0]["data"]["snapshot"]["accumulated_draft"] == "AB"
+    assert [payload["event_type"] for payload in payloads[1:]] == ["done"]
+
+
 def test_cancel_api_returns_cancelling_until_worker_confirms(
     isolated_chat_repository: ChatSessionRepository,
     monkeypatch: pytest.MonkeyPatch,

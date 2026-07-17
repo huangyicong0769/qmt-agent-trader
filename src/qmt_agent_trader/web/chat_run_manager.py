@@ -32,6 +32,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_EVENT_HISTORY_LIMIT = 256
 DEFAULT_TERMINAL_RUN_TTL_SECONDS = 300.0
 
+PERSISTED_EVENT_TYPES = frozenset(
+    {
+        "user_message",
+        "run_started",
+        "cancelling",
+        "cancelled",
+        "tool_start",
+        "tool_args",
+        "tool_done",
+        "final_message",
+        "done",
+        "error",
+    }
+)
+
+# Lock order for all run-event operations is manager._lock -> run.event_lock.
+# No code may acquire manager._lock while holding a run.event_lock.  The
+# append/broadcast helper is called only while both locks are held.
+
 
 class RunStatus(StrEnum):
     PENDING = "PENDING"
@@ -76,6 +95,7 @@ class RunEvent:
     message: str = ""
     data: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=shanghai_now_iso)
+    terminal: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +109,7 @@ class RunEvent:
             "message": self.message,
             "data": self.data,
             "created_at": self.created_at,
+            "terminal": self.terminal,
         }
 
     def to_sse(self) -> str:
@@ -108,6 +129,7 @@ class RunSnapshot:
     last_event_sequence: int
     cancellation_requested: bool
     accumulated_draft: str
+    accumulated_draft_through_sequence: int
     recent_tool: dict[str, Any] | None
     successor_run_id: str | None = None
 
@@ -124,6 +146,7 @@ class RunSnapshot:
             "last_event_sequence": self.last_event_sequence,
             "cancellation_requested": self.cancellation_requested,
             "accumulated_draft": self.accumulated_draft,
+            "accumulated_draft_through_sequence": self.accumulated_draft_through_sequence,
             "recent_tool": self.recent_tool,
             "successor_run_id": self.successor_run_id,
         }
@@ -150,6 +173,7 @@ class _ChatRun:
     error: str | None = None
     last_event_sequence: int = 0
     accumulated_draft: str = ""
+    accumulated_draft_through_sequence: int = 0
     recent_tool: dict[str, Any] | None = None
     task: asyncio.Task[None] | None = None
     cancelling_task: asyncio.Task[Any] | None = None
@@ -274,9 +298,10 @@ class ChatRunManager:
             )
             self._successors[session_id] = request
             cancelling_task = self._request_cancel_locked(active)
+            requested_snapshot = self._snapshot(active)
             if cancelling_task is not None:
                 await asyncio.shield(cancelling_task)
-            return self._snapshot(active)
+            return requested_snapshot
 
     async def request_cancel(self, run_id: str) -> RunSnapshot | None:
         run = self._runs.get(run_id)
@@ -289,9 +314,10 @@ class ChatRunManager:
             if current.status in TERMINAL_STATUSES:
                 return self._snapshot(current)
             cancelling_task = self._request_cancel_locked(current)
+            requested_snapshot = self._snapshot(current)
             if cancelling_task is not None:
                 await asyncio.shield(cancelling_task)
-            return self._snapshot(current)
+            return requested_snapshot
 
     async def wait_for_run(self, run_id: str) -> RunSnapshot:
         run = self._runs.get(run_id)
@@ -313,34 +339,42 @@ class ChatRunManager:
             return
         queue: asyncio.Queue[RunEvent] = asyncio.Queue()
         async with self._lock:
-            run = self._runs.get(run_id)
-            if run is None:
-                return
-            snapshot = RunEvent(
-                sequence=0,
-                run_id=run.run_id,
-                session_id=run.session_id,
-                event_type="snapshot",
-                data={"snapshot": self._snapshot(run).to_dict()},
-            )
-            replay = [
-                event for event in run.history_events if event.sequence > after_sequence
-            ]
-            run.subscribers.add(queue)
+            async with run.event_lock:
+                current = self._runs.get(run_id)
+                if current is None or current is not run:
+                    return
+                snapshot_data = self._snapshot(run).to_dict()
+                snapshot = RunEvent(
+                    sequence=0,
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    event_type="snapshot",
+                    data={"snapshot": snapshot_data},
+                )
+                draft_through = int(
+                    snapshot_data.get("accumulated_draft_through_sequence", 0)
+                )
+                replay = [
+                    event
+                    for event in run.history_events
+                    if event.sequence > after_sequence
+                    and not (
+                        event.event_type == "token"
+                        and event.sequence <= draft_through
+                    )
+                ]
+                run.subscribers.add(queue)
 
         cursor = after_sequence
         try:
             yield snapshot
-            terminal_replayed = False
             for event in replay:
                 if event.sequence <= cursor:
                     continue
                 cursor = event.sequence
                 yield event
-                if event.event_type in {"done", "error", "cancelled"}:
-                    terminal_replayed = True
-            if terminal_replayed:
-                return
+                if is_terminal_run_event(event):
+                    return
             if run.completion_event.is_set():
                 # Completion can race with replay.  Drain events already
                 # enqueued for this subscriber before returning so a terminal
@@ -354,7 +388,7 @@ class ChatRunManager:
                         continue
                     cursor = event.sequence
                     yield event
-                    if event.event_type in {"done", "error", "cancelled"}:
+                    if is_terminal_run_event(event):
                         return
                 return
             while True:
@@ -363,10 +397,14 @@ class ChatRunManager:
                     continue
                 cursor = event.sequence
                 yield event
-                if event.event_type in {"done", "error", "cancelled"}:
+                if is_terminal_run_event(event):
                     return
         finally:
-            run.subscribers.discard(queue)
+            async with self._lock:
+                current = self._runs.get(run_id)
+                if current is run:
+                    async with run.event_lock:
+                        run.subscribers.discard(queue)
 
     def _request_cancel_locked(self, run: _ChatRun) -> asyncio.Task[Any] | None:
         if run.status in TERMINAL_STATUSES:
@@ -587,28 +625,31 @@ class ChatRunManager:
         data: dict[str, Any] | None = None,
         persist: bool = True,
     ) -> RunEvent:
-        async with run.event_lock:
-            event = RunEvent(
-                sequence=run.last_event_sequence + 1,
-                run_id=run.run_id,
-                session_id=run.session_id,
-                event_type=event_type,
-                message=message,
-                data=data or {},
-            )
-            if persist:
-                try:
-                    await asyncio.to_thread(self._persist_event, event)
-                except Exception as exc:
-                    logger.exception(
-                        "failed to persist chat run event %s/%s",
-                        run.run_id,
-                        event.sequence,
-                    )
-                    await self._record_persistence_failure(run, exc)
-                    return event
-            await self._append_and_broadcast(run, event)
-            return event
+        event_data = dict(data or {})
+        async with self._lock:
+            async with run.event_lock:
+                event = RunEvent(
+                    sequence=run.last_event_sequence + 1,
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    event_type=event_type,
+                    message=message,
+                    data=event_data,
+                    terminal=_terminal_for_event(event_type, event_data),
+                )
+                if persist and self._persistent_message(event) is not None:
+                    try:
+                        await asyncio.to_thread(self._persist_event, event)
+                    except Exception as exc:
+                        logger.exception(
+                            "failed to persist chat run event %s/%s",
+                            run.run_id,
+                            run.last_event_sequence + 1,
+                        )
+                        await self._record_persistence_failure(run, exc)
+                        return event
+                await self._append_and_broadcast(run, event)
+                return event
 
     def _persist_event(self, event: RunEvent) -> None:
         persisted = self._persistent_message(event)
@@ -639,6 +680,8 @@ class ChatRunManager:
         self,
         event: RunEvent,
     ) -> tuple[str, str, dict[str, Any]] | None:
+        if event.event_type not in PERSISTED_EVENT_TYPES:
+            return None
         metadata: dict[str, Any] = {
             "run_id": event.run_id,
             "event_sequence": event.sequence,
@@ -691,8 +734,10 @@ class ChatRunManager:
         run.last_event_sequence = event.sequence
         if event.event_type == "token":
             run.accumulated_draft += event.message
+            run.accumulated_draft_through_sequence = event.sequence
         elif event.event_type == "final_message":
             run.accumulated_draft = event.message
+            run.accumulated_draft_through_sequence = event.sequence
         elif event.event_type.startswith("tool_"):
             run.recent_tool = dict(event.data)
         run.history_events.append(event)
@@ -715,6 +760,7 @@ class ChatRunManager:
             event_type="error",
             message=run.error,
             data={"error": run.error, "persistence_failure": True},
+            terminal=True,
         )
         await self._append_and_broadcast(run, event)
 
@@ -751,10 +797,14 @@ class ChatRunManager:
 
     async def _cleanup_after_ttl(self, run_id: str) -> None:
         await asyncio.sleep(self.terminal_ttl_seconds)
-        run = self._runs.get(run_id)
-        if run is not None and run.status in TERMINAL_STATUSES and not run.subscribers:
-            self._runs.pop(run_id, None)
-            self.event_bus.clear_history(run_id)
+        async with self._lock:
+            run = self._runs.get(run_id)
+            if run is not None and run.status in TERMINAL_STATUSES:
+                async with run.event_lock:
+                    if run.subscribers:
+                        return
+                    self._runs.pop(run_id, None)
+                    self.event_bus.clear_history(run_id)
 
     def _transition(self, run: _ChatRun, target: RunStatus) -> None:
         current = run.status
@@ -800,6 +850,7 @@ class ChatRunManager:
             last_event_sequence=run.last_event_sequence,
             cancellation_requested=run.token.is_cancel_requested(),
             accumulated_draft=run.accumulated_draft,
+            accumulated_draft_through_sequence=run.accumulated_draft_through_sequence,
             recent_tool=run.recent_tool,
             successor_run_id=successor.request_id if successor is not None else None,
         )
@@ -840,3 +891,15 @@ def _same_event_marker(message: ChatMessage, event: RunEvent) -> bool:
         metadata.get("run_id") == event.run_id
         and metadata.get("event_sequence") == event.sequence
     )
+
+
+def _terminal_for_event(event_type: str, data: dict[str, Any]) -> bool:
+    """Assign terminal meaning once, at the RunEvent construction boundary."""
+    if event_type in {"done", "cancelled"}:
+        return True
+    return event_type == "error" and not bool(data.get("fallback", False))
+
+
+def is_terminal_run_event(event: RunEvent) -> bool:
+    """Return the explicit terminal meaning shared by all subscribers."""
+    return event.terminal

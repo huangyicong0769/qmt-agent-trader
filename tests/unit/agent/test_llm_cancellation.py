@@ -187,7 +187,7 @@ def test_cancellation_after_arguments_prevents_tool_execution() -> None:
     assert completions.calls and stream.closed
 
 
-def test_cancellation_after_sync_tool_returns_stops_before_tool_result() -> None:
+def test_cancellation_after_sync_tool_returns_reports_tool_result_before_cancelled() -> None:
     stream = _ClosableStream([_tool_chunk()])
     client, completions = _client(stream)
     token = CancellationToken()
@@ -213,7 +213,7 @@ def test_cancellation_after_sync_tool_returns_stops_before_tool_result() -> None
 
     assert len(completions.calls) == 1
     assert isinstance(events[-1], Cancelled)
-    assert not any(isinstance(event, ToolResult) for event in events)
+    assert any(isinstance(event, ToolResult) for event in events)
     assert not any(isinstance(event, FinalMessage) for event in events)
     assert stream.closed
 

@@ -12,6 +12,7 @@ from qmt_agent_trader.agent.llm_client import (
     Cancelled,
     FinalMessage,
     TextDelta,
+    ToolCallComplete,
     ToolResult,
 )
 from qmt_agent_trader.agent.orchestrator import AgentOrchestrator
@@ -47,6 +48,26 @@ class _ErrorClient:
 
     def run_tool_loop_stream(self, *, messages, tools, max_rounds, cancel_requested=None):
         raise RuntimeError("worker exploded")
+
+
+class _ToolThenWaitClient:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def run_tool_loop_stream(self, *, messages, tools, max_rounds, cancel_requested=None):
+        yield ToolCallComplete(
+            tool_call_id="call-1",
+            tool_name="lookup",
+            arguments={"symbol": "000001.SZ"},
+        )
+        yield ToolResult(
+            tool_call_id="call-1",
+            tool_name="lookup",
+            result={"status": "ok", "value": 1},
+        )
+        while cancel_requested is None or not cancel_requested():
+            time.sleep(0.001)
+        yield Cancelled()
 
 
 def _orchestrator(tmp_path) -> AgentOrchestrator:
@@ -155,6 +176,34 @@ def test_cancel_wins_over_worker_error_fallback(monkeypatch, tmp_path) -> None:
     assert any(event.type == "cancelled" for event in events)
     assert not any(event.type == "final_message" for event in events)
     assert not any(event.type == "done" for event in events)
+
+
+def test_completed_tool_result_reaches_orchestrator_before_cancel(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "qmt_agent_trader.agent.orchestrator.DeepSeekClient",
+        _ToolThenWaitClient,
+    )
+    cancellation_requested = [False]
+
+    async def collect() -> list[object]:
+        events: list[object] = []
+        async for event in _orchestrator(tmp_path).execute_stream(
+            "工具后停止",
+            run_id="run-tool-cancel",
+            cancel_requested=lambda: cancellation_requested[0],
+        ):
+            events.append(event)
+            if event.type == "tool_done":
+                cancellation_requested[0] = True
+        return events
+
+    events = anyio.run(collect)
+    event_types = [event.type for event in events]
+    assert event_types.index("tool_args") < event_types.index("tool_done") < event_types.index(
+        "cancelled"
+    )
+    assert "final_message" not in event_types
+    assert "done" not in event_types
 
 
 def test_closing_orchestrator_stream_waits_for_worker_exit(monkeypatch, tmp_path) -> None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 from qmt_agent_trader.web.chat_run_manager import RunEvent
 from qmt_agent_trader.web.ui.pages import chat
 
@@ -96,3 +98,147 @@ def test_chat_page_uses_public_lifecycle_guards_and_explicit_transcript_context(
     assert "card.move" not in source
     assert "move(session.transcript)" not in source
     assert "session.orchestrator.execute_stream" not in source
+
+
+def test_terminal_semantics_and_sidebar_refresh_are_event_properties() -> None:
+    fallback = RunEvent(
+        sequence=1,
+        run_id="run_fallback",
+        session_id="session",
+        event_type="error",
+        data={"fallback": True},
+    )
+    done = RunEvent(
+        sequence=2,
+        run_id="run_fallback",
+        session_id="session",
+        event_type="done",
+        terminal=True,
+    )
+    token = RunEvent(
+        sequence=3,
+        run_id="run_fallback",
+        session_id="session",
+        event_type="token",
+        message="A",
+    )
+
+    assert fallback.terminal is False
+    assert done.terminal is True
+    assert chat._should_refresh_sidebar(fallback) is True
+    assert chat._should_refresh_sidebar(token) is False
+    assert chat._should_refresh_sidebar(done) is True
+    assert done.to_dict()["terminal"] is True
+
+
+def test_successor_subscription_only_follows_the_active_session() -> None:
+    assert chat._can_start_successor_subscription(
+        "session_a",
+        "session_a",
+        {"session_a", "session_b"},
+        page_alive=True,
+    )
+    assert not chat._can_start_successor_subscription(
+        "session_a",
+        "session_b",
+        {"session_a", "session_b"},
+        page_alive=True,
+    )
+    assert not chat._can_start_successor_subscription(
+        "session_a",
+        "session_a",
+        {"session_a"},
+        page_alive=False,
+    )
+
+
+def test_pending_messages_are_isolated_by_session() -> None:
+    pending_by_session: dict[str, list[chat._PendingMessage]] = {}
+    pending_a = chat._pending_messages_for(pending_by_session, "session_a")
+    pending_b = chat._pending_messages_for(pending_by_session, "session_b")
+    pending_a.append(chat._PendingMessage("queue", "A", session_id="session_a"))
+    pending_b.append(chat._PendingMessage("guide", "B", session_id="session_b"))
+
+    assert [item.content for item in pending_a] == ["A"]
+    assert [item.content for item in pending_b] == ["B"]
+    assert pending_a[0].session_id == "session_a"
+    assert pending_b[0].session_id == "session_b"
+    assert chat._pending_message_session(pending_a[0], "session_b") == "session_a"
+
+
+@pytest.mark.anyio
+async def test_real_nicegui_client_delete_stops_late_run_rendering() -> None:
+    from nicegui import ui
+    from nicegui.testing import user_simulation
+
+    transcript_holder: list[object] = []
+
+    def root() -> None:
+        with ui.column() as transcript:
+            transcript_holder.append(transcript)
+
+    async with user_simulation(root=root) as user:
+        client = await user.open("/")
+        transcript = transcript_holder[0]
+        targets = chat._RunRenderTargets(transcript=transcript)
+        state = chat._AssistantRenderState()
+
+        chat._render_run_event(
+            client,
+            targets,
+            RunEvent(
+                sequence=1,
+                run_id="run_real_client",
+                session_id="session",
+                event_type="token",
+                message="before delete",
+            ),
+            state,
+            page_alive=lambda: not client.is_deleted,
+        )
+        assert state.text == "before delete"
+
+        client.delete()
+        element_count_after_delete = len(client.elements)
+        late_events = [
+            RunEvent(
+                sequence=2,
+                run_id="run_real_client",
+                session_id="session",
+                event_type="token",
+                message=" late token",
+            ),
+            RunEvent(
+                sequence=3,
+                run_id="run_real_client",
+                session_id="session",
+                event_type="tool_done",
+                data={"tool_name": "lookup", "result_preview": "ok"},
+            ),
+            RunEvent(
+                sequence=4,
+                run_id="run_real_client",
+                session_id="session",
+                event_type="error",
+                message="late diagnostic",
+            ),
+            RunEvent(
+                sequence=5,
+                run_id="run_real_client",
+                session_id="session",
+                event_type="done",
+                terminal=True,
+            ),
+        ]
+        for event in late_events:
+            chat._render_run_event(
+                client,
+                targets,
+                event,
+                state,
+                page_alive=lambda: not client.is_deleted,
+            )
+
+        assert client.is_deleted
+        assert state.text == "before delete"
+        assert len(client.elements) == element_count_after_delete
