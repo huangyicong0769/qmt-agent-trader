@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -60,26 +61,39 @@ def _resolve_effective_session(
     )
 
 
-def _ranking_eligible_rows(
+def _field_evidence_eligible_rows(
     frame: pd.DataFrame,
     field: str,
 ) -> pd.DataFrame:
     if field not in frame.columns:
         return frame.iloc[0:0].copy()
-    eligible = frame.dropna(subset=[field]).copy()
     count_field = {
         "avg_amount_20d": "amount_observation_count",
         "avg_volume_20d": "volume_observation_count",
     }.get(field)
     if count_field is None:
-        return eligible
-    if count_field not in eligible.columns:
-        return eligible.iloc[0:0].copy()
-    counts = pd.to_numeric(
-        eligible[count_field],
+        return frame.dropna(subset=[field]).copy()
+    if count_field not in frame.columns:
+        return frame.iloc[0:0].copy()
+
+    values = pd.to_numeric(
+        frame[field],
         errors="coerce",
     )
-    return eligible.loc[counts.eq(LIQUIDITY_WINDOW_SESSIONS)].copy()
+    finite_values = values.map(
+        lambda value: bool(
+            pd.notna(value)
+            and math.isfinite(float(value))
+        )
+    )
+    counts = pd.to_numeric(
+        frame[count_field],
+        errors="coerce",
+    )
+    return frame.loc[
+        finite_values
+        & counts.eq(LIQUIDITY_WINDOW_SESSIONS)
+    ].copy()
 
 
 class UniverseResolver:
@@ -467,16 +481,28 @@ class UniverseResolver:
                 return "market_cap_above_maximum"
         return None
 
-    def _apply_rules(self, frame: pd.DataFrame, rules: list[UniverseRule]) -> pd.DataFrame:
+    def _apply_rules(
+        self,
+        frame: pd.DataFrame,
+        rules: list[UniverseRule],
+    ) -> pd.DataFrame:
         if frame.empty or not rules:
             return frame
-        filtered = frame
+
+        filtered = frame.copy()
         for rule in rules:
-            if rule.field not in filtered.columns:
-                return filtered.iloc[0:0].copy()
+            filtered = _field_evidence_eligible_rows(
+                filtered,
+                rule.field,
+            )
+            if filtered.empty:
+                return filtered
             series = filtered[rule.field]
-            mask = _rule_mask(series, rule)
-            filtered = filtered[mask].copy()
+            mask = _rule_mask(
+                series,
+                rule,
+            ).fillna(False)
+            filtered = filtered.loc[mask].copy()
         return filtered
 
     def _apply_ranking(self, frame: pd.DataFrame, spec: UniverseSpec) -> pd.DataFrame:
@@ -485,7 +511,7 @@ class UniverseResolver:
             return frame
         if ranking.field not in frame.columns or "symbol" not in frame.columns:
             return frame.iloc[0:0].copy()
-        eligible = _ranking_eligible_rows(
+        eligible = _field_evidence_eligible_rows(
             frame,
             ranking.field,
         )
