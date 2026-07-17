@@ -5,7 +5,10 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from qmt_agent_trader.backtest.errors import BacktestUniverseIntegrityError
+from qmt_agent_trader.backtest.errors import (
+    BacktestDataIntegrityError,
+    BacktestUniverseIntegrityError,
+)
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.universe.pit_metadata import (
     index_interval_members_asof,
@@ -267,3 +270,59 @@ def test_index_member_rejects_zero_length_interval() -> None:
         )
 
     assert exc_info.value.code == "INDEX_MEMBERSHIP_SOURCE_INVALID"
+
+
+def test_index_weight_rejects_duplicate_members_after_normalization() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "index_code": "000300.SH",
+                "con_code": "000001",
+                "trade_date": "20240201",
+            },
+            {
+                "index_code": "000300.SH",
+                "con_code": "000001.SZ",
+                "trade_date": "20240201",
+            },
+        ]
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        index_weight_members_by_code_asof(
+            frame,
+            ["000300.SH"],
+            date(2024, 2, 15),
+        )
+
+    assert exc_info.value.code == "DUPLICATE_UNIVERSE_SOURCE_KEY"
+    assert exc_info.value.field == "raw/tushare/index_weight"
+
+
+def test_index_interval_rejects_duplicate_members_after_normalization() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "index_code": "000300.SH",
+                "con_code": "000001",
+                "in_date": "20200101",
+                "out_date": None,
+            },
+            {
+                "index_code": "000300.SH",
+                "con_code": "000001.SZ",
+                "in_date": "20200101",
+                "out_date": None,
+            },
+        ]
+    )
+
+    with pytest.raises(BacktestDataIntegrityError) as exc_info:
+        index_interval_members_by_code_asof(
+            frame,
+            ["000300.SH"],
+            date(2024, 2, 15),
+        )
+
+    assert exc_info.value.code == "DUPLICATE_UNIVERSE_SOURCE_KEY"
+    assert exc_info.value.field == "raw/tushare/index_member"

@@ -11,31 +11,39 @@ from qmt_agent_trader.data.integrity import require_unique_keys
 from qmt_agent_trader.universe.validators import normalize_symbol
 
 
-def _normalized_member_values(
+def _normalized_member_series(
     values: pd.Series,
     *,
     field: str,
-) -> list[str]:
-    normalized: list[str] = []
-    invalid_count = 0
-    for raw in values.tolist():
-        text = "" if raw is None else str(raw).strip()
-        symbol = normalize_symbol(text) if text else None
-        if symbol is None:
-            invalid_count += 1
-            continue
-        if symbol not in normalized:
-            normalized.append(symbol)
-    if invalid_count:
+) -> pd.Series:
+    normalized = values.map(normalize_symbol)
+    invalid = normalized.isna()
+    if invalid.any():
         raise BacktestUniverseIntegrityError(
             code="INDEX_MEMBERSHIP_SOURCE_INVALID",
             message="index membership contains invalid member identifiers",
             field=field,
             details={
-                "invalid_row_count": invalid_count,
+                "invalid_row_count": int(invalid.sum()),
             },
         )
-    return sorted(normalized)
+    return normalized.astype("string")
+
+
+def _normalized_member_values(
+    values: pd.Series,
+    *,
+    field: str,
+) -> list[str]:
+    return sorted(
+        _normalized_member_series(
+            values,
+            field=field,
+        )
+        .astype(str)
+        .unique()
+        .tolist()
+    )
 
 
 def _raise_invalid_interval(
@@ -197,19 +205,29 @@ def index_weight_members_by_code_asof(
         data["index_code"].isin(requested)
         & data["trade_date"].map(lambda value: value <= as_of)
     ]
+    data["normalized_con_code"] = _normalized_member_series(
+        data["con_code"],
+        field="raw/tushare/index_weight.con_code",
+    )
     result: dict[str, list[str]] = {}
     for index_code, group in data.groupby("index_code", sort=True):
         snapshot_date = group["trade_date"].max()
         snapshot = group[group["trade_date"].eq(snapshot_date)]
         require_unique_keys(
             snapshot,
-            keys=("index_code", "con_code", "trade_date"),
+            keys=(
+                "index_code",
+                "normalized_con_code",
+                "trade_date",
+            ),
             code="DUPLICATE_UNIVERSE_SOURCE_KEY",
             field="raw/tushare/index_weight",
         )
-        members = _normalized_member_values(
-            snapshot["con_code"],
-            field="raw/tushare/index_weight.con_code",
+        members = sorted(
+            snapshot["normalized_con_code"]
+            .astype(str)
+            .unique()
+            .tolist()
         )
         if members:
             result[str(index_code)] = members
@@ -272,6 +290,10 @@ def index_interval_members_by_code_asof(
         sample_keys=member_keys,
     )
     requested = set(index_codes)
+    data["normalized_con_code"] = _normalized_member_series(
+        data["con_code"],
+        field="raw/tushare/index_member.con_code",
+    )
     active = data[
         data["index_code"].isin(requested)
         & data["in_date"].map(lambda value: value <= as_of)
@@ -279,7 +301,10 @@ def index_interval_members_by_code_asof(
     ]
     require_unique_keys(
         active,
-        keys=("index_code", "con_code"),
+        keys=(
+            "index_code",
+            "normalized_con_code",
+        ),
         code="DUPLICATE_UNIVERSE_SOURCE_KEY",
         field="raw/tushare/index_member",
     )
@@ -288,9 +313,11 @@ def index_interval_members_by_code_asof(
         code_active = active[active["index_code"].eq(code)]
         if code_active.empty:
             continue
-        members = _normalized_member_values(
-            code_active["con_code"],
-            field="raw/tushare/index_member.con_code",
+        members = sorted(
+            code_active["normalized_con_code"]
+            .astype(str)
+            .unique()
+            .tolist()
         )
         if members:
             result[code] = members
