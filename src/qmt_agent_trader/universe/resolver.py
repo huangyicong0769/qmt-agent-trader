@@ -611,13 +611,25 @@ class UniverseResolver:
             bars["trade_date"].eq(effective_date)
             & bars["asset_type"].isin(asset_types)
         ].reset_index(drop=True)
-        if exact.empty:
+        requested_asset_types = {str(item) for item in asset_types}
+        observed_asset_types = {
+            str(item) for item in exact["asset_type"].dropna().astype(str)
+        }
+        missing_asset_types = requested_asset_types.difference(observed_asset_types)
+        if exact.empty or missing_asset_types:
             raise BacktestUniverseIntegrityError(
                 code="UNIVERSE_MARKET_SESSION_NOT_READY",
-                message="official open session has no market bars for requested assets",
+                message=(
+                    "official open session lacks market bars for "
+                    "one or more requested asset types"
+                ),
                 trade_date=effective_date.isoformat(),
                 field="daily_bars",
-                details={"asset_types": sorted(set(asset_types))},
+                details={
+                    "requested_asset_types": sorted(requested_asset_types),
+                    "observed_asset_types": sorted(observed_asset_types),
+                    "missing_asset_types": sorted(missing_asset_types),
+                },
             )
         return exact
 
