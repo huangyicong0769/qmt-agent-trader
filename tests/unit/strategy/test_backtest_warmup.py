@@ -168,6 +168,7 @@ def test_adapter_loads_factor_lookback_before_requested_start(
             StrategyRegistry(tmp_path / "strategies"),
             StrategyBacktestConfig(
                 strategy_id="factor_reversal_5d",
+                strategy_identity_mode="adhoc",
                 factor_name="reversal_5d",
                 start_date="20240109",
                 end_date="20240110",

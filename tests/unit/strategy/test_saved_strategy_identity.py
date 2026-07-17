@@ -43,6 +43,7 @@ def test_config_strategy_id_must_equal_inline_spec_id(tmp_path) -> None:
     lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
     config = StrategyBacktestConfig(
         strategy_id="different_id",
+        strategy_identity_mode="inline",
         strategy_spec=_spec(),
         factor_name="pb_rank",
         start_date="20240101",
@@ -70,6 +71,7 @@ def test_inline_spec_cannot_replace_saved_registry_spec(tmp_path) -> None:
     _save(registry, _spec(top_n=10))
     config = StrategyBacktestConfig(
         strategy_id="saved_value",
+        strategy_identity_mode="registry",
         strategy_spec=_spec(top_n=20),
         factor_name="pb_rank",
         start_date="20240101",

@@ -5,6 +5,7 @@ from qmt_agent_trader.strategy.execution_adapter import StrategyBacktestConfig
 def test_strategy_backtest_config_serializes_declared_semantics() -> None:
     config = StrategyBacktestConfig(
         strategy_id="weekly_low_value",
+        strategy_identity_mode="adhoc",
         start_date="20240101",
         end_date="20240630",
         rebalance_frequency="weekly",
@@ -25,6 +26,7 @@ def test_strategy_backtest_config_serializes_declared_semantics() -> None:
 def test_backtest_cache_key_changes_with_execution_semantics() -> None:
     base = StrategyBacktestConfig(
         strategy_id="strategy",
+        strategy_identity_mode="adhoc",
         start_date="20240101",
         end_date="20240630",
     )

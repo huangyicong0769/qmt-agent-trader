@@ -126,6 +126,7 @@ def test_backtest_composite_strategy_unions_all_factor_required_columns(tmp_path
         StrategyRegistry(tmp_path / "strategies"),
         StrategyBacktestConfig(
             strategy_id=spec.strategy_id,
+            strategy_identity_mode="inline",
             strategy_spec=spec,
             factor_name="pb_rank",
             start_date="20240301",
@@ -243,6 +244,7 @@ def _config(
 ) -> StrategyBacktestConfig:
     return StrategyBacktestConfig(
         strategy_id=f"factor_{factor_name}",
+        strategy_identity_mode="adhoc",
         factor_name=factor_name,
         start_date=start_date,
         end_date=end_date,

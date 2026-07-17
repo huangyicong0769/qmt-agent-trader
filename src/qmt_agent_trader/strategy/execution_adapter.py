@@ -58,6 +58,7 @@ BACKTEST_BASE_FIELDS = [
 ]
 MIN_REQUIRED_FIELD_COVERAGE = 0.80
 MIN_CROSS_SECTIONAL_COVERAGE = 0.50
+StrategyIdentityMode = Literal["registry", "inline", "adhoc"]
 
 
 def strategy_spec_fingerprint(spec: StrategySpec) -> str:
@@ -72,6 +73,7 @@ def strategy_spec_fingerprint(spec: StrategySpec) -> str:
 
 class StrategyBacktestConfig(BaseModel):
     strategy_id: str
+    strategy_identity_mode: StrategyIdentityMode
     start_date: str
     end_date: str
     universe: str = "stock_etf"
@@ -211,8 +213,38 @@ def run_strategy_backtest(
     reports_dir: Path,
 ) -> StrategyBacktestResult:
     run_id = new_id("research")
-    saved_strategy = _strategy_from_registry(registry, config.strategy_id)
     inline_spec = config.strategy_spec
+    saved_strategy = (
+        _strategy_from_registry(registry, config.strategy_id)
+        if config.strategy_identity_mode == "registry"
+        else None
+    )
+    if config.strategy_identity_mode == "registry" and saved_strategy is None:
+        return StrategyBacktestResult(
+            run_id=run_id,
+            strategy_id=config.strategy_id,
+            strategy_version=(
+                inline_spec.version if inline_spec is not None else "unknown"
+            ),
+            status="BLOCKED",
+            reason="STRATEGY_NOT_FOUND",
+            message="registry identity mode requires a saved strategy",
+            research_only=True,
+            live_trading_allowed=False,
+        )
+    if config.strategy_identity_mode in {"inline", "adhoc"} and inline_spec is None:
+        return StrategyBacktestResult(
+            run_id=run_id,
+            strategy_id=config.strategy_id,
+            strategy_version="unknown",
+            status="BLOCKED",
+            reason="STRATEGY_IDENTITY_MODE_INVALID",
+            message=(
+                f"{config.strategy_identity_mode} identity requires an inline StrategySpec"
+            ),
+            research_only=True,
+            live_trading_allowed=False,
+        )
     if inline_spec is not None and config.strategy_id != inline_spec.strategy_id:
         issue = AdapterCapabilityIssue(
             field="config.strategy_id",
@@ -231,7 +263,11 @@ def run_strategy_backtest(
             research_only=True,
             live_trading_allowed=False,
         )
-    if saved_strategy is not None and inline_spec is not None:
+    if (
+        config.strategy_identity_mode == "registry"
+        and saved_strategy is not None
+        and inline_spec is not None
+    ):
         saved_fingerprint = strategy_spec_fingerprint(saved_strategy.spec)
         inline_fingerprint = strategy_spec_fingerprint(inline_spec)
         if saved_fingerprint != inline_fingerprint:
