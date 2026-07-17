@@ -53,11 +53,23 @@ ID, otherwise the inline spec ID, otherwise a temporary factor strategy ID. Regi
 identity, generated-code capability, and temporary factor-spec construction all finish
 before universe resolution or cache access.
 
-Successful-result caching uses schema `factor-rank-v3` and engine semantic version
-`2026-07-factor-universe-pit-v2`. Its provenance manifest fingerprints the effective
-strategy spec, saved strategy state and code tree, factor implementations, resolved
-universe payload, market bars, trade calendar, trade-state sources, stock basics, and
-every daily-basic, financial, or macro dataset selected by factor-required fields. The
+## Strategy identity modes
+
+Every backtest config declares one identity mode:
+
+- `registry`: reload and verify the saved Registry strategy;
+- `inline`: execute the supplied unsaved StrategySpec without Registry lookup;
+- `adhoc`: execute a temporary factor baseline without Registry lookup.
+
+Generated ad-hoc IDs are cache/report identifiers only. They can never cause a
+saved strategy with the same text ID to be loaded.
+
+Cache schema `factor-rank-v4` uses content SHA-256 values. Governed DataLake
+writes persist a sidecar content manifest bound to file size, mtime, ctime, and
+inode. A missing or stale manifest triggers one full rehash and refresh;
+subsequent cache-key construction reads the small manifest instead of the full
+Parquet payload. Strategy specs, saved state, strategy and factor code, resolved
+universe payloads, and all selected raw datasets remain part of provenance. The
 same manifest is stored in the completed response and report config.
 
 The adapter ranks normalized factor values descending. `lower_is_better` negates the
@@ -160,6 +172,32 @@ records.
 
 Index-weight universes use the latest snapshot on or before the as-of date. Interval
 membership uses `in_date <= as_of < out_date`.
+
+## Universe session authority
+
+`trade_cal` is authoritative for snapshot effective sessions and rolling
+rebalance dates. The requested as-of date must itself have calendar evidence,
+including closed weekend and holiday records. An official open session with no
+market-wide bars for the requested asset type raises
+`UNIVERSE_MARKET_SESSION_NOT_READY`; it is not reported as a valid empty
+universe.
+
+## Liquidity-window completeness
+
+`avg_amount_20d` and `avg_volume_20d` require exactly 20 official sessions and
+20 non-null observations for the corresponding field. Short listings, missing
+sessions, suspension gaps, and null values leave the metric unavailable and
+produce explicit observation-count evidence.
+
+## Point-in-time date and index evidence
+
+Empty `delist_date` and `out_date` values represent open intervals. Non-empty
+malformed dates are invalid source evidence and fail closed.
+
+Each requested index code is resolved independently. The resolver uses the
+latest `index_weight` snapshot for that code when available, otherwise active
+`index_member` intervals. Missing evidence for any requested code raises
+`INDEX_MEMBERSHIP_NOT_READY`.
 
 ## ETF opening state
 
