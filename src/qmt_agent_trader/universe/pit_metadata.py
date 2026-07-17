@@ -44,9 +44,14 @@ def security_master_asof(
     data["list_date"] = _required_date(
         data["list_date"],
         field="raw/tushare/stock_basic.list_date",
+        error_code="UNIVERSE_SECURITY_MASTER_INVALID",
     )
     if "delist_date" in data.columns:
-        data["delist_date"] = _optional_date(data["delist_date"])
+        data["delist_date"] = _optional_date(
+            data["delist_date"],
+            field="raw/tushare/stock_basic.delist_date",
+            error_code="UNIVERSE_SECURITY_MASTER_INVALID",
+        )
     else:
         data["delist_date"] = pd.NaT
     data["display_name"] = (
@@ -117,6 +122,7 @@ def index_weight_members_asof(
     data["trade_date"] = _required_date(
         data["trade_date"],
         field="raw/tushare/index_weight.trade_date",
+        error_code="INDEX_MEMBERSHIP_SOURCE_INVALID",
     )
     data = data[
         data["index_code"].astype(str).isin(index_codes)
@@ -154,8 +160,13 @@ def index_interval_members_asof(
     data["in_date"] = _required_date(
         data["in_date"],
         field="raw/tushare/index_member.in_date",
+        error_code="INDEX_MEMBERSHIP_SOURCE_INVALID",
     )
-    data["out_date"] = _optional_date(data["out_date"])
+    data["out_date"] = _optional_date(
+        data["out_date"],
+        field="raw/tushare/index_member.out_date",
+        error_code="INDEX_MEMBERSHIP_SOURCE_INVALID",
+    )
     active = data[
         data["index_code"].astype(str).isin(index_codes)
         & data["in_date"].map(lambda value: value <= as_of)
@@ -170,21 +181,56 @@ def index_interval_members_asof(
     return sorted(active["con_code"].astype(str).unique().tolist())
 
 
-def _required_date(values: pd.Series, *, field: str) -> pd.Series:
+_MISSING_DATE_TOKENS = {"", "nan", "nat", "none", "<na>"}
+
+
+def _date_text(values: pd.Series) -> tuple[pd.Series, pd.Series]:
+    text = values.astype("string").str.strip()
+    missing = values.isna() | text.str.lower().isin(_MISSING_DATE_TOKENS)
+    return text, missing
+
+
+def _required_date(
+    values: pd.Series,
+    *,
+    field: str,
+    error_code: str,
+) -> pd.Series:
+    text, missing = _date_text(values)
     parsed = pd.to_datetime(
-        values.astype("string"), format="mixed", errors="coerce"
-    ).dt.date
-    if parsed.isna().any():
+        text.where(~missing),
+        format="mixed",
+        errors="coerce",
+    )
+    invalid = missing | parsed.isna()
+    if invalid.any():
         raise BacktestUniverseIntegrityError(
-            code="UNIVERSE_SECURITY_MASTER_INVALID",
-            message="security master contains invalid listing dates",
+            code=error_code,
+            message="point-in-time source contains an invalid required date",
             field=field,
-            details={"invalid_row_count": int(parsed.isna().sum())},
+            details={"invalid_row_count": int(invalid.sum())},
         )
-    return parsed
+    return parsed.dt.date
 
 
-def _optional_date(values: pd.Series) -> pd.Series:
-    return pd.to_datetime(
-        values.astype("string"), format="mixed", errors="coerce"
-    ).dt.date
+def _optional_date(
+    values: pd.Series,
+    *,
+    field: str,
+    error_code: str,
+) -> pd.Series:
+    text, missing = _date_text(values)
+    parsed = pd.to_datetime(
+        text.where(~missing),
+        format="mixed",
+        errors="coerce",
+    )
+    invalid = ~missing & parsed.isna()
+    if invalid.any():
+        raise BacktestUniverseIntegrityError(
+            code=error_code,
+            message="point-in-time source contains an invalid optional date",
+            field=field,
+            details={"invalid_row_count": int(invalid.sum())},
+        )
+    return parsed.dt.date

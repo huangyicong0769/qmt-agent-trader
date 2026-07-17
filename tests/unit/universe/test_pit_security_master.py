@@ -50,6 +50,42 @@ def test_future_st_name_is_not_historical_st_evidence() -> None:
     assert "st" not in observed.columns
 
 
+def test_non_empty_invalid_delist_date_fails_closed() -> None:
+    current = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "name": "Company",
+                "list_date": "20000101",
+                "delist_date": "not-a-date",
+            }
+        ]
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        security_master_asof(current, date(2020, 1, 5))
+
+    assert exc_info.value.code == "UNIVERSE_SECURITY_MASTER_INVALID"
+    assert exc_info.value.field == "raw/tushare/stock_basic.delist_date"
+
+
+def test_empty_delist_date_remains_open_interval() -> None:
+    current = pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "name": "Company",
+                "list_date": "20000101",
+                "delist_date": None,
+            }
+        ]
+    )
+
+    observed = security_master_asof(current, date(2020, 1, 5))
+
+    assert observed["listed_as_of"].tolist() == [True]
+
+
 def test_resolver_ignores_current_status_and_name_for_historical_date(
     tmp_path,
     monkeypatch,
