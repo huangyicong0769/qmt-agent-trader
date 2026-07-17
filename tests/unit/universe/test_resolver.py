@@ -107,6 +107,7 @@ def test_ranked_universe_ties_use_symbol_ascending_tiebreak(tmp_path) -> None:
         {
             "symbol": ["000003.SZ", "000001.SZ", "000002.SZ"],
             "avg_amount_20d": [100.0, 100.0, 100.0],
+            "amount_observation_count": [20, 20, 20],
         }
     )
     resolver = UniverseResolver(DataLake(tmp_path / "lake", tmp_path / "research.duckdb"))
@@ -250,6 +251,7 @@ def test_resolver_preserves_ranked_top_symbols_before_limit(tmp_path, monkeypatc
         {
             "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
             "avg_amount_20d": [200.0, 100.0, 300.0],
+            "amount_observation_count": [20, 20, 20],
         }
     )
     resolver = UniverseResolver(DataLake(tmp_path / "lake", tmp_path / "research.duckdb"))
@@ -444,3 +446,85 @@ def test_market_cap_asof_rejects_duplicate_symbol_date(tmp_path) -> None:
         UniverseResolver(lake)._market_cap_asof(date(2024, 1, 2))
 
     assert exc_info.value.code == "DUPLICATE_UNIVERSE_SOURCE_KEY"
+
+
+def test_liquidity_ranking_does_not_fill_top_n_with_incomplete_window(
+    tmp_path,
+) -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "ranked-liquidity",
+            "name": "Ranked liquidity",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+            "ranking": {
+                "field": "avg_amount_20d",
+                "ascending": False,
+                "top_n": 2,
+            },
+            "filters": {"min_listed_days": 0},
+        }
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "avg_amount_20d": 1000.0,
+                "amount_observation_count": 20,
+            },
+            {
+                "symbol": "000002.SZ",
+                "avg_amount_20d": pd.NA,
+                "amount_observation_count": 19,
+            },
+        ]
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    ranked = resolver._apply_ranking(frame, spec)
+
+    assert ranked["symbol"].tolist() == ["000001.SZ"]
+
+
+def test_volume_ranking_requires_twenty_non_null_observations(
+    tmp_path,
+) -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "ranked-volume",
+            "name": "Ranked volume",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+            "ranking": {
+                "field": "avg_volume_20d",
+                "ascending": False,
+                "top_n": 5,
+            },
+            "filters": {"min_listed_days": 0},
+        }
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "avg_volume_20d": 100.0,
+                "volume_observation_count": 20,
+            },
+            {
+                "symbol": "000002.SZ",
+                "avg_volume_20d": 200.0,
+                "volume_observation_count": 19,
+            },
+        ]
+    )
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+
+    ranked = resolver._apply_ranking(frame, spec)
+
+    assert ranked["symbol"].tolist() == ["000001.SZ"]

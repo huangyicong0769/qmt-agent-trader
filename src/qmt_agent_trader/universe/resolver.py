@@ -60,6 +60,28 @@ def _resolve_effective_session(
     )
 
 
+def _ranking_eligible_rows(
+    frame: pd.DataFrame,
+    field: str,
+) -> pd.DataFrame:
+    if field not in frame.columns:
+        return frame.iloc[0:0].copy()
+    eligible = frame.dropna(subset=[field]).copy()
+    count_field = {
+        "avg_amount_20d": "amount_observation_count",
+        "avg_volume_20d": "volume_observation_count",
+    }.get(field)
+    if count_field is None:
+        return eligible
+    if count_field not in eligible.columns:
+        return eligible.iloc[0:0].copy()
+    counts = pd.to_numeric(
+        eligible[count_field],
+        errors="coerce",
+    )
+    return eligible.loc[counts.eq(LIQUIDITY_WINDOW_SESSIONS)].copy()
+
+
 class UniverseResolver:
     def __init__(self, lake: DataLake) -> None:
         self.lake = lake
@@ -272,6 +294,7 @@ class UniverseResolver:
             selected.append(row)
         selected_frame = pd.DataFrame(selected)
         selected_frame = self._apply_rules(selected_frame, spec.selection.rules)
+        pre_ranking_count = len(selected_frame)
         selected_frame = self._apply_ranking(selected_frame, spec)
         diagnostics = _universe_diagnostics(
             recent=recent,
@@ -285,6 +308,11 @@ class UniverseResolver:
         )
         diagnostics["requested_as_of_date"] = session.requested_key
         diagnostics["effective_market_session"] = session.effective_key
+        diagnostics["pre_ranking_count"] = pre_ranking_count
+        diagnostics["post_ranking_eligible_count"] = len(selected_frame)
+        diagnostics["ranking_field"] = (
+            spec.ranking.field if spec.ranking is not None else None
+        )
         if selected_frame.empty:
             return [], excluded, diagnostics
         return _ordered_unique_symbols(selected_frame, spec), excluded, diagnostics
@@ -457,7 +485,11 @@ class UniverseResolver:
             return frame
         if ranking.field not in frame.columns or "symbol" not in frame.columns:
             return frame.iloc[0:0].copy()
-        ranked = frame.sort_values(
+        eligible = _ranking_eligible_rows(
+            frame,
+            ranking.field,
+        )
+        ranked = eligible.sort_values(
             [ranking.field, "symbol"],
             ascending=[ranking.ascending, True],
             na_position="last",
