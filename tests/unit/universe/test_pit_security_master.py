@@ -153,7 +153,15 @@ def test_historical_industry_selection_requires_dated_evidence(
     tmp_path,
     monkeypatch,
 ) -> None:
-    resolver = UniverseResolver(DataLake(tmp_path / "lake", tmp_path / "research.duckdb"))
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [{"exchange": "SSE", "cal_date": "20200105", "is_open": 1}]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    resolver = UniverseResolver(lake)
     monkeypatch.setattr(resolver, "_load_recent_bars", lambda *_args: pd.DataFrame())
     monkeypatch.setattr(resolver, "_stock_basic", lambda: pd.DataFrame())
     spec = UniverseSpec.model_validate(
