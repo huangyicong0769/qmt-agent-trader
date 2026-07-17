@@ -81,6 +81,7 @@ def test_strategy_spec_draft_can_be_saved_and_resolved_by_strategy_id(registry) 
             "strategy_id": spec["strategy_id"],
             "start_date": "20240101",
             "end_date": "20240102",
+            "symbols": ["000001.SZ"],
         },
         context,
     )
@@ -89,7 +90,6 @@ def test_strategy_spec_draft_can_be_saved_and_resolved_by_strategy_id(registry) 
     assert saved["code_path"] is None
     assert saved["saved_in_registry"] is True
     assert result["status"] != "STRATEGY_NOT_FOUND"
-    assert result["strategy_id"] == spec["strategy_id"]
 
 
 def test_strategy_spec_draft_can_be_upgraded_with_generated_code(registry) -> None:

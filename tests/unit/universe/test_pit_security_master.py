@@ -54,7 +54,15 @@ def test_resolver_ignores_current_status_and_name_for_historical_date(
     tmp_path,
     monkeypatch,
 ) -> None:
-    resolver = UniverseResolver(DataLake(tmp_path / "lake", tmp_path / "research.duckdb"))
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [{"exchange": "SSE", "cal_date": "20200105", "is_open": 1}]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    resolver = UniverseResolver(lake)
     monkeypatch.setattr(
         resolver,
         "_load_recent_bars",

@@ -54,7 +54,7 @@ identity, generated-code capability, and temporary factor-spec construction all 
 before universe resolution or cache access.
 
 Successful-result caching uses schema `factor-rank-v3` and engine semantic version
-`2026-07-opening-state-warmup-v1`. Its provenance manifest fingerprints the effective
+`2026-07-factor-universe-pit-v2`. Its provenance manifest fingerprints the effective
 strategy spec, saved strategy state and code tree, factor implementations, resolved
 universe payload, market bars, trade calendar, trade-state sources, stock basics, and
 every daily-basic, financial, or macro dataset selected by factor-required fields. The
@@ -106,9 +106,10 @@ ASOF factor sources also require unique visible identities. Duplicate
 inputs validate daily-basic symbol-date uniqueness before latest-row selection and raise
 `DUPLICATE_UNIVERSE_SOURCE_KEY` on conflict.
 
-Trade-state columns are usable only with source evidence. Missing
-`raw/tushare/suspend_d`, `raw/tushare/stk_limit`, or historical
-`raw/tushare/namechange` blocks execution with `TRADE_STATE_SOURCE_NOT_READY`.
+Trade-state columns are usable only with source evidence. Stock rows require
+`raw/tushare/suspend_d`, `raw/tushare/stk_limit`, and historical
+`raw/tushare/namechange`; missing required evidence blocks execution with
+`TRADE_STATE_SOURCE_NOT_READY`. ETF-only rows require `raw/tushare/stk_limit`.
 `stk_limit` must exactly cover every executable stock symbol-date or the run raises
 `TRADE_STATE_PARTIAL_COVERAGE`. Sparse suspension rows and non-overlapping historical
 name intervals become `False` only after their datasets are proven present, and the
@@ -120,10 +121,10 @@ limits; a close at a limit cannot block an earlier opening trade. Suspension and
 state come from dated suspension and historical name-change evidence, never the current
 company name.
 
-Every normalized bar is tagged `asset_type=stock` or `asset_type=etf`. Stock-only
-`stk_limit` evidence is never applied to ETF rows. Until a dedicated ETF execution-state
-source is implemented, requesting enriched ETF bars fails with
-`UNSUPPORTED_ETF_TRADE_STATE_MODEL`.
+Every normalized bar is tagged `asset_type=stock` or `asset_type=etf`. Stock and ETF
+partitions are enriched separately. Both use the endpoint contract's `stk_limit`
+opening prices, while ETF rows never use stock-only suspension or name-change/ST
+semantics.
 
 The research runner accepts only prevalidated canonical rows containing OHLC, volume,
 amount, turnover, and all four opening execution-state fields. Missing state columns
@@ -141,6 +142,36 @@ Generated strategy Python is not executed. Both an explicit request `code_path` 
 saved strategy's registry `code_path` return
 `GENERATED_STRATEGY_EXECUTION_NOT_IMPLEMENTED` until a process-isolated runner exists. A
 spec-only draft without a code path remains eligible for canonical execution.
+
+## Canonical factor fields
+
+`turnover` is sourced from `tushare/daily_basic.turnover_rate`. A null placeholder
+in normalized daily bars is not evidence that the field is available and does not
+prevent source resolution.
+
+## Point-in-time universes
+
+A snapshot uses the latest open market session on or before the requested as-of date
+and requires a bar on that exact session. Previous-session bars are never carried
+forward as current eligibility evidence. Listing eligibility uses `list_date` and
+`delist_date`; current `list_status` and current company names are not historical
+filters. Historical industry/theme selection blocks without dated classification
+records.
+
+Index-weight universes use the latest snapshot on or before the as-of date. Interval
+membership uses `in_date <= as_of < out_date`.
+
+## ETF opening state
+
+ETF opening limit state uses `tushare/stk_limit`. ETF ST state is not applicable, and
+presence of a valid exact-session `fund_daily` row is the evidence that the row is
+tradable rather than suspended.
+
+## Financial revisions
+
+Financial ASOF fields are reduced by symbol, visible date, report period, update flag,
+and actual announcement date before the generic ASOF join. Identical business ranks
+with conflicting values fail closed.
 
 New governed reports use schema `2.0` with canonical metrics, diagnostics, dated equity,
 rebalance points, trade blotter, data quality, and cost attribution. Legacy `payload`,

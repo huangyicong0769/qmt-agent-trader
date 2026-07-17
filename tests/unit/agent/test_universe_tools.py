@@ -71,6 +71,16 @@ def lake(tmp_path: Path) -> DataLake:
         "raw",
         "tushare/namechange",
     )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": trade_date, "is_open": 1}
+                for trade_date in ("20240102", "20240103")
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
     return lake
 
 

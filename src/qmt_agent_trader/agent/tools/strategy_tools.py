@@ -35,6 +35,7 @@ from qmt_agent_trader.data.frequency import Frequency
 from qmt_agent_trader.data.providers.tushare.registry import default_tushare_registry
 from qmt_agent_trader.data.storage import DataLake
 from qmt_agent_trader.factors.registry import FactorRegistry
+from qmt_agent_trader.factors.source_aliases import resolve_canonical_field_source
 from qmt_agent_trader.persistence.artifacts import ArtifactMetadata, artifact_store_for_root
 from qmt_agent_trader.persistence.atomic_files import AtomicFileStore
 from qmt_agent_trader.persistence.cache import ContentAddressedCache
@@ -75,7 +76,7 @@ _cache_var: ContextVar[ContentAddressedCache | None] = ContextVar(
 )
 BROAD_UNIVERSE_MIN_SYMBOLS = 500
 BACKTEST_CACHE_SCHEMA_VERSION = "factor-rank-v3"
-BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-opening-state-warmup-v1"
+BACKTEST_ENGINE_SEMANTIC_VERSION = "2026-07-factor-universe-pit-v2"
 
 
 @dataclass(frozen=True)
@@ -2296,6 +2297,8 @@ def _backtest_provenance_manifest(
         "tushare/stk_limit",
         "tushare/namechange",
         "tushare/stock_basic",
+        "tushare/index_weight",
+        "tushare/index_member",
     }
     factor_registry = _factor_registry(lake)
     source_index = FieldSourceIndex.from_tushare_registry(default_tushare_registry())
@@ -2304,12 +2307,13 @@ def _backtest_provenance_manifest(
         if saved_factor is None:
             continue
         for field in saved_factor.required_columns:
-            source = source_index.best_source_for_field(
+            resolved = resolve_canonical_field_source(
+                source_index,
                 field,
                 target_frequency=Frequency.DAILY,
             )
-            if source is not None:
-                dataset_names.add(source.raw_dataset_name)
+            if resolved is not None:
+                dataset_names.add(resolved.source.raw_dataset_name)
     dataset_fingerprints = {
         name: fingerprint_path_tree(lake.dataset_path("raw", name))
         for name in sorted(dataset_names)
