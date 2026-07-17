@@ -428,3 +428,109 @@ def test_mixed_universe_accepts_stock_and_etf_rows(
     )
 
     assert observed["asset_type"].tolist() == ["stock", "etf"]
+
+
+def test_etf_category_without_dated_classification_fails_closed(
+    tmp_path,
+) -> None:
+    lake = DataLake(
+        tmp_path / "lake",
+        tmp_path / "research.duckdb",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "exchange": "SSE",
+                    "cal_date": "20240102",
+                    "is_open": 1,
+                },
+                {
+                    "exchange": "SZSE",
+                    "cal_date": "20240102",
+                    "is_open": 1,
+                },
+            ]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "trade_date": "20240102",
+                    "open": 3.5,
+                    "high": 3.6,
+                    "low": 3.4,
+                    "close": 3.55,
+                    "vol": 100.0,
+                    "amount": 350.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/fund_daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "trade_date": "20240102",
+                    "up_limit": 3.85,
+                    "down_limit": 3.15,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "etf-category",
+            "name": "ETF category",
+            "source": "user_defined",
+            "asset_types": ["etf"],
+            "selection": {
+                "mode": "etf_category",
+                "theme_concepts": ["broad_market"],
+            },
+            "filters": {"min_listed_days": 0},
+        }
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        UniverseResolver(lake).build(
+            spec,
+            as_of_date="20240102",
+        )
+
+    assert exc_info.value.code == "UNIVERSE_PIT_CLASSIFICATION_NOT_READY"
+    assert exc_info.value.field == "classification_history"
+    assert exc_info.value.details["selection_mode"] == "etf_category"
+
+
+def test_etf_category_candidate_helper_never_falls_back_to_all_etfs(
+    tmp_path,
+) -> None:
+    resolver = UniverseResolver(
+        DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    )
+    recent = pd.DataFrame(
+        [
+            {
+                "symbol": "510300.SH",
+                "asset_type": "etf",
+            }
+        ]
+    )
+
+    with pytest.raises(BacktestUniverseIntegrityError) as exc_info:
+        resolver._etf_category_candidates(
+            ["broad_market"],
+            recent,
+        )
+
+    assert exc_info.value.code == "UNIVERSE_PIT_CLASSIFICATION_NOT_READY"

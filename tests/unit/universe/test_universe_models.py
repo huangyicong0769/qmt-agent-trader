@@ -46,3 +46,18 @@ def test_universe_spec_supports_rolling_mode() -> None:
 def test_universe_rule_rejects_arbitrary_operator() -> None:
     with pytest.raises(ValidationError):
         UniverseRule(field="amount", operator="python_eval", value="__import__('os')")
+
+
+def test_etf_category_requires_category_values() -> None:
+    with pytest.raises(ValueError, match="etf_category selection requires categories"):
+        UniverseSpec.model_validate(
+            {
+                "universe_id": "etf-category-empty",
+                "name": "ETF category empty",
+                "source": "user_defined",
+                "asset_types": ["etf"],
+                "selection": {
+                    "mode": "etf_category",
+                },
+            }
+        )

@@ -127,6 +127,8 @@ class UniverseSelection(BaseModel):
             raise ValueError("theme selection requires theme_concepts")
         if self.mode == "index_constituents" and not self.index_codes:
             raise ValueError("index_constituents selection requires index_codes")
+        if self.mode == "etf_category" and not self.theme_concepts:
+            raise ValueError("etf_category selection requires categories")
         return self
 
 
