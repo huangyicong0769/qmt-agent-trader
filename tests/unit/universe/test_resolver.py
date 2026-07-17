@@ -130,6 +130,41 @@ def test_explicit_symbol_order_is_preserved() -> None:
     assert _ordered_unique_symbols(frame, spec) == spec.selection.symbols
 
 
+def test_amount_filter_rejects_incomplete_twenty_day_window() -> None:
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "amount_filter",
+            "name": "Amount filter",
+            "source": "user_defined",
+            "asset_types": ["stock"],
+            "selection": {"mode": "all"},
+            "filters": {
+                "min_listed_days": 0,
+                "min_avg_amount_20d": 1.0,
+            },
+        }
+    )
+    row = {
+        "symbol": "000001.SZ",
+        "asset_type": "stock",
+        "has_bar_coverage": True,
+        "listed_as_of": True,
+        "list_date": "20000101",
+        "st": False,
+        "suspended": False,
+        "avg_amount_20d": pd.NA,
+        "amount_observation_count": 19,
+    }
+
+    reason = UniverseResolver.__new__(UniverseResolver)._exclusion_reason(
+        spec,
+        row,
+        as_of_date="20240131",
+    )
+
+    assert reason == "amount_20d_coverage_incomplete"
+
+
 def test_resolver_preserves_ranked_top_symbols_before_limit(tmp_path, monkeypatch) -> None:
     spec = UniverseSpec.model_validate(
         {
