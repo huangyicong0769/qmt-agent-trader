@@ -258,6 +258,63 @@ def test_snapshot_uses_validated_non_null_trade_state(tmp_path) -> None:
     assert result["symbols"] == ["000001.SZ"]
 
 
+def test_snapshot_selects_etf_with_exact_session_bar(tmp_path) -> None:
+    lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "trade_date": "20240102",
+                    "open": 3.5,
+                    "high": 3.6,
+                    "low": 3.4,
+                    "close": 3.55,
+                    "vol": 100.0,
+                    "amount": 350.0,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/fund_daily",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [
+                {
+                    "ts_code": "510300.SH",
+                    "trade_date": "20240102",
+                    "up_limit": 3.85,
+                    "down_limit": 3.15,
+                }
+            ]
+        ),
+        "raw",
+        "tushare/stk_limit",
+    )
+    lake.write_parquet(
+        pd.DataFrame(
+            [{"exchange": "SSE", "cal_date": "20240102", "is_open": 1}]
+        ),
+        "raw",
+        "tushare/trade_cal",
+    )
+    spec = UniverseSpec.model_validate(
+        {
+            "universe_id": "validated-etf",
+            "name": "Validated ETF",
+            "source": "user_defined",
+            "asset_types": ["etf"],
+            "selection": {"mode": "all"},
+        }
+    )
+
+    result = UniverseResolver(lake).build(spec, as_of_date="20240102")
+
+    assert result["status"] == "OK"
+    assert result["symbols"] == ["510300.SH"]
+
+
 def test_market_cap_asof_rejects_duplicate_symbol_date(tmp_path) -> None:
     lake = DataLake(tmp_path / "lake", tmp_path / "research.duckdb")
     lake.write_parquet(
