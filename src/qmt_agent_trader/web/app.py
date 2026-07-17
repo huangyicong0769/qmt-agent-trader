@@ -46,6 +46,11 @@ def create_app() -> FastAPI:
     app.add_api_route("/api/status", status.get_status, methods=["GET"], include_in_schema=False)
 
     create_ui()
-    ui.run_with(app, mount_path="/", title="QMT Agent Studio")
+    ui.run_with(
+        app,
+        mount_path="/",
+        title="QMT Agent Studio",
+        reconnect_timeout=30.0,
+    )
 
     return app

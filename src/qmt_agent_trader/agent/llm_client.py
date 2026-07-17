@@ -11,6 +11,7 @@ A generous safety cap (100 rounds) prevents runaway processes.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ _MAX_REPEAT_BEFORE_BREAK = 3
 _MAX_TOOL_RESULT_CONTENT_CHARS = 12_000
 _MAX_TOOL_RESULT_LIST_ITEMS = 30
 _MAX_TOOL_RESULT_SYMBOL_ITEMS = 500
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,13 @@ class SafetyCapHit(StreamEvent):
 class LoopError(StreamEvent):
     """An unexpected error occurred during the loop."""
     message: str
+
+
+@dataclass(frozen=True)
+class Cancelled(StreamEvent):
+    """Cooperative cancellation was observed by the tool loop."""
+
+    reason: str = "user_interrupt"
 
 
 # ── Loop guard ──
@@ -290,6 +300,7 @@ class DeepSeekClient:
         messages: list[dict[str, Any]],
         tools: list[DeepSeekTool],
         max_rounds: int = _MAX_ROUNDS_SAFETY_CAP,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> Generator[StreamEvent, None, None]:
         """Streaming tool loop with heuristic loop detection + safety cap.
 
@@ -306,7 +317,16 @@ class DeepSeekClient:
         request_tools = [_to_openai_tool(tool) for tool in tools]
         call_history: list[tuple[str, str]] = []
 
+        def is_cancel_requested() -> bool:
+            return cancel_requested is not None and cancel_requested()
+
+        def cancelled_event() -> Cancelled:
+            return Cancelled(reason="user_interrupt")
+
         for _round in range(max_rounds):
+            if is_cancel_requested():
+                yield cancelled_event()
+                return
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "messages": conversation,
@@ -315,63 +335,105 @@ class DeepSeekClient:
             if request_tools:
                 kwargs["tools"] = request_tools
 
-            stream = self.client.chat.completions.create(**kwargs)
+            if is_cancel_requested():
+                yield cancelled_event()
+                return
+            stream: Any = None
+            stream_cancelled = False
 
             # Accumulators for streaming deltas
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
             tool_call_buf: dict[int, dict[str, Any]] = {}
             finished_tool_calls: list[dict[str, Any]] = []
+            remove_cancel_callback: Callable[[], None] | None = None
 
-            for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta is None:
-                    continue
+            try:
+                stream = self.client.chat.completions.create(**kwargs)
+                register_cancel_callback = getattr(
+                    cancel_requested,
+                    "add_cancel_callback",
+                    None,
+                )
+                if callable(register_cancel_callback):
+                    remove_cancel_callback = register_cancel_callback(
+                        lambda stream=stream: _close_stream(stream)
+                    )
+                if is_cancel_requested():
+                    stream_cancelled = True
+                else:
+                    for chunk in stream:
+                        if is_cancel_requested():
+                            stream_cancelled = True
+                            break
+                        delta = chunk.choices[0].delta if chunk.choices else None
+                        if delta is None:
+                            continue
 
-                # ── Reasoning content (DeepSeek thinking mode) ──
-                rc = getattr(delta, "reasoning_content", None)
-                if rc:
-                    reasoning_parts.append(rc)
+                        # ── Reasoning content (DeepSeek thinking mode) ──
+                        rc = getattr(delta, "reasoning_content", None)
+                        if rc:
+                            reasoning_parts.append(rc)
 
-                # ── Text content ──
-                if delta.content:
-                    content_parts.append(delta.content)
-                    yield TextDelta(content=delta.content, phase="draft")
+                        # ── Text content ──
+                        if delta.content:
+                            content_parts.append(delta.content)
+                            yield TextDelta(content=delta.content, phase="draft")
 
-                # ── Tool calls (streamed as deltas) ──
-                tc_deltas = list(getattr(delta, "tool_calls", None) or [])
-                for tc in tc_deltas:
-                    idx = getattr(tc, "index", 0)
-                    if idx not in tool_call_buf:
-                        tc_id = getattr(tc, "id", "") or ""
-                        fn_name = getattr(getattr(tc, "function", None), "name", "") or ""
-                        tool_call_buf[idx] = {
-                            "id": tc_id,
-                            "name": fn_name,
-                            "args_str": "",
-                        }
-                        if fn_name:
-                            yield ToolCallStart(
-                                tool_call_id=tc_id, tool_name=fn_name
-                            )
+                        # ── Tool calls (streamed as deltas) ──
+                        tc_deltas = list(getattr(delta, "tool_calls", None) or [])
+                        for tc in tc_deltas:
+                            if is_cancel_requested():
+                                stream_cancelled = True
+                                break
+                            idx = getattr(tc, "index", 0)
+                            if idx not in tool_call_buf:
+                                tc_id = getattr(tc, "id", "") or ""
+                                fn_name = getattr(
+                                    getattr(tc, "function", None), "name", ""
+                                ) or ""
+                                tool_call_buf[idx] = {
+                                    "id": tc_id,
+                                    "name": fn_name,
+                                    "args_str": "",
+                                }
+                                if fn_name:
+                                    yield ToolCallStart(
+                                        tool_call_id=tc_id, tool_name=fn_name
+                                    )
 
-                    buf = tool_call_buf[idx]
-                    fn_delta = getattr(tc, "function", None)
-                    if fn_delta:
-                        args_d = getattr(fn_delta, "arguments", "") or ""
-                        buf["args_str"] += args_d
-                        if args_d:
-                            yield ToolCallDelta(
-                                tool_call_id=buf["id"], arguments_delta=args_d
-                            )
+                            buf = tool_call_buf[idx]
+                            fn_delta = getattr(tc, "function", None)
+                            if fn_delta:
+                                args_d = getattr(fn_delta, "arguments", "") or ""
+                                buf["args_str"] += args_d
+                                if args_d:
+                                    yield ToolCallDelta(
+                                        tool_call_id=buf["id"], arguments_delta=args_d
+                                    )
 
-                    # If we got a new id/name mid-stream, update
-                    new_id = getattr(tc, "id", "") or ""
-                    if new_id and not buf["id"]:
-                        buf["id"] = new_id
-                    new_name = getattr(getattr(tc, "function", None), "name", "") or ""
-                    if new_name and not buf["name"]:
-                        buf["name"] = new_name
+                            # If we got a new id/name mid-stream, update
+                            new_id = getattr(tc, "id", "") or ""
+                            if new_id and not buf["id"]:
+                                buf["id"] = new_id
+                            new_name = getattr(
+                                getattr(tc, "function", None), "name", ""
+                            ) or ""
+                            if new_name and not buf["name"]:
+                                buf["name"] = new_name
+                        if stream_cancelled:
+                            break
+                        if is_cancel_requested():
+                            stream_cancelled = True
+                            break
+            finally:
+                if remove_cancel_callback is not None:
+                    remove_cancel_callback()
+                _close_stream(stream)
+
+            if stream_cancelled or is_cancel_requested():
+                yield cancelled_event()
+                return
 
             # ── Build reasoning_content string for conversation ──
             reasoning_str = "".join(reasoning_parts) if reasoning_parts else None
@@ -390,6 +452,10 @@ class DeepSeekClient:
                 if not isinstance(arguments, dict):
                     arguments = {}
 
+                if is_cancel_requested():
+                    yield cancelled_event()
+                    return
+
                 # ── Loop guard ──
                 break_msg = _loop_guard(call_history, tc_name, arguments)
                 if break_msg:
@@ -402,11 +468,21 @@ class DeepSeekClient:
                     arguments=arguments,
                 )
 
+                if is_cancel_requested():
+                    yield cancelled_event()
+                    return
+
                 if tc_name in tool_map:
+                    if is_cancel_requested():
+                        yield cancelled_event()
+                        return
                     try:
                         result = tool_map[tc_name].fn(**arguments)
                     except Exception as exc:
                         result = {"error": str(exc)}
+                    if is_cancel_requested():
+                        yield cancelled_event()
+                        return
                     yield ToolResult(
                         tool_call_id=tc_id,
                         tool_name=tc_name,
@@ -439,6 +515,9 @@ class DeepSeekClient:
                         "arguments": arguments,
                         "result": result,
                     })
+                    if is_cancel_requested():
+                        yield cancelled_event()
+                        return
                 else:
                     yield LoopError(
                         message=f"LLM requested unknown tool: {tc_name}"
@@ -447,15 +526,25 @@ class DeepSeekClient:
 
             # ── No tool calls? Append final assistant message and done ──
             if not finished_tool_calls:
+                if is_cancel_requested():
+                    yield cancelled_event()
+                    return
                 final_content = "".join(content_parts) if content_parts else None
                 if final_content:
                     yield FinalMessage(content=final_content)
+                if is_cancel_requested():
+                    yield cancelled_event()
+                    return
                 final_msg: dict[str, Any] = {"role": "assistant"}
                 if final_content:
                     final_msg["content"] = final_content
                 if reasoning_str:
                     final_msg["reasoning_content"] = reasoning_str
                 conversation.append(final_msg)  # type: ignore[arg-type]
+                return
+
+            if is_cancel_requested():
+                yield cancelled_event()
                 return
 
         # Safety cap
@@ -465,6 +554,18 @@ class DeepSeekClient:
 
 
 # ── Helpers ──
+
+
+def _close_stream(stream: Any) -> None:
+    if stream is None:
+        return
+    close = getattr(stream, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:
+        logger.debug("model stream close failed during cleanup: %s", exc)
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:

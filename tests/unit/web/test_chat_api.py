@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import anyio
 import pytest
 from fastapi import FastAPI
@@ -10,6 +13,8 @@ from starlette.requests import Request
 
 from qmt_agent_trader.agent.orchestrator import OrchestratorEvent
 from qmt_agent_trader.web.chat_repository import ChatSessionRepository
+from qmt_agent_trader.web.chat_run_manager import ChatRunManager
+from qmt_agent_trader.web.event_bus import EventBus
 from qmt_agent_trader.web.routes import chat
 
 
@@ -93,8 +98,25 @@ def test_send_message_with_advanced_options() -> None:
     assert resp.status_code == 200
 
 
-def test_execute_without_body_reuses_queued_message_without_duplicate() -> None:
+def test_execute_without_body_reuses_queued_message_without_duplicate(
+    isolated_chat_repository: ChatSessionRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Executing an enqueued message should not append the same user text again."""
+    class FakeOrchestrator:
+        async def execute_stream(self, message: str, **kwargs: object):
+            yield OrchestratorEvent(
+                type="done",
+                run_id=str(kwargs["run_id"]),
+                session_id=str(kwargs["session_id"]),
+                message="完成",
+            )
+
+    manager = ChatRunManager(
+        orchestrator=FakeOrchestrator(),
+        repository=isolated_chat_repository,
+    )
+    monkeypatch.setattr(chat, "_get_run_manager", lambda: manager)
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -127,7 +149,10 @@ def test_execute_without_body_reuses_queued_message_without_duplicate() -> None:
     assert [message["content"] for message in user_messages] == ["发现因子"]
 
 
-def test_execute_stream_outputs_todo_status_event_with_session_id(monkeypatch) -> None:
+def test_execute_stream_outputs_todo_status_event_with_session_id(
+    isolated_chat_repository: ChatSessionRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = FastAPI()
     app.include_router(chat.router)
     client = TestClient(app)
@@ -149,8 +174,18 @@ def test_execute_stream_outputs_todo_status_event_with_session_id(monkeypatch) -
                     "active_item": None,
                 },
             )
+            yield OrchestratorEvent(
+                type="done",
+                run_id="run_test",
+                session_id=session_id,
+                message="完成",
+            )
 
-    monkeypatch.setattr(chat, "_get_orchestrator", lambda: FakeOrchestrator())
+    manager = ChatRunManager(
+        orchestrator=FakeOrchestrator(),
+        repository=isolated_chat_repository,
+    )
+    monkeypatch.setattr(chat, "_get_run_manager", lambda: manager)
 
     response = client.post(
         f"/sessions/{session_id}/execute",
@@ -160,6 +195,114 @@ def test_execute_stream_outputs_todo_status_event_with_session_id(monkeypatch) -
     assert response.status_code == 200
     assert "event: todo_status" in response.text
     assert f'"session_id": "{session_id}"' in response.text
+
+
+def test_run_api_query_sse_replay_and_event_bus_are_unified(
+    isolated_chat_repository: ChatSessionRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ImmediateOrchestrator:
+        async def execute_stream(self, message: str, **kwargs: object):
+            run_id = str(kwargs["run_id"])
+            session_id = str(kwargs["session_id"])
+            yield OrchestratorEvent(
+                type="final_message",
+                run_id=run_id,
+                session_id=session_id,
+                message="最终答案",
+            )
+            yield OrchestratorEvent(
+                type="done",
+                run_id=run_id,
+                session_id=session_id,
+                message="完成",
+            )
+
+    bus = EventBus()
+    manager = ChatRunManager(
+        orchestrator=ImmediateOrchestrator(),
+        repository=isolated_chat_repository,
+        bus=bus,
+    )
+    monkeypatch.setattr(chat, "_get_run_manager", lambda: manager)
+    app = FastAPI()
+    app.include_router(chat.router)
+
+    with TestClient(app) as client:
+        session_id = client.post("/sessions", json={}).json()["session_id"]
+        created = client.post(
+            f"/sessions/{session_id}/runs",
+            json={"message": "执行研究"},
+        )
+        assert created.status_code == 200
+        run_id = created.json()["run_id"]
+
+        queried = client.get(f"/runs/{run_id}")
+        assert queried.status_code == 200
+        assert queried.json()["run_id"] == run_id
+
+        stream = client.get(f"/runs/{run_id}/events")
+        assert stream.status_code == 200
+        payloads = [
+            json.loads(line.removeprefix("data: "))
+            for line in stream.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert payloads[0]["sequence"] == 0
+        assert [payload["sequence"] for payload in payloads[1:]] == sorted(
+            payload["sequence"] for payload in payloads[1:]
+        )
+        last_sequence = max(payload["sequence"] for payload in payloads)
+
+        reconnect = client.get(
+            f"/runs/{run_id}/events?after_sequence={last_sequence}"
+        )
+        assert reconnect.status_code == 200
+        assert "event: snapshot" in reconnect.text
+        assert "event: done" not in reconnect.text
+        assert [event.payload["sequence"] for event in bus.get_history(run_id)] == list(
+            range(1, last_sequence + 1)
+        )
+
+
+def test_cancel_api_returns_cancelling_until_worker_confirms(
+    isolated_chat_repository: ChatSessionRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CancellableOrchestrator:
+        async def execute_stream(self, message: str, **kwargs: object):
+            cancel_requested = kwargs["cancel_requested"]
+            assert callable(cancel_requested)
+            while not cancel_requested():
+                await asyncio.sleep(0)
+            yield OrchestratorEvent(
+                type="cancelled",
+                run_id=str(kwargs["run_id"]),
+                session_id=str(kwargs["session_id"]),
+                message="已取消",
+            )
+
+    manager = ChatRunManager(
+        orchestrator=CancellableOrchestrator(),
+        repository=isolated_chat_repository,
+    )
+    monkeypatch.setattr(chat, "_get_run_manager", lambda: manager)
+    app = FastAPI()
+    app.include_router(chat.router)
+
+    with TestClient(app) as client:
+        session_id = client.post("/sessions", json={}).json()["session_id"]
+        run_id = client.post(
+            f"/sessions/{session_id}/runs",
+            json={"message": "长任务"},
+        ).json()["run_id"]
+        cancelled = client.post(f"/runs/{run_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "CANCELLING"
+
+        events = client.get(f"/runs/{run_id}/events")
+        assert "event: cancelled" in events.text
+        assert client.get(f"/runs/{run_id}").json()["status"] == "CANCELLED"
 
 
 def test_session_schema_no_mode_field() -> None:

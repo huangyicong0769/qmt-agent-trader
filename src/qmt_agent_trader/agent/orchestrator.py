@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from qmt_agent_trader.agent.evidence_ledger import EvidenceLedger
 from qmt_agent_trader.agent.experiment_store import ExperimentStore
 from qmt_agent_trader.agent.llm_client import (
+    Cancelled,
     DeepSeekClient,
 )
 from qmt_agent_trader.agent.runtime import AgentRuntime, build_default_runtime
@@ -38,11 +40,13 @@ class OrchestratorEvent:
     run_id: str
     data: dict[str, Any] = field(default_factory=dict)
     message: str = ""
+    session_id: str | None = None
 
     def to_sse(self) -> str:
         payload = {
             "type": self.type,
             "run_id": self.run_id,
+            "session_id": self.session_id,
             "message": self.message,
             "data": self.data,
         }
@@ -139,12 +143,13 @@ class AgentOrchestrator:
         session_id: str | None = None,
         history: list[dict[str, Any]] | None = None,
         max_rounds: int = 100,
-        cancel_event: asyncio.Event | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> AsyncGenerator[OrchestratorEvent, None]:
         """Execute the LLM tool loop and yield events suitable for SSE streaming.
 
-        If cancel_event is set, the generator checks it during the polling loop
-        and yields a 'cancelled' event instead of completing normally.
+        The cancellation callback is safe to invoke from the worker thread used
+        by the client.  A client cancellation is only complete once the worker
+        observes and reports it.
         """
         rid = run_id or new_id("run")
         sid = session_id or rid
@@ -408,43 +413,66 @@ class AgentOrchestrator:
             data={"tool_count": len(tools), "model": self.settings.deepseek_model},
         )
 
-        # ── Run the tool loop in a thread to avoid blocking the event loop ──
-        import asyncio as _asyncio
-        import concurrent.futures as _futures
+        # ── Run the synchronous client in a worker without owning a per-run executor ──
+        loop = asyncio.get_running_loop()
+        event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
 
+        def enqueue(kind: str, payload: Any = None) -> None:
+            loop.call_soon_threadsafe(event_queue.put_nowait, (kind, payload))
+
+        def run_stream_worker() -> None:
+            try:
+                stream = _client_stream(
+                    client,
+                    messages=messages,
+                    tools=tools,
+                    max_rounds=max_rounds,
+                    cancel_requested=cancel_requested,
+                )
+                for stream_event in stream:
+                    enqueue("event", stream_event)
+            except Exception as exc:
+                enqueue("error", exc)
+            finally:
+                enqueue("sentinel")
+
+        worker_task = asyncio.create_task(
+            asyncio.to_thread(run_stream_worker),
+            name=f"agent-stream-worker-{rid}",
+        )
         stream_buffer: list[Any] = []
         stream_error_msg: str | None = None
+        cancelled = False
 
-        def _run_stream() -> None:
-            nonlocal stream_error_msg
-            try:
-                for evt in client.run_tool_loop_stream(
-                    messages=messages, tools=tools, max_rounds=max_rounds
-                ):
-                    stream_buffer.append(evt)
-            except Exception as exc:
-                stream_error_msg = str(exc)
-
-        with _futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_run_stream)
-            yielded = 0
-
-            while not future.done() or yielded < len(stream_buffer):
-                while yielded < len(stream_buffer):
-                    evt = stream_buffer[yielded]
-                    yielded += 1
-                    for oe in _stream_to_events(evt, rid, experiment_id):
+        try:
+            while True:
+                kind, payload = await event_queue.get()
+                if kind == "event":
+                    if isinstance(payload, Cancelled):
+                        cancelled = True
+                        break
+                    # Keep only bounded, non-token evidence needed for the
+                    # final ledger/fallback.  Token deltas are delivered to
+                    # consumers but never retained by this layer.
+                    if payload.__class__.__name__ in {
+                        "FinalMessage",
+                        "ToolResult",
+                        "SafetyCapHit",
+                        "LoopError",
+                    }:
+                        stream_buffer.append(payload)
+                    for oe in _stream_to_events(payload, rid, experiment_id):
                         yield oe
-                if future.done():
+                elif kind == "error":
+                    stream_error_msg = str(payload)
+                elif kind == "sentinel":
                     break
-                # Check for cancellation
-                if cancel_event is not None and cancel_event.is_set():
-                    stream_error_msg = "cancelled"
-                    future.cancel()
-                    break
-                await _asyncio.sleep(0.05)
 
-            if stream_error_msg == "cancelled":
+            await worker_task
+
+            if cancelled or (
+                cancel_requested is not None and cancel_requested()
+            ):
                 yield OrchestratorEvent(
                     type="cancelled",
                     run_id=rid,
@@ -477,6 +505,14 @@ class AgentOrchestrator:
                             "experiment_id": experiment_id,
                         },
                     )
+                    if cancel_requested is not None and cancel_requested():
+                        yield OrchestratorEvent(
+                            type="cancelled",
+                            run_id=rid,
+                            message="Execution cancelled by user.",
+                            data={"reason": "user_interrupt"},
+                        )
+                        return
                     yield OrchestratorEvent(
                         type="final_message",
                         run_id=rid,
@@ -517,38 +553,69 @@ class AgentOrchestrator:
             if terminal_errors:
                 return
 
-        # ── Count tool calls ──
-        tcount = sum(
-            1 for e in stream_buffer if e.__class__.__name__ == "ToolResult"
-        )
-        ledger = _ledger_from_stream(rid, stream_buffer)
-        final_answer_raw = _final_answer_from_stream(stream_buffer)
-        evidence_report = ledger.report()
-        if final_answer_raw is not None:
-            conflict_report = ledger.final_answer_conflict_report(final_answer_raw)
-            if conflict_report["has_conflict"]:
-                yield OrchestratorEvent(
-                    type="evidence_conflict_report",
-                    run_id=rid,
-                    message="Evidence conflicts detected after raw final answer.",
-                    data={
-                        "experiment_id": experiment_id,
-                        "evidence_conflict_report": conflict_report,
-                    },
-                )
-        yield OrchestratorEvent(
-            type="done",
-            run_id=rid,
-            message=_done_message(evidence_report),
-            data={
-                "experiment_id": experiment_id,
-                "tool_calls_count": tcount,
-                "evidence_report": evidence_report,
-            },
-        )
+            # ── Count tool calls ──
+            tcount = sum(
+                1 for e in stream_buffer if e.__class__.__name__ == "ToolResult"
+            )
+            ledger = _ledger_from_stream(rid, stream_buffer)
+            final_answer_raw = _final_answer_from_stream(stream_buffer)
+            evidence_report = ledger.report()
+            if final_answer_raw is not None:
+                conflict_report = ledger.final_answer_conflict_report(final_answer_raw)
+                if conflict_report["has_conflict"]:
+                    yield OrchestratorEvent(
+                        type="evidence_conflict_report",
+                        run_id=rid,
+                        message="Evidence conflicts detected after raw final answer.",
+                        data={
+                            "experiment_id": experiment_id,
+                            "evidence_conflict_report": conflict_report,
+                        },
+                    )
+            yield OrchestratorEvent(
+                type="done",
+                run_id=rid,
+                message=_done_message(evidence_report),
+                data={
+                    "experiment_id": experiment_id,
+                    "tool_calls_count": tcount,
+                    "evidence_report": evidence_report,
+                },
+            )
+        finally:
+            # Closing this async generator must not abandon the thread that
+            # owns the synchronous model stream.  We never cancel the worker
+            # task or pretend that a thread has stopped before it exits.
+            if not worker_task.done():
+                await asyncio.shield(worker_task)
 
 
 # ── Stream event converter ──
+
+
+def _client_stream(
+    client: Any,
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[Any],
+    max_rounds: int,
+    cancel_requested: Callable[[], bool] | None,
+) -> Any:
+    """Call stream clients while keeping old test doubles source-compatible."""
+    method = client.run_tool_loop_stream
+    parameters = inspect.signature(method).parameters
+    supports_cancel = "cancel_requested" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    kwargs: dict[str, Any] = {
+        "messages": messages,
+        "tools": tools,
+        "max_rounds": max_rounds,
+    }
+    if supports_cancel:
+        kwargs["cancel_requested"] = cancel_requested
+    return method(**kwargs)
 
 
 def _stream_error_fallback_message(error: str, tool_results: list[Any]) -> str:

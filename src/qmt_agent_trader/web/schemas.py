@@ -50,6 +50,12 @@ class SendMessageRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class StartChatRunRequest(BaseModel):
+    message: str | None = None
+    content: str | None = None
+    interrupt: bool = False
+
+
 class ToolRunRequest(BaseModel):
     input_data: dict[str, Any] = Field(default_factory=dict)
     experiment_id: str | None = None

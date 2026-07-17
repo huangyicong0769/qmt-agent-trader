@@ -4,6 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from qmt_agent_trader.core.config import Settings, get_settings
+from qmt_agent_trader.persistence.paths import PersistencePaths
 from qmt_agent_trader.persistence.repositories.versioned_record import VersionedRecordRepository
 from qmt_agent_trader.web.schemas import ChatSession
 
@@ -57,3 +59,12 @@ class ChatSessionRepository:
 
     def delete(self, session_id: str) -> bool:
         return self.records.delete(session_id)
+
+
+def build_chat_session_repository(settings: Settings | None = None) -> ChatSessionRepository:
+    paths = PersistencePaths.from_settings(settings or get_settings())
+    return ChatSessionRepository(
+        paths.sessions_root,
+        locks_root=paths.locks_root,
+        quarantine_root=paths.quarantine_root / "chat_sessions",
+    )
