@@ -49,11 +49,12 @@ PERSISTED_EVENT_TYPES = frozenset(
 
 # Lock order is manager._lock -> run.event_lock when both are needed.  The
 # per-Run lock serializes every state transition, sequence allocation,
-# persistence, history append, and subscriber broadcast.  Once a terminal
-# event is appended, its snapshot state is already terminal and no later event
-# may be appended.  Emit operations acquire only run.event_lock, so slow
-# persistence for one Run never serializes unrelated Sessions.  No code may
-# acquire manager._lock while holding a run.event_lock.
+# persistence, history append, and subscriber broadcast.  Completion chooses
+# done or cancelled while holding that same lock.  Once a terminal event is
+# appended, its snapshot state is already terminal and no later event may be
+# appended.  Emit operations acquire only run.event_lock, so slow persistence
+# for one Run never serializes unrelated Sessions.  No code may acquire
+# manager._lock while holding a run.event_lock.
 
 
 class RunStatus(StrEnum):
@@ -616,31 +617,7 @@ class ChatRunManager:
             )
             return True
         if event_type == "done":
-            if run.status in {RunStatus.FAILED, RunStatus.CANCELLED}:
-                return True
-            if run.status is RunStatus.CANCELLING:
-                # Cancellation won the Run's serialized event boundary.  An
-                # already-queued completion must not turn a committed stop
-                # request into RUN_COMPLETED after the client saw CANCELLING.
-                await self._emit_terminal(
-                    run,
-                    "cancelled",
-                    "Execution cancelled by user.",
-                    target_status=RunStatus.CANCELLED,
-                    data={
-                        **data,
-                        "reason": "user_interrupt",
-                        "completion_suppressed": True,
-                    },
-                )
-                return True
-            await self._emit_terminal(
-                run,
-                "done",
-                message,
-                target_status=RunStatus.COMPLETED,
-                data=data,
-            )
+            await self._commit_completion(run, message, data)
             return True
         if run.status in TERMINAL_STATUSES:
             return True
@@ -676,22 +653,71 @@ class ChatRunManager:
         error: str | None = None,
     ) -> RunEvent | None:
         """Persist, commit, and publish a terminal event in one Run boundary."""
-        event_data = dict(data or {})
+        async with run.event_lock:
+            return await self._commit_terminal_locked(
+                run,
+                event_type,
+                message,
+                target_status=target_status,
+                data=data,
+                error=error,
+            )
+
+    async def _commit_completion(
+        self,
+        run: _ChatRun,
+        message: str,
+        data: dict[str, Any],
+    ) -> RunEvent | None:
+        """Choose completion's terminal outcome inside the Run event boundary."""
         async with run.event_lock:
             if run.terminal_event_sequence is not None or run.status in TERMINAL_STATUSES:
                 return None
-            if target_status is RunStatus.CANCELLED and run.status is not RunStatus.CANCELLING:
-                self._transition(run, RunStatus.CANCELLING)
-            event = self._new_event(run, event_type, message, event_data)
-            if not event.terminal:
-                raise ValueError(f"{event_type} is not a terminal RunEvent")
-            if not await self._persist_or_fail(run, event):
-                return None
-            if error is not None:
-                run.error = error
-            self._transition(run, target_status)
-            await self._append_and_broadcast(run, event)
-            return event
+            if run.status is RunStatus.CANCELLING:
+                return await self._commit_terminal_locked(
+                    run,
+                    "cancelled",
+                    "Execution cancelled by user.",
+                    target_status=RunStatus.CANCELLED,
+                    data={
+                        **data,
+                        "reason": "user_interrupt",
+                        "completion_suppressed": True,
+                    },
+                )
+            return await self._commit_terminal_locked(
+                run,
+                "done",
+                message,
+                target_status=RunStatus.COMPLETED,
+                data=data,
+            )
+
+    async def _commit_terminal_locked(
+        self,
+        run: _ChatRun,
+        event_type: str,
+        message: str,
+        *,
+        target_status: RunStatus,
+        data: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> RunEvent | None:
+        """Persist and expose a terminal event while the caller holds run.event_lock."""
+        if run.terminal_event_sequence is not None or run.status in TERMINAL_STATUSES:
+            return None
+        if target_status is RunStatus.CANCELLED and run.status is not RunStatus.CANCELLING:
+            self._transition(run, RunStatus.CANCELLING)
+        event = self._new_event(run, event_type, message, dict(data or {}))
+        if not event.terminal:
+            raise ValueError(f"{event_type} is not a terminal RunEvent")
+        if not await self._persist_or_fail(run, event):
+            return None
+        if error is not None:
+            run.error = error
+        self._transition(run, target_status)
+        await self._append_and_broadcast(run, event)
+        return event
 
     @staticmethod
     def _new_event(
@@ -920,7 +946,6 @@ class ChatRunManager:
             },
             RunStatus.CANCELLING: {
                 RunStatus.CANCELLED,
-                RunStatus.COMPLETED,
                 RunStatus.FAILED,
             },
         }
