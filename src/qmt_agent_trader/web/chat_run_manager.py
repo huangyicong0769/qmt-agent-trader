@@ -47,10 +47,13 @@ PERSISTED_EVENT_TYPES = frozenset(
     }
 )
 
-# Lock order is manager._lock -> run.event_lock when both are needed.  Emit
-# operations acquire only run.event_lock, so slow persistence for one Run never
-# serializes unrelated Sessions.  No code may acquire manager._lock while
-# holding a run.event_lock.
+# Lock order is manager._lock -> run.event_lock when both are needed.  The
+# per-Run lock serializes every state transition, sequence allocation,
+# persistence, history append, and subscriber broadcast.  Once a terminal
+# event is appended, its snapshot state is already terminal and no later event
+# may be appended.  Emit operations acquire only run.event_lock, so slow
+# persistence for one Run never serializes unrelated Sessions.  No code may
+# acquire manager._lock while holding a run.event_lock.
 
 
 class RunStatus(StrEnum):
@@ -177,12 +180,12 @@ class _ChatRun:
     accumulated_draft_through_sequence: int = 0
     recent_tool: dict[str, Any] | None = None
     task: asyncio.Task[None] | None = None
-    cancelling_task: asyncio.Task[Any] | None = None
     completion_event: asyncio.Event = field(default_factory=asyncio.Event)
     history_events: deque[RunEvent] = field(default_factory=deque)
     subscribers: set[asyncio.Queue[RunEvent]] = field(default_factory=set)
     event_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     persistence_failure_reported: bool = False
+    terminal_event_sequence: int | None = None
 
 
 class ChatRunManager:
@@ -211,7 +214,6 @@ class ChatRunManager:
         self._successors: dict[str, _SuccessorRequest] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
-        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
@@ -292,17 +294,24 @@ class ChatRunManager:
                     message,
                     persist_user_message=persist_user_message,
                 )
+            await self._request_cancel_serialized(active)
             request = _SuccessorRequest(
                 request_id=new_id("successor"),
                 message=message,
                 persist_user_message=persist_user_message,
             )
-            self._successors[session_id] = request
-            cancelling_task = self._request_cancel_locked(active)
-            requested_snapshot = self._snapshot(active)
-            if cancelling_task is not None:
-                await asyncio.shield(cancelling_task)
-            return requested_snapshot
+            if self._is_execution_active(active):
+                # The old worker still owns this Session until teardown.  Keep
+                # the marker only for that handoff window, after cancellation
+                # has conclusively been serialized with its event stream.
+                self._successors[session_id] = request
+                return self._snapshot(active)
+            return await self._start_run_locked(
+                session_id,
+                message,
+                persist_user_message=persist_user_message,
+                run_id=request.request_id,
+            )
 
     async def request_cancel(self, run_id: str) -> RunSnapshot | None:
         run = self._runs.get(run_id)
@@ -312,13 +321,7 @@ class ChatRunManager:
             current = self._runs.get(run_id)
             if current is None:
                 return None
-            if current.status in TERMINAL_STATUSES:
-                return self._snapshot(current)
-            cancelling_task = self._request_cancel_locked(current)
-            requested_snapshot = self._snapshot(current)
-            if cancelling_task is not None:
-                await asyncio.shield(cancelling_task)
-            return requested_snapshot
+            return await self._request_cancel_serialized(current)
 
     async def wait_for_run(self, run_id: str) -> RunSnapshot:
         run = self._runs.get(run_id)
@@ -427,45 +430,26 @@ class ChatRunManager:
                     async with run.event_lock:
                         run.subscribers.discard(queue)
 
-    def _request_cancel_locked(self, run: _ChatRun) -> asyncio.Task[Any] | None:
-        if run.status in TERMINAL_STATUSES:
-            return None
-        if run.status is not RunStatus.CANCELLING:
+    async def _request_cancel_serialized(self, run: _ChatRun) -> RunSnapshot:
+        """Commit cancellation intent and its event in one Run transaction."""
+        async with run.event_lock:
+            if run.status in TERMINAL_STATUSES:
+                return self._snapshot(run)
+            if run.status is RunStatus.CANCELLING:
+                run.token.request_cancel()
+                return self._snapshot(run)
             self._transition(run, RunStatus.CANCELLING)
             run.token.request_cancel()
-            run.cancelling_task = self._schedule_background(
-                self._emit_cancelling_event(run),
-                name=f"chat-run-cancelling-{run.run_id}",
+            event = self._new_event(
+                run,
+                "cancelling",
+                "正在停止，当前工具调用结束后生效。",
+                {"reason": "user_request"},
             )
-        else:
-            run.token.request_cancel()
-        return run.cancelling_task
-
-    async def _emit_cancelling_event(self, run: _ChatRun) -> None:
-        """Publish cancellation intent before worker confirmation can finish."""
-        await self._emit(
-            run,
-            "cancelling",
-            "正在停止，当前工具调用结束后生效。",
-            data={"reason": "user_request"},
-        )
-
-    def _schedule_background(
-        self, awaitable: Any, *, name: str
-    ) -> asyncio.Task[Any]:
-        task = asyncio.create_task(awaitable, name=name)
-        self._background_tasks.add(task)
-
-        def complete(done: asyncio.Task[Any]) -> None:
-            self._background_tasks.discard(done)
-            if done.cancelled():
-                return
-            exception = done.exception()
-            if exception is not None:
-                logger.error("background chat run task failed", exc_info=exception)
-
-        task.add_done_callback(complete)
-        return task
+            if not await self._persist_or_fail(run, event):
+                return self._snapshot(run)
+            await self._append_and_broadcast(run, event)
+            return self._snapshot(run)
 
     async def _start_run_locked(
         self,
@@ -537,14 +521,15 @@ class ChatRunManager:
     async def _execute_run(self, run: _ChatRun) -> None:
         terminal_seen = False
         try:
-            if run.status is RunStatus.PENDING:
-                self._transition(run, RunStatus.RUNNING)
-            elif run.status is not RunStatus.CANCELLING:
-                raise InvalidRunTransition(
-                    f"run {run.run_id} cannot start from {run.status}"
-                )
-            elif run.started_at is None:
-                run.started_at = shanghai_now_iso()
+            async with run.event_lock:
+                if run.status is RunStatus.PENDING:
+                    self._transition(run, RunStatus.RUNNING)
+                elif run.status is not RunStatus.CANCELLING:
+                    raise InvalidRunTransition(
+                        f"run {run.run_id} cannot start from {run.status}"
+                    )
+                elif run.started_at is None:
+                    run.started_at = shanghai_now_iso()
             if run.status in TERMINAL_STATUSES:
                 return
             stream = self.orchestrator.execute_stream(
@@ -606,19 +591,9 @@ class ChatRunManager:
                 return True
             await self._emit(run, "run_started", message, data=data)
             return run.status in TERMINAL_STATUSES
-        if event_type in {"cancelled", "done", "error"}:
-            cancelling_task = run.cancelling_task
-            if (
-                run.status is RunStatus.CANCELLING
-                and cancelling_task is not None
-                and not cancelling_task.done()
-            ):
-                await asyncio.shield(cancelling_task)
         if event_type == "cancelled":
             if run.status in TERMINAL_STATUSES:
                 return True
-            if run.status is not RunStatus.CANCELLING:
-                self._transition(run, RunStatus.CANCELLING)
             await self._emit_terminal(
                 run,
                 "cancelled",
@@ -642,6 +617,22 @@ class ChatRunManager:
             return True
         if event_type == "done":
             if run.status in {RunStatus.FAILED, RunStatus.CANCELLED}:
+                return True
+            if run.status is RunStatus.CANCELLING:
+                # Cancellation won the Run's serialized event boundary.  An
+                # already-queued completion must not turn a committed stop
+                # request into RUN_COMPLETED after the client saw CANCELLING.
+                await self._emit_terminal(
+                    run,
+                    "cancelled",
+                    "Execution cancelled by user.",
+                    target_status=RunStatus.CANCELLED,
+                    data={
+                        **data,
+                        "reason": "user_interrupt",
+                        "completion_suppressed": True,
+                    },
+                )
                 return True
             await self._emit_terminal(
                 run,
@@ -667,6 +658,7 @@ class ChatRunManager:
     ) -> RunEvent:
         event_data = dict(data or {})
         async with run.event_lock:
+            self._assert_can_append(run, event_type)
             event = self._new_event(run, event_type, message, event_data)
             if persist and not await self._persist_or_fail(run, event):
                 return event
@@ -686,6 +678,10 @@ class ChatRunManager:
         """Persist, commit, and publish a terminal event in one Run boundary."""
         event_data = dict(data or {})
         async with run.event_lock:
+            if run.terminal_event_sequence is not None or run.status in TERMINAL_STATUSES:
+                return None
+            if target_status is RunStatus.CANCELLED and run.status is not RunStatus.CANCELLING:
+                self._transition(run, RunStatus.CANCELLING)
             event = self._new_event(run, event_type, message, event_data)
             if not event.terminal:
                 raise ValueError(f"{event_type} is not a terminal RunEvent")
@@ -809,6 +805,21 @@ class ChatRunManager:
         return None
 
     async def _append_and_broadcast(self, run: _ChatRun, event: RunEvent) -> None:
+        self._assert_can_append(run, event.event_type)
+        if event.sequence != run.last_event_sequence + 1:
+            raise InvalidRunTransition(
+                f"event sequence {event.sequence} does not follow {run.last_event_sequence}"
+            )
+        if event.terminal:
+            if run.status not in TERMINAL_STATUSES:
+                raise InvalidRunTransition(
+                    f"terminal event {event.event_type} without terminal Run status"
+                )
+            run.terminal_event_sequence = event.sequence
+        elif run.status in TERMINAL_STATUSES:
+            raise InvalidRunTransition(
+                f"cannot append {event.event_type} after terminal Run status {run.status}"
+            )
         run.last_event_sequence = event.sequence
         if event.event_type == "token":
             run.accumulated_draft += event.message
@@ -823,8 +834,16 @@ class ChatRunManager:
             queue.put_nowait(event)
         await self.event_bus.publish(self._to_agent_event(event))
 
+    @staticmethod
+    def _assert_can_append(run: _ChatRun, event_type: str) -> None:
+        if run.terminal_event_sequence is not None:
+            raise InvalidRunTransition(
+                f"cannot append {event_type} after terminal event "
+                f"{run.terminal_event_sequence}"
+            )
+
     async def _record_persistence_failure(self, run: _ChatRun, exc: Exception) -> None:
-        if run.persistence_failure_reported:
+        if run.persistence_failure_reported or run.terminal_event_sequence is not None:
             return
         run.persistence_failure_reported = True
         run.error = f"chat run persistence failed: {exc}"
