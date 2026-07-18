@@ -336,6 +336,16 @@ def _run_snapshot_is_terminal(snapshot: RunSnapshot | dict[str, Any]) -> bool:
         return False
 
 
+async def _run_page_timer_loop(
+    render: Callable[[], None],
+    page_alive: Callable[[], bool],
+) -> None:
+    """Refresh page-local elapsed time without creating a disposable UI timer element."""
+    while page_alive():
+        render()
+        await asyncio.sleep(1.0)
+
+
 @dataclass(frozen=True)
 class _SessionActivation:
     reloaded: bool
@@ -840,7 +850,7 @@ def register() -> None:
         last_rendered_sequence: dict[str, int] = {}
         assistant_states: dict[str, _AssistantRenderState] = {}
         run_started_at: dict[str, float] = {}
-        run_timer: Any | None = None
+        run_timer_task: asyncio.Task[Any] | None = None
         _refresh_fn: list[Any] = [lambda: None]
 
         def alive() -> bool:
@@ -1419,7 +1429,12 @@ def register() -> None:
                     ui.button("Stop", on_click=stop_active_run).props("color=negative flat")
                     ui.button("Send", on_click=send_handler).props("color=primary")
 
-                run_timer = ui.timer(1.0, render_run_timer)
+                run_timer_task = track_page_task(
+                    asyncio.create_task(
+                        _run_page_timer_loop(render_run_timer, alive),
+                        name="chat-page-run-timer",
+                    )
+                )
                 with ui.expansion("Advanced", icon="tune").classes("w-full px-4"):
                     with ui.row().classes("gap-4"):
                         ui.select(
@@ -1468,10 +1483,11 @@ def register() -> None:
             create_session(focus=True)
 
         def on_client_delete() -> None:
-            nonlocal page_alive, subscription_task
+            nonlocal page_alive, subscription_task, run_timer_task
             page_alive = False
-            if run_timer is not None and not getattr(run_timer, "is_deleted", False):
-                run_timer.cancel(with_current_invocation=True)
+            if run_timer_task is not None and not run_timer_task.done():
+                run_timer_task.cancel()
+            run_timer_task = None
             if subscription_task is not None and not subscription_task.done():
                 subscription_task.cancel()
             subscription_task = None
