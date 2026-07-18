@@ -263,9 +263,16 @@ def test_run_api_query_sse_replay_and_event_bus_are_unified(
         assert reconnect.status_code == 200
         assert "event: snapshot" in reconnect.text
         assert "event: done" not in reconnect.text
+        assert reconnect.text.count("event: snapshot") == 1
+        terminal_cancel = client.post(f"/runs/{run_id}/cancel")
+        assert terminal_cancel.status_code == 200
+        assert terminal_cancel.json()["status"] == "COMPLETED"
         assert [event.payload["sequence"] for event in bus.get_history(run_id)] == list(
             range(1, last_sequence + 1)
         )
+        assert AgentEventType.RUN_CANCELLING not in [
+            event.event_type for event in bus.get_history(run_id)
+        ]
 
 
 def test_fallback_error_reaches_run_and_compatibility_sse_before_done(

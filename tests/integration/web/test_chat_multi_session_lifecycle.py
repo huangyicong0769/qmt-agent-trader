@@ -70,17 +70,23 @@ class _BackgroundSessionOrchestrator:
         yield OrchestratorEvent(type="done", run_id=run_id, session_id=session_id, message="done")
 
 
-def _snapshot(run_id: str, session_id: str) -> RunSnapshot:
+def _snapshot(
+    run_id: str,
+    session_id: str,
+    *,
+    status: RunStatus = RunStatus.RUNNING,
+    last_event_sequence: int = 3,
+) -> RunSnapshot:
     return RunSnapshot(
         run_id=run_id,
         session_id=session_id,
-        status=RunStatus.RUNNING,
+        status=status,
         message="long task",
         created_at="now",
         started_at="now",
         finished_at=None,
         error=None,
-        last_event_sequence=3,
+        last_event_sequence=last_event_sequence,
         cancellation_requested=False,
         accumulated_draft="",
         accumulated_draft_through_sequence=0,
@@ -202,6 +208,60 @@ def test_activation_recovers_background_session_without_disturbing_other_session
         pending_messages_by_session=pending_by_session,
     ).reloaded is False
     assert session_b.messages == []
+
+
+def test_activation_reconciles_pending_from_a_terminal_manager_snapshot(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    stored = repository.create(ChatSession(session_id="terminal_session", title="Terminal"))
+    session = _view(stored)
+    repository.update(
+        "terminal_session",
+        lambda current: current.model_copy(
+            update={
+                "messages": [
+                    StoredChatMessage(
+                        session_id="terminal_session",
+                        role="done",
+                        content="done",
+                        metadata={
+                            "run_id": "terminal_run",
+                            "event_sequence": 5,
+                            "event_type": "done",
+                        },
+                    )
+                ]
+            }
+        ),
+    )
+    manager = _ActivationManager(
+        {
+            "terminal_session": _snapshot(
+                "terminal_run",
+                "terminal_session",
+                status=RunStatus.COMPLETED,
+                last_event_sequence=5,
+            )
+        }
+    )
+    pending_by_session = {
+        "terminal_session": [
+            chat._PendingMessage("queue", "next message", session_id="terminal_session")
+        ]
+    }
+
+    activation = chat._prepare_session_activation(
+        session,
+        repository=repository,
+        manager=manager,  # type: ignore[arg-type]
+        pending_messages_by_session=pending_by_session,
+    )
+
+    assert activation.reloaded is True
+    assert activation.run_snapshot is not None
+    assert activation.run_snapshot.status is RunStatus.COMPLETED
+    assert activation.after_sequence == 5
+    assert pending_by_session["terminal_session"][0].ready_to_send is True
+    assert chat._run_snapshot_is_terminal(activation.run_snapshot)
 
 
 @pytest.mark.anyio

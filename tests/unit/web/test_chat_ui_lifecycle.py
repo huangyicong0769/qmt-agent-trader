@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 
 import pytest
 
 from qmt_agent_trader.web.chat_repository import ChatSessionRepository
-from qmt_agent_trader.web.chat_run_manager import RunEvent
+from qmt_agent_trader.web.chat_run_manager import RunEvent, RunSnapshot, RunStatus
 from qmt_agent_trader.web.schemas import ChatMessage as StoredChatMessage
 from qmt_agent_trader.web.schemas import ChatSession
 from qmt_agent_trader.web.ui.pages import chat
@@ -101,6 +102,31 @@ def test_chat_page_uses_public_lifecycle_guards_and_explicit_transcript_context(
     assert "card.move" not in source
     assert "move(session.transcript)" not in source
     assert "session.orchestrator.execute_stream" not in source
+    assert "ui.timer(" not in source
+
+
+@pytest.mark.anyio
+async def test_page_timer_loop_can_be_cancelled_before_client_disposal() -> None:
+    page_alive = True
+    rendered = asyncio.Event()
+    calls: list[None] = []
+
+    def render() -> None:
+        calls.append(None)
+        rendered.set()
+
+    task = asyncio.create_task(
+        chat._run_page_timer_loop(render, lambda: page_alive),
+        name="test-chat-page-timer",
+    )
+    await asyncio.wait_for(rendered.wait(), timeout=0.2)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    page_alive = False
+
+    assert calls == [None]
 
 
 def test_terminal_semantics_and_sidebar_refresh_are_event_properties() -> None:
@@ -261,6 +287,45 @@ async def test_real_nicegui_client_delete_stops_late_run_rendering(tmp_path) -> 
         ).reloaded is False
         assert len(client.elements) == element_count_before_resync
         assert session_b.messages == []
+
+        class _TerminalManager:
+            def get_active_run(self, session_id: str) -> RunSnapshot | None:
+                if session_id != "session_a":
+                    return None
+                return RunSnapshot(
+                    run_id="run_a",
+                    session_id="session_a",
+                    status=RunStatus.COMPLETED,
+                    message="completed",
+                    created_at="now",
+                    started_at="now",
+                    finished_at="now",
+                    error=None,
+                    last_event_sequence=5,
+                    cancellation_requested=False,
+                    accumulated_draft="",
+                    accumulated_draft_through_sequence=0,
+                    recent_tool=None,
+                )
+
+            def has_pending_successor(self, session_id: str) -> bool:
+                return False
+
+        terminal_pending = {
+            "session_a": [
+                chat._PendingMessage("queue", "after terminal", session_id="session_a")
+            ]
+        }
+        terminal_activation = chat._prepare_session_activation(
+            session_a,
+            repository=repository,
+            manager=_TerminalManager(),  # type: ignore[arg-type]
+            pending_messages_by_session=terminal_pending,
+        )
+        assert terminal_activation.run_snapshot is not None
+        assert terminal_activation.run_snapshot.status is RunStatus.COMPLETED
+        assert terminal_activation.after_sequence == 5
+        assert terminal_pending["session_a"][0].ready_to_send is True
 
         targets = chat._RunRenderTargets(transcript=transcript)
         state = chat._AssistantRenderState()
