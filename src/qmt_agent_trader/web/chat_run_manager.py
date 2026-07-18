@@ -345,6 +345,7 @@ class ChatRunManager:
                 if current is None or current is not run:
                     return
                 snapshot_data = self._snapshot(run).to_dict()
+                snapshot_is_terminal = run.status in TERMINAL_STATUSES
                 snapshot = RunEvent(
                     sequence=0,
                     run_id=run.run_id,
@@ -364,6 +365,7 @@ class ChatRunManager:
                         and event.sequence <= draft_through
                     )
                 ]
+                capture_sequence = run.last_event_sequence
                 run.subscribers.add(queue)
 
         cursor = after_sequence
@@ -376,6 +378,24 @@ class ChatRunManager:
                 yield event
                 if is_terminal_run_event(event):
                     return
+            if snapshot_is_terminal:
+                # The snapshot and replay were captured while event_lock was
+                # held.  A terminal snapshot therefore already includes the
+                # terminal event in replay (unless the caller's cursor covers
+                # it), and cannot wait for future producer activity.  Drain
+                # only items from that capture boundary before ending.
+                while True:
+                    try:
+                        event = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if event.sequence <= cursor or event.sequence > capture_sequence:
+                        continue
+                    cursor = event.sequence
+                    yield event
+                    if is_terminal_run_event(event):
+                        return
+                return
             if run.completion_event.is_set():
                 # Completion can race with replay.  Drain events already
                 # enqueued for this subscriber before returning so a terminal

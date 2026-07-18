@@ -18,6 +18,7 @@ from qmt_agent_trader.web.chat_repository import (
     build_chat_session_repository,
 )
 from qmt_agent_trader.web.chat_run_manager import (
+    TERMINAL_STATUSES,
     ChatRunManager,
     RunAlreadyActiveError,
     RunEvent,
@@ -327,6 +328,14 @@ def _reconcile_pending_for_session(
     return [_mark_pending_ready(item) if not item.ready_to_send else item for item in pending]
 
 
+def _run_snapshot_is_terminal(snapshot: RunSnapshot | dict[str, Any]) -> bool:
+    raw_status = snapshot.status if isinstance(snapshot, RunSnapshot) else snapshot.get("status")
+    try:
+        return RunStatus(str(raw_status)) in TERMINAL_STATUSES
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class _SessionActivation:
     reloaded: bool
@@ -344,10 +353,13 @@ def _prepare_session_activation(
     """Synchronize one page view before deciding whether it should subscribe."""
     reloaded = _reload_session_from_repository(session, repository)
     run_snapshot = manager.get_active_run(session.sid)
+    snapshot_is_terminal = (
+        run_snapshot is not None and _run_snapshot_is_terminal(run_snapshot)
+    )
     pending = _pending_messages_for(pending_messages_by_session, session.sid)
     pending_messages_by_session[session.sid] = _reconcile_pending_for_session(
         pending,
-        has_active_run=run_snapshot is not None,
+        has_active_run=run_snapshot is not None and not snapshot_is_terminal,
         has_pending_successor=manager.has_pending_successor(session.sid),
     )
     after_sequence = (
@@ -1005,7 +1017,11 @@ def register() -> None:
                         _append_local_event(session, event)
                         if _should_refresh_sidebar(event):
                             refresh_sidebar_safe()
-                    if is_terminal_run_event(event):
+                    snapshot_data = event.data.get("snapshot", {})
+                    terminal_snapshot = event.event_type == "snapshot" and isinstance(
+                        snapshot_data, dict
+                    ) and _run_snapshot_is_terminal(snapshot_data)
+                    if is_terminal_run_event(event) or terminal_snapshot:
                         pending = pending_messages_for(session.sid)
                         if pending:
                             pending_messages_by_session[session.sid] = (
@@ -1039,12 +1055,22 @@ def register() -> None:
             cancel_current_subscription()
             subscribed_run_id = snapshot.run_id
             run_started_at.setdefault(snapshot.run_id, time.monotonic())
-            subscription_task = track_page_task(
+            task = track_page_task(
                 asyncio.create_task(
                     consume_run_events(session, snapshot),
                     name=f"chat-page-subscription-{snapshot.run_id}",
                 )
             )
+            subscription_task = task
+
+            def clear_finished_subscription(done: asyncio.Task[Any]) -> None:
+                nonlocal subscription_task, subscribed_run_id
+                if subscription_task is done:
+                    subscription_task = None
+                    if subscribed_run_id == snapshot.run_id:
+                        subscribed_run_id = None
+
+            task.add_done_callback(clear_finished_subscription)
 
         def activate_session(sid: str) -> None:
             nonlocal active_sid
