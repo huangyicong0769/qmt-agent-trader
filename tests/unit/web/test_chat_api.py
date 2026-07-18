@@ -14,7 +14,7 @@ from starlette.requests import Request
 from qmt_agent_trader.agent.orchestrator import OrchestratorEvent
 from qmt_agent_trader.web.chat_repository import ChatSessionRepository
 from qmt_agent_trader.web.chat_run_manager import ChatRunManager
-from qmt_agent_trader.web.event_bus import EventBus
+from qmt_agent_trader.web.event_bus import AgentEventType, EventBus
 from qmt_agent_trader.web.routes import chat
 
 
@@ -252,6 +252,9 @@ def test_run_api_query_sse_replay_and_event_bus_are_unified(
         assert [payload["sequence"] for payload in payloads[1:]] == sorted(
             payload["sequence"] for payload in payloads[1:]
         )
+        assert payloads[-1]["event_type"] == "done"
+        assert payloads[-1]["terminal"] is True
+        assert client.get(f"/runs/{run_id}").json()["status"] == "COMPLETED"
         last_sequence = max(payload["sequence"] for payload in payloads)
 
         reconnect = client.get(
@@ -293,9 +296,11 @@ def test_fallback_error_reaches_run_and_compatibility_sse_before_done(
                 message="done",
             )
 
+    bus = EventBus()
     manager = ChatRunManager(
         orchestrator=FallbackOrchestrator(),
         repository=isolated_chat_repository,
+        bus=bus,
     )
     monkeypatch.setattr(chat, "_get_run_manager", lambda: manager)
     app = FastAPI()
@@ -320,6 +325,11 @@ def test_fallback_error_reaches_run_and_compatibility_sse_before_done(
         assert first_events[-3]["terminal"] is False
         assert first_events[-1]["terminal"] is True
         assert client.get(f"/runs/{first_run}").json()["status"] == "COMPLETED"
+        history = bus.get_history(first_run)
+        assert AgentEventType.RUN_FAILED not in [event.event_type for event in history]
+        assert AgentEventType.RUN_DIAGNOSTIC in [event.event_type for event in history]
+        assert history[-1].event_type is AgentEventType.RUN_COMPLETED
+        assert all("terminal" in event.payload for event in history)
 
         second_session = client.post("/sessions", json={}).json()["session_id"]
         compatibility = client.post(

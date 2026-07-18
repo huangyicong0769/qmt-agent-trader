@@ -47,9 +47,10 @@ PERSISTED_EVENT_TYPES = frozenset(
     }
 )
 
-# Lock order for all run-event operations is manager._lock -> run.event_lock.
-# No code may acquire manager._lock while holding a run.event_lock.  The
-# append/broadcast helper is called only while both locks are held.
+# Lock order is manager._lock -> run.event_lock when both are needed.  Emit
+# operations acquire only run.event_lock, so slow persistence for one Run never
+# serializes unrelated Sessions.  No code may acquire manager._lock while
+# holding a run.event_lock.
 
 
 class RunStatus(StrEnum):
@@ -454,11 +455,6 @@ class ChatRunManager:
         persist_user_message: bool = True,
         run_id: str | None = None,
     ) -> RunSnapshot:
-        existing = self._active_run(session_id)
-        if existing is not None:
-            raise RunAlreadyActiveError(
-                f"session {session_id} already has active run {existing.run_id}"
-            )
         history = self._load_history(session_id)
         run = _ChatRun(
             run_id=run_id or new_id("run"),
@@ -467,8 +463,14 @@ class ChatRunManager:
             history=history,
         )
         run.history_events = deque(maxlen=self.history_limit)
-        self._runs[run.run_id] = run
-        self._active_by_session[session_id] = run.run_id
+        async with self._lock:
+            existing = self._active_run(session_id)
+            if existing is not None:
+                raise RunAlreadyActiveError(
+                    f"session {session_id} already has active run {existing.run_id}"
+                )
+            self._runs[run.run_id] = run
+            self._active_by_session[session_id] = run.run_id
         if persist_user_message:
             await self._emit(
                 run,
@@ -479,7 +481,9 @@ class ChatRunManager:
         if run.status in TERMINAL_STATUSES:
             run.completion_event.set()
             self._schedule_cleanup(run.run_id)
-            self._active_by_session.pop(session_id, None)
+            async with self._lock:
+                if self._active_by_session.get(session_id) == run.run_id:
+                    self._active_by_session.pop(session_id, None)
             return self._snapshot(run)
         run.task = asyncio.create_task(
             self._execute_run(run),
@@ -540,13 +544,14 @@ class ChatRunManager:
                 if callable(close_stream):
                     await close_stream()
             if not terminal_seen and run.status not in TERMINAL_STATUSES:
-                self._transition(run, RunStatus.FAILED)
-                run.error = "agent run ended without a terminal event"
-                await self._emit(
+                error = "agent run ended without a terminal event"
+                await self._emit_terminal(
                     run,
                     "error",
-                    run.error,
-                    data={"error": run.error},
+                    error,
+                    target_status=RunStatus.FAILED,
+                    error=error,
+                    data={"error": error},
                 )
         except asyncio.CancelledError:
             logger.info("chat run task cancelled during application shutdown: %s", run.run_id)
@@ -554,14 +559,15 @@ class ChatRunManager:
         except Exception as exc:
             logger.exception("chat run failed: %s", run.run_id)
             if run.status not in TERMINAL_STATUSES:
-                self._transition(run, RunStatus.FAILED)
-            run.error = str(exc)
-            await self._emit(
-                run,
-                "error",
-                str(exc),
-                data={"error": str(exc)},
-            )
+                error = str(exc)
+                await self._emit_terminal(
+                    run,
+                    "error",
+                    error,
+                    target_status=RunStatus.FAILED,
+                    error=error,
+                    data={"error": error},
+                )
         finally:
             if run.status in TERMINAL_STATUSES:
                 run.completion_event.set()
@@ -589,27 +595,41 @@ class ChatRunManager:
             ):
                 await asyncio.shield(cancelling_task)
         if event_type == "cancelled":
-            if run.status in {RunStatus.FAILED, RunStatus.COMPLETED}:
+            if run.status in TERMINAL_STATUSES:
                 return True
-            if run.status not in {RunStatus.CANCELLING, RunStatus.CANCELLED}:
+            if run.status is not RunStatus.CANCELLING:
                 self._transition(run, RunStatus.CANCELLING)
-            await self._emit(run, "cancelled", message or "Run cancelled.", data=data)
-            if run.status not in TERMINAL_STATUSES:
-                self._transition(run, RunStatus.CANCELLED)
+            await self._emit_terminal(
+                run,
+                "cancelled",
+                message or "Run cancelled.",
+                target_status=RunStatus.CANCELLED,
+                data=data,
+            )
             return True
         if event_type == "error" and not data.get("fallback"):
             if run.status in TERMINAL_STATUSES:
                 return True
-            self._transition(run, RunStatus.FAILED)
-            run.error = message or str(data.get("error", "agent run failed"))
-            await self._emit(run, "error", run.error, data=data)
+            error = message or str(data.get("error", "agent run failed"))
+            await self._emit_terminal(
+                run,
+                "error",
+                error,
+                target_status=RunStatus.FAILED,
+                error=error,
+                data=data,
+            )
             return True
         if event_type == "done":
             if run.status in {RunStatus.FAILED, RunStatus.CANCELLED}:
                 return True
-            await self._emit(run, "done", message, data=data)
-            if run.status not in TERMINAL_STATUSES:
-                self._transition(run, RunStatus.COMPLETED)
+            await self._emit_terminal(
+                run,
+                "done",
+                message,
+                target_status=RunStatus.COMPLETED,
+                data=data,
+            )
             return True
         if run.status in TERMINAL_STATUSES:
             return True
@@ -626,30 +646,68 @@ class ChatRunManager:
         persist: bool = True,
     ) -> RunEvent:
         event_data = dict(data or {})
-        async with self._lock:
-            async with run.event_lock:
-                event = RunEvent(
-                    sequence=run.last_event_sequence + 1,
-                    run_id=run.run_id,
-                    session_id=run.session_id,
-                    event_type=event_type,
-                    message=message,
-                    data=event_data,
-                    terminal=_terminal_for_event(event_type, event_data),
-                )
-                if persist and self._persistent_message(event) is not None:
-                    try:
-                        await asyncio.to_thread(self._persist_event, event)
-                    except Exception as exc:
-                        logger.exception(
-                            "failed to persist chat run event %s/%s",
-                            run.run_id,
-                            run.last_event_sequence + 1,
-                        )
-                        await self._record_persistence_failure(run, exc)
-                        return event
-                await self._append_and_broadcast(run, event)
+        async with run.event_lock:
+            event = self._new_event(run, event_type, message, event_data)
+            if persist and not await self._persist_or_fail(run, event):
                 return event
+            await self._append_and_broadcast(run, event)
+            return event
+
+    async def _emit_terminal(
+        self,
+        run: _ChatRun,
+        event_type: str,
+        message: str,
+        *,
+        target_status: RunStatus,
+        data: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> RunEvent | None:
+        """Persist, commit, and publish a terminal event in one Run boundary."""
+        event_data = dict(data or {})
+        async with run.event_lock:
+            event = self._new_event(run, event_type, message, event_data)
+            if not event.terminal:
+                raise ValueError(f"{event_type} is not a terminal RunEvent")
+            if not await self._persist_or_fail(run, event):
+                return None
+            if error is not None:
+                run.error = error
+            self._transition(run, target_status)
+            await self._append_and_broadcast(run, event)
+            return event
+
+    @staticmethod
+    def _new_event(
+        run: _ChatRun,
+        event_type: str,
+        message: str,
+        data: dict[str, Any],
+    ) -> RunEvent:
+        return RunEvent(
+            sequence=run.last_event_sequence + 1,
+            run_id=run.run_id,
+            session_id=run.session_id,
+            event_type=event_type,
+            message=message,
+            data=data,
+            terminal=_terminal_for_event(event_type, data),
+        )
+
+    async def _persist_or_fail(self, run: _ChatRun, event: RunEvent) -> bool:
+        if self._persistent_message(event) is None:
+            return True
+        try:
+            await asyncio.to_thread(self._persist_event, event)
+        except Exception as exc:
+            logger.exception(
+                "failed to persist chat run event %s/%s",
+                run.run_id,
+                run.last_event_sequence + 1,
+            )
+            await self._record_persistence_failure(run, exc)
+            return False
+        return True
 
     def _persist_event(self, event: RunEvent) -> None:
         persisted = self._persistent_message(event)
@@ -766,13 +824,14 @@ class ChatRunManager:
 
     async def _finish_and_maybe_start_successor(self, run: _ChatRun) -> None:
         async with self._session_lock(run.session_id):
-            if self._active_by_session.get(run.session_id) != run.run_id:
-                return
-            # Keep the successor marker until its Run is registered so a
-            # refreshed page/API cannot mistake the handoff window for an
-            # idle session or start an unrelated Run.
-            successor = self._successors.get(run.session_id)
-            self._active_by_session.pop(run.session_id, None)
+            async with self._lock:
+                if self._active_by_session.get(run.session_id) != run.run_id:
+                    return
+                # Keep the successor marker until its Run is registered so a
+                # refreshed page/API cannot mistake the handoff window for an
+                # idle session or start an unrelated Run.
+                successor = self._successors.get(run.session_id)
+                self._active_by_session.pop(run.session_id, None)
             if successor is not None:
                 try:
                     await self._start_run_locked(
@@ -861,7 +920,6 @@ class ChatRunManager:
             "run_started": AgentEventType.RUN_STARTED,
             "cancelling": AgentEventType.RUN_CANCELLING,
             "done": AgentEventType.RUN_COMPLETED,
-            "error": AgentEventType.RUN_FAILED,
             "cancelled": AgentEventType.RUN_CANCELLED,
             "final_message": AgentEventType.LLM_MESSAGE,
             "token": AgentEventType.LLM_TOKEN_DELTA,
@@ -869,11 +927,18 @@ class ChatRunManager:
             "tool_done": AgentEventType.TOOL_CALL_COMPLETED,
             "todo_status": AgentEventType.TODO_STATUS_UPDATED,
         }
+        event_type = mapping.get(event.event_type, AgentEventType.PROGRESS)
+        if event.event_type == "error":
+            event_type = (
+                AgentEventType.RUN_FAILED
+                if event.terminal
+                else AgentEventType.RUN_DIAGNOSTIC
+            )
         experiment_id = event.data.get("experiment_id")
         return AgentEvent(
             run_id=event.run_id,
             experiment_id=str(experiment_id) if experiment_id is not None else None,
-            event_type=mapping.get(event.event_type, AgentEventType.PROGRESS),
+            event_type=event_type,
             title=event.event_type,
             message=event.message,
             payload={
@@ -881,6 +946,12 @@ class ChatRunManager:
                 "sequence": event.sequence,
                 "session_id": event.session_id,
                 "event_type": event.event_type,
+                "terminal": event.terminal,
+                **(
+                    {"diagnostic": True, "fallback": bool(event.data.get("fallback"))}
+                    if event.event_type == "error" and not event.terminal
+                    else {}
+                ),
             },
         )
 

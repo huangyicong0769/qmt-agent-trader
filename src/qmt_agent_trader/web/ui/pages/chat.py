@@ -212,24 +212,13 @@ class _ChatSession:
                 sid=stored.session_id,
                 repository=repository,
             )
-            session._stored = stored
+            _apply_canonical_stored_session(session, stored)
             legacy = stored.context.get("legacy_ui", {})
-            session.preview = str(legacy.get("preview", "")) if isinstance(legacy, dict) else ""
-            session._initial_preview = session.preview
             if isinstance(legacy, dict):
                 try:
                     max_counter = max(max_counter, int(legacy.get("counter", 0)))
                 except (TypeError, ValueError):
                     logger.debug("invalid legacy session counter for %s", stored.session_id)
-            for message in stored.messages:
-                session.messages.append(
-                    ChatMessage(
-                        role=message.role,
-                        content=message.content,
-                        metadata=message.metadata,
-                        stored=message,
-                    )
-                )
             sessions.append(session)
             try:
                 max_counter = max(max_counter, int(stored.session_id.lstrip("s")))
@@ -286,6 +275,91 @@ def _pending_messages_for(
 
 def _pending_message_session(pending: _PendingMessage, fallback_session_id: str) -> str:
     return pending.session_id or fallback_session_id
+
+
+def _canonical_preview(stored: StoredChatSession) -> str:
+    for message in reversed(stored.messages):
+        if message.role in {"user", "assistant"} and message.content:
+            return _trunc(message.content, 60)
+    legacy = stored.context.get("legacy_ui", {})
+    return str(legacy.get("preview", "")) if isinstance(legacy, dict) else ""
+
+
+def _apply_canonical_stored_session(session: _ChatSession, stored: StoredChatSession) -> None:
+    session._stored = stored
+    session.name = stored.title
+    session.messages = [
+        ChatMessage(
+            role=message.role,
+            content=message.content,
+            metadata=dict(message.metadata),
+            stored=message,
+        )
+        for message in stored.messages
+    ]
+    session.preview = _canonical_preview(stored)
+    session._initial_preview = session.preview
+
+
+def _reload_session_from_repository(
+    session: _ChatSession,
+    repository: ChatSessionRepository,
+) -> bool:
+    """Replace a page-local view with the repository's canonical revision."""
+    stored = repository.get(session.sid)
+    if stored is None:
+        return False
+    if session._stored is not None and session._stored.revision == stored.revision:
+        return False
+    _apply_canonical_stored_session(session, stored)
+    return True
+
+
+def _reconcile_pending_for_session(
+    pending: list[_PendingMessage],
+    *,
+    has_active_run: bool,
+    has_pending_successor: bool,
+) -> list[_PendingMessage]:
+    """Make queued messages sendable only after this session is truly idle."""
+    if has_active_run or has_pending_successor:
+        return list(pending)
+    return [_mark_pending_ready(item) if not item.ready_to_send else item for item in pending]
+
+
+@dataclass(frozen=True)
+class _SessionActivation:
+    reloaded: bool
+    run_snapshot: RunSnapshot | None
+    after_sequence: int
+
+
+def _prepare_session_activation(
+    session: _ChatSession,
+    *,
+    repository: ChatSessionRepository,
+    manager: ChatRunManager,
+    pending_messages_by_session: dict[str, list[_PendingMessage]],
+) -> _SessionActivation:
+    """Synchronize one page view before deciding whether it should subscribe."""
+    reloaded = _reload_session_from_repository(session, repository)
+    run_snapshot = manager.get_active_run(session.sid)
+    pending = _pending_messages_for(pending_messages_by_session, session.sid)
+    pending_messages_by_session[session.sid] = _reconcile_pending_for_session(
+        pending,
+        has_active_run=run_snapshot is not None,
+        has_pending_successor=manager.has_pending_successor(session.sid),
+    )
+    after_sequence = (
+        _event_sequence_for_session(session, run_snapshot.run_id)
+        if run_snapshot is not None
+        else 0
+    )
+    return _SessionActivation(
+        reloaded=reloaded,
+        run_snapshot=run_snapshot,
+        after_sequence=after_sequence,
+    )
 
 
 def _render_stored_message(
@@ -754,6 +828,7 @@ def register() -> None:
         last_rendered_sequence: dict[str, int] = {}
         assistant_states: dict[str, _AssistantRenderState] = {}
         run_started_at: dict[str, float] = {}
+        run_timer: Any | None = None
         _refresh_fn: list[Any] = [lambda: None]
 
         def alive() -> bool:
@@ -933,9 +1008,15 @@ def register() -> None:
                     if is_terminal_run_event(event):
                         pending = pending_messages_for(session.sid)
                         if pending:
-                            pending_messages_by_session[session.sid] = [
-                                _mark_pending_ready(item) for item in pending
-                            ]
+                            pending_messages_by_session[session.sid] = (
+                                _reconcile_pending_for_session(
+                                    pending,
+                                    has_active_run=False,
+                                    has_pending_successor=manager.has_pending_successor(
+                                        session.sid
+                                    ),
+                                )
+                            )
                             if session.sid == active_sid:
                                 render_pending_status()
                         schedule_successor_watch(session.sid, run_id)
@@ -969,26 +1050,34 @@ def register() -> None:
             nonlocal active_sid
             if not alive() or sid not in sessions:
                 return
-            if active_sid == sid:
-                current = active_run(sid)
-                if current is not None and subscribed_run_id != current.run_id:
-                    start_subscription(sessions[sid], current)
+            session = sessions[sid]
+            if not _ui_target_alive(client, session.container, alive):
                 return
-            if active_sid and active_sid in sessions:
+            if active_sid and active_sid != sid and active_sid in sessions:
                 old_container = sessions[active_sid].container
                 if not getattr(old_container, "is_deleted", False):
                     old_container.visible = False
-            sessions[sid].container.visible = True
+            session.container.visible = True
             active_sid = sid
             _set_card_visible(client, plan_card, False, page_alive=alive)
             _set_card_visible(client, progress_card, False, page_alive=alive)
-            current = active_run(sid)
+            activation = _prepare_session_activation(
+                session,
+                repository=repository,
+                manager=manager,
+                pending_messages_by_session=pending_messages_by_session,
+            )
+            if activation.reloaded:
+                session.rebuild_ui(client=client, page_alive=alive)
+            current = activation.run_snapshot
             if current is None:
                 cancel_current_subscription()
                 if manager.has_pending_successor(sid):
                     schedule_successor_watch(sid, "")
             else:
-                start_subscription(sessions[sid], current)
+                last_rendered_sequence[current.run_id] = activation.after_sequence
+                if subscribed_run_id != current.run_id or activation.reloaded:
+                    start_subscription(session, current)
             render_pending_status()
             refresh_sidebar_safe()
 
@@ -1304,7 +1393,7 @@ def register() -> None:
                     ui.button("Stop", on_click=stop_active_run).props("color=negative flat")
                     ui.button("Send", on_click=send_handler).props("color=primary")
 
-                ui.timer(1.0, render_run_timer)
+                run_timer = ui.timer(1.0, render_run_timer)
                 with ui.expansion("Advanced", icon="tune").classes("w-full px-4"):
                     with ui.row().classes("gap-4"):
                         ui.select(
@@ -1355,6 +1444,8 @@ def register() -> None:
         def on_client_delete() -> None:
             nonlocal page_alive, subscription_task
             page_alive = False
+            if run_timer is not None and not getattr(run_timer, "is_deleted", False):
+                run_timer.cancel(with_current_invocation=True)
             if subscription_task is not None and not subscription_task.done():
                 subscription_task.cancel()
             subscription_task = None

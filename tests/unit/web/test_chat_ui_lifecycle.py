@@ -4,7 +4,10 @@ import inspect
 
 import pytest
 
+from qmt_agent_trader.web.chat_repository import ChatSessionRepository
 from qmt_agent_trader.web.chat_run_manager import RunEvent
+from qmt_agent_trader.web.schemas import ChatMessage as StoredChatMessage
+from qmt_agent_trader.web.schemas import ChatSession
 from qmt_agent_trader.web.ui.pages import chat
 
 
@@ -167,7 +170,7 @@ def test_pending_messages_are_isolated_by_session() -> None:
 
 
 @pytest.mark.anyio
-async def test_real_nicegui_client_delete_stops_late_run_rendering() -> None:
+async def test_real_nicegui_client_delete_stops_late_run_rendering(tmp_path) -> None:
     from nicegui import ui
     from nicegui.testing import user_simulation
 
@@ -180,6 +183,85 @@ async def test_real_nicegui_client_delete_stops_late_run_rendering() -> None:
     async with user_simulation(root=root) as user:
         client = await user.open("/")
         transcript = transcript_holder[0]
+        repository = ChatSessionRepository(tmp_path / "sessions")
+        repository.create(ChatSession(session_id="session_a", title="A"))
+        repository.create(ChatSession(session_id="session_b", title="B"))
+        with client:
+            session_a = chat._ChatSession(
+                name="A",
+                sid="session_a",
+                repository=repository,
+            )
+            session_b = chat._ChatSession(
+                name="B",
+                sid="session_b",
+                repository=repository,
+            )
+        repository.update(
+            "session_a",
+            lambda current: current.model_copy(
+                update={
+                    "messages": [
+                        StoredChatMessage(
+                            session_id="session_a",
+                            role="assistant",
+                            content="final answer",
+                            metadata={
+                                "run_id": "run_a",
+                                "event_sequence": 4,
+                                "event_type": "final_message",
+                            },
+                        ),
+                        StoredChatMessage(
+                            session_id="session_a",
+                            role="done",
+                            content="done",
+                            metadata={
+                                "run_id": "run_a",
+                                "event_sequence": 5,
+                                "event_type": "done",
+                            },
+                        ),
+                    ]
+                }
+            ),
+        )
+
+        class _IdleManager:
+            def get_active_run(self, session_id: str) -> None:
+                return None
+
+            def has_pending_successor(self, session_id: str) -> bool:
+                return False
+
+        pending_by_session = {
+            "session_a": [chat._PendingMessage("queue", "send A", session_id="session_a")],
+            "session_b": [chat._PendingMessage("queue", "send B", session_id="session_b")],
+        }
+        manager = _IdleManager()
+        activation = chat._prepare_session_activation(
+            session_a,
+            repository=repository,
+            manager=manager,  # type: ignore[arg-type]
+            pending_messages_by_session=pending_by_session,
+        )
+        assert activation.reloaded is True
+        session_a.rebuild_ui(client=client, page_alive=lambda: not client.is_deleted)
+        contents = [str(getattr(element, "content", "")) for element in client.elements.values()]
+        assert any("final answer" in content for content in contents)
+        assert [message.content for message in session_a.messages].count("final answer") == 1
+        assert pending_by_session["session_a"][0].ready_to_send is True
+        assert pending_by_session["session_b"][0].ready_to_send is False
+        element_count_before_resync = len(client.elements)
+        assert chat._prepare_session_activation(
+            session_a,
+            repository=repository,
+            manager=manager,  # type: ignore[arg-type]
+            pending_messages_by_session=pending_by_session,
+        ).reloaded is False
+        assert len(client.elements) == element_count_before_resync
+        assert session_b.messages == []
+
         targets = chat._RunRenderTargets(transcript=transcript)
         state = chat._AssistantRenderState()
 

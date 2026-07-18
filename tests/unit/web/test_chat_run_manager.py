@@ -174,6 +174,60 @@ class _ReplayRegistrationRaceOrchestrator:
         yield OrchestratorEvent(type="done", run_id=run_id, message="done")
 
 
+class _TerminalGateOrchestrator:
+    def __init__(self, event_type: str) -> None:
+        self.event_type = event_type
+        self.ready = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute_stream(self, message: str, **kwargs: object):
+        run_id = str(kwargs["run_id"])
+        yield OrchestratorEvent(type="run_started", run_id=run_id, message="started")
+        self.ready.set()
+        await self.release.wait()
+        yield OrchestratorEvent(
+            type=self.event_type,
+            run_id=run_id,
+            message=self.event_type,
+            data={"error": "failed"} if self.event_type == "error" else {},
+        )
+
+
+class _TerminalPublishBarrierBus(EventBus):
+    def __init__(self) -> None:
+        super().__init__()
+        self.published = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def publish(self, event) -> None:
+        await super().publish(event)
+        if event.payload["terminal"]:
+            self.published.set()
+            await self.release.wait()
+
+
+class _FallbackGateOrchestrator:
+    def __init__(self) -> None:
+        self.ready = asyncio.Event()
+        self.emit_fallback = asyncio.Event()
+        self.continue_run = asyncio.Event()
+
+    async def execute_stream(self, message: str, **kwargs: object):
+        run_id = str(kwargs["run_id"])
+        yield OrchestratorEvent(type="run_started", run_id=run_id, message="started")
+        self.ready.set()
+        await self.emit_fallback.wait()
+        yield OrchestratorEvent(
+            type="error",
+            run_id=run_id,
+            message="fallback diagnostic",
+            data={"fallback": True, "error": "stream"},
+        )
+        await self.continue_run.wait()
+        yield OrchestratorEvent(type="final_message", run_id=run_id, message="answer")
+        yield OrchestratorEvent(type="done", run_id=run_id, message="done")
+
+
 @pytest.mark.anyio
 async def test_start_run_is_manager_owned_and_rejects_overlapping_session_run(tmp_path) -> None:
     repository = ChatSessionRepository(tmp_path / "sessions")
@@ -590,3 +644,71 @@ async def test_terminal_registration_race_delivers_done_exactly_once(tmp_path) -
         done_events = [event for event in events if event.event_type == "done"]
         assert len(done_events) == 1
         assert done_events[0].terminal is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("event_type", "expected_status"),
+    [
+        ("done", RunStatus.COMPLETED),
+        ("cancelled", RunStatus.CANCELLED),
+        ("error", RunStatus.FAILED),
+    ],
+)
+async def test_terminal_event_is_not_visible_before_terminal_snapshot_commit(
+    tmp_path,
+    event_type: str,
+    expected_status: RunStatus,
+) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id=f"terminal_{event_type}"))
+    orchestrator = _TerminalGateOrchestrator(event_type)
+    bus = _TerminalPublishBarrierBus()
+    manager = ChatRunManager(orchestrator=orchestrator, repository=repository, bus=bus)
+
+    started = await manager.start_run(f"terminal_{event_type}", "terminal")
+    subscription = manager.subscribe(started.run_id)
+    assert (await anext(subscription)).event_type == "snapshot"
+    assert (await anext(subscription)).event_type == "user_message"
+    await orchestrator.ready.wait()
+    assert (await anext(subscription)).event_type == "run_started"
+
+    orchestrator.release.set()
+    await bus.published.wait()
+    terminal = await anext(subscription)
+    visible = manager.get_run(started.run_id)
+
+    assert terminal.terminal is True
+    assert visible is not None
+    assert visible.status is expected_status
+    bus.release.set()
+    await subscription.aclose()
+    assert (await manager.wait_for_run(started.run_id)).status is expected_status
+
+
+@pytest.mark.anyio
+async def test_fallback_error_keeps_run_nonterminal_until_done(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="fallback_state"))
+    orchestrator = _FallbackGateOrchestrator()
+    manager = ChatRunManager(orchestrator=orchestrator, repository=repository)
+
+    started = await manager.start_run("fallback_state", "fallback")
+    subscription = manager.subscribe(started.run_id)
+    assert (await anext(subscription)).event_type == "snapshot"
+    assert (await anext(subscription)).event_type == "user_message"
+    await orchestrator.ready.wait()
+    assert (await anext(subscription)).event_type == "run_started"
+
+    orchestrator.emit_fallback.set()
+    fallback = await anext(subscription)
+    visible = manager.get_run(started.run_id)
+
+    assert fallback.event_type == "error"
+    assert fallback.terminal is False
+    assert visible is not None
+    assert visible.status is RunStatus.RUNNING
+    orchestrator.continue_run.set()
+    remaining = [event async for event in subscription]
+    assert [event.event_type for event in remaining] == ["final_message", "done"]
+    assert (await manager.wait_for_run(started.run_id)).status is RunStatus.COMPLETED

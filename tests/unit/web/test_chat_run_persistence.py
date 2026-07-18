@@ -240,6 +240,36 @@ async def test_persistence_failure_marks_run_failed_and_emits_one_error(tmp_path
 
 
 @pytest.mark.anyio
+async def test_terminal_persistence_failure_hides_original_terminal_event_and_fails_run(
+    tmp_path,
+) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="chat_terminal_persistence_failure"))
+    manager = ChatRunManager(
+        orchestrator=_ScriptedOrchestrator(),
+        repository=repository,
+    )
+    original_persist = manager._persist_event
+
+    def fail_on_done(event) -> None:
+        if event.event_type == "done":
+            raise RuntimeError("terminal revision conflict")
+        original_persist(event)
+
+    manager._persist_event = fail_on_done
+    started = await manager.start_run("chat_terminal_persistence_failure", "terminal fail")
+    final = await manager.wait_for_run(started.run_id)
+    events = [event async for event in manager.subscribe(started.run_id)]
+
+    assert final.status is RunStatus.FAILED
+    assert [event.event_type for event in events].count("done") == 0
+    errors = [event for event in events if event.event_type == "error"]
+    assert len(errors) == 1
+    assert errors[0].data["persistence_failure"] is True
+    assert errors[0].terminal is True
+
+
+@pytest.mark.anyio
 async def test_persistence_failure_waits_for_worker_teardown_before_successor(
     tmp_path,
 ) -> None:
