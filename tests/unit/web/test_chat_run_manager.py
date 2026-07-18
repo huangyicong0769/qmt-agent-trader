@@ -360,7 +360,10 @@ async def test_cancel_is_idempotent_and_worker_confirms_cancelled(tmp_path) -> N
     assert cancelling.status is RunStatus.CANCELLING
     repeated = await manager.request_cancel(snapshot.run_id)
     assert repeated is not None
-    assert repeated.status is RunStatus.CANCELLING
+    # The worker can confirm cancellation between repeated requests.  A repeat
+    # is idempotent whether it observes the in-flight request or its committed
+    # terminal result.
+    assert repeated.status in {RunStatus.CANCELLING, RunStatus.CANCELLED}
 
     final = await manager.wait_for_run(snapshot.run_id)
     assert final.status is RunStatus.CANCELLED

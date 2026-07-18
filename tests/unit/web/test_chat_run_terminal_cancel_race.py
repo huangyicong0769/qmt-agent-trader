@@ -104,15 +104,21 @@ class _TeardownGateManager(ChatRunManager):
 
 
 class _ObservableAsyncLock:
-    """Expose an Event when a second coroutine waits for the Run lock."""
+    """Expose FIFO waiter arrival while a test owns the Run lock."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self.waiter_started = asyncio.Event()
+        self.second_waiter_started = asyncio.Event()
+        self.waiter_count = 0
 
     async def __aenter__(self) -> _ObservableAsyncLock:
         if self._lock.locked():
-            self.waiter_started.set()
+            self.waiter_count += 1
+            if self.waiter_count == 1:
+                self.waiter_started.set()
+            elif self.waiter_count == 2:
+                self.second_waiter_started.set()
         await self._lock.acquire()
         return self
 
@@ -300,6 +306,81 @@ async def test_done_commit_wins_over_cancel_waiting_for_the_same_run_lock(tmp_pa
     bus_types = [event.event_type for event in bus.get_history(started.run_id)]
     assert bus_types[-1] is AgentEventType.RUN_COMPLETED
     assert AgentEventType.RUN_CANCELLING not in bus_types
+
+
+@pytest.mark.anyio
+async def test_queued_cancel_converts_already_waiting_done_to_cancelled(tmp_path) -> None:
+    """Completion must re-read CANCELLING after its queued lock acquisition."""
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="queued_cancel_before_done_commit"))
+    orchestrator = _CancelAwareTerminalOrchestrator(honor_cancellation=False)
+    bus = EventBus()
+    manager = ChatRunManager(orchestrator=orchestrator, repository=repository, bus=bus)
+
+    started = await manager.start_run("queued_cancel_before_done_commit", "race")
+    await orchestrator.ready.wait()
+    run = manager._runs[started.run_id]
+    observable_lock = _ObservableAsyncLock()
+    run.event_lock = observable_lock  # type: ignore[assignment]
+
+    async with observable_lock:
+        cancel_task = asyncio.create_task(manager.request_cancel(started.run_id))
+        await asyncio.wait_for(observable_lock.waiter_started.wait(), timeout=0.2)
+
+        # The completion handler enters while the lock is still held, but it
+        # joins the queue after cancellation.  The test therefore exercises
+        # the exact stale RUNNING read that used to choose done too early.
+        orchestrator.release.set()
+        await asyncio.wait_for(observable_lock.second_waiter_started.wait(), timeout=0.2)
+        assert observable_lock.waiter_count == 2
+
+    cancel_snapshot = await cancel_task
+    final = await manager.wait_for_run(started.run_id)
+
+    assert final.status is RunStatus.CANCELLED
+    assert cancel_snapshot is not None
+    assert cancel_snapshot.status in {RunStatus.CANCELLING, RunStatus.CANCELLED}
+
+    events = [event async for event in manager.subscribe(started.run_id)]
+    ordered = [event for event in events if event.sequence > 0]
+    terminal_events = [event for event in ordered if event.terminal]
+    assert [event.event_type for event in ordered][-2:] == ["cancelling", "cancelled"]
+    assert all(event.event_type != "done" for event in ordered)
+    assert len(terminal_events) == 1
+    assert terminal_events[0] is ordered[-1]
+    assert terminal_events[0].sequence == max(event.sequence for event in ordered)
+
+    stored = repository.get("queued_cancel_before_done_commit")
+    assert stored is not None
+    persisted_types = [message.metadata.get("event_type") for message in stored.messages]
+    assert persisted_types[-2:] == ["cancelling", "cancelled"]
+    assert "done" not in persisted_types
+
+    bus_types = [event.event_type for event in bus.get_history(started.run_id)]
+    assert bus_types.count(AgentEventType.RUN_CANCELLING) == 1
+    assert bus_types.count(AgentEventType.RUN_CANCELLED) == 1
+    assert AgentEventType.RUN_COMPLETED not in bus_types
+    assert bus_types[-1] is AgentEventType.RUN_CANCELLED
+
+
+@pytest.mark.anyio
+async def test_cancelling_to_completed_transition_is_rejected(tmp_path) -> None:
+    repository = ChatSessionRepository(tmp_path / "sessions")
+    repository.create(ChatSession(session_id="reject_cancelling_completion"))
+    orchestrator = _CancelAwareTerminalOrchestrator(honor_cancellation=False)
+    manager = ChatRunManager(orchestrator=orchestrator, repository=repository)
+
+    started = await manager.start_run("reject_cancelling_completion", "stop")
+    await orchestrator.ready.wait()
+    cancelling = await manager.request_cancel(started.run_id)
+    assert cancelling is not None
+    assert cancelling.status is RunStatus.CANCELLING
+
+    with pytest.raises(InvalidRunTransition):
+        manager._transition(manager._runs[started.run_id], RunStatus.COMPLETED)
+
+    orchestrator.release.set()
+    assert (await manager.wait_for_run(started.run_id)).status is RunStatus.CANCELLED
 
 
 @pytest.mark.anyio
